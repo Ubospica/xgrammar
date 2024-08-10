@@ -130,7 +130,11 @@ class GrammarStateMatcher::Impl : public GrammarStateMatcherBase {
 
   bool AcceptToken(int32_t token_id, bool verbose = false);
 
+  bool _AcceptString(std::string input_str, bool verbose = false);
+
   void FindNextTokenBitmask(DLTensor* next_token_bitmask);
+
+  DLTensor FindNextTokenBitmask();
 
   std::string FindJumpForwardString();
 
@@ -252,6 +256,24 @@ bool GrammarStateMatcher::Impl::AcceptToken(int32_t token_id, bool verbose) {
   return true;
 }
 
+bool GrammarStateMatcher::Impl::_AcceptString(std::string input_str, bool verbose) {
+  int accepted_cnt = 0;
+  for (auto char_value : input_str) {
+    if (!AcceptChar(char_value, verbose)) {
+      if (verbose) {
+        XGRAMMAR_LOG(INFO) << "Matching failed after accepting " << accepted_cnt << " characters";
+      }
+      RollbackChars(accepted_cnt);
+      return false;
+    }
+    ++accepted_cnt;
+  }
+  if (verbose) {
+    XGRAMMAR_LOG(INFO) << "Matching string \"" << PrintAsEscapedUTF8(input_str) << "\" succeeded";
+  }
+  return true;
+}
+
 void GrammarStateMatcher::Impl::FindNextTokenBitmask(DLTensor* next_token_bitmask) {
   XGRAMMAR_CHECK(!IsTerminated()
   ) << "GrammarStateMatcher has terminated after accepting the stop token, but is trying to "
@@ -362,6 +384,38 @@ void GrammarStateMatcher::Impl::FindNextTokenBitmask(DLTensor* next_token_bitmas
   // Finally update the rejected_ids bitset
   bool can_reach_end = CanReachEnd();
   SetTokenBitmask(next_token_bitmask, tmp_accepted_bitset_, tmp_rejected_indices_, can_reach_end);
+}
+
+NDArray FindNextTokenBitmaskAsNDArray(GrammarStateMatcher matcher) {
+  auto init_ctx = matcher.as<GrammarStateMatcher::Impl>()->init_ctx_;
+  auto vocab_size = init_ctx->vocab_size;
+  auto bitset_size = DynamicBitset::CalculateBufferSize(vocab_size);
+  auto bitmask = NDArray::Empty(
+      ShapeTuple{static_cast<long>(bitset_size)}, DLDataType{kDLUInt, 32, 1}, DLDevice{kDLCPU, 0}
+  );
+  auto dltensor = const_cast<DLTensor*>(bitmask.operator->());
+  matcher->FindNextTokenBitmask(dltensor);
+  return bitmask;
+}
+
+void DLPackDeleter(struct DLManagedTensor * self) {
+  delete[] reinterpret_cast<uint32_t*>(self->dl_tensor.data);
+  delete[] self->dl_tensor.shape;
+  delete self;
+}
+
+DLTensor GrammarStateMatcher::Impl::FindNextTokenBitmask() {
+  DLTensor next_token_bitmask;
+  next_token_bitmask.data = new uint32_t[next_token_bitmask.shape[0]];
+  next_token_bitmask.device = DLDevice{kDLCPU, 0};
+  next_token_bitmask.ndim = 1;
+  next_token_bitmask.dtype = DLDataType{kDLUInt, 32, 1};
+  next_token_bitmask.shape =
+      new int64_t[1]{DynamicBitset::CalculateBufferSize(init_ctx_->vocab_size)};
+  next_token_bitmask.strides = nullptr;
+  next_token_bitmask.byte_offset = 0;
+  FindNextTokenBitmask(&next_token_bitmask);
+  return next_token_bitmask;
 }
 
 std::string GrammarStateMatcher::Impl::FindJumpForwardString() {
@@ -547,6 +601,24 @@ GrammarStateMatcher::GrammarStateMatcher(
 
 bool GrammarStateMatcher::AcceptToken(int32_t token_id, bool verbose) {
   return pimpl_->AcceptToken(token_id, verbose);
+}
+
+bool GrammarStateMatcher::_AcceptString(const std::string& input_str, bool verbose) {
+  bool accepted = true;
+  for (auto char_value : str) {
+    if (!pimpl_->AcceptChar(char_value, verbose)) {
+      accepted = false;
+      break;
+    }
+  }
+  if (accepted) {
+    pimpl_->token_length_history.push_back(str.size());
+    if (static_cast<int>(pimpl_->token_length_history.size()) > pimpl_->max_rollback_steps_) {
+      pimpl_->DiscardEarliestChars(pimpl_->token_length_history.front());
+      pimpl_->token_length_history.pop_front();
+    }
+  }
+  return accepted;
 }
 
 void GrammarStateMatcher::FindNextTokenBitmask(DLTensor* next_token_bitmask) {

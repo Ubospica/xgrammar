@@ -198,7 +198,7 @@ class GrammarStateMatcher {
    * construction of GrammarStateMatcher.
    * \param grammar The grammar that the matcher follows.
    * \param token_table The tokens that the matcher requires for matching.
-   */ 
+   */
   static std::shared_ptr<GrammarStateInitContext> CreateInitContext(
       const BNFGrammar& grammar, const std::vector<std::string>& token_table
   );
@@ -215,6 +215,8 @@ class GrammarStateMatcher {
    */
   bool AcceptToken(int32_t token_id, bool verbose = false);
 
+  bool _AcceptString(std::string input_str, bool verbose = false);
+
   /*!
    * \brief Find the set of tokens that are acceptable for the next step and store them in a
    * bitmask.
@@ -222,6 +224,8 @@ class GrammarStateMatcher {
    * and its shape needs to be (ceil(vocab_size, 32),), with a dtype of uint32.
    */
   void FindNextTokenBitmask(DLTensor* next_token_bitmask);
+
+  DLManagedTensor FindNextTokenBitmask();
 
   /*!
    * \brief Find the jump-forward string for jump-forward decoding. This is the longest string that
