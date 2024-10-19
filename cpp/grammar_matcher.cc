@@ -7,7 +7,7 @@
 #include <chrono>
 #include <queue>
 
-#include "grammar_ast.h"
+#include "grammar_data_structure.h"
 #include "grammar_matcher_base.h"
 #include "grammar_matcher_preproc.h"
 #include "grammar_matcher_state.h"

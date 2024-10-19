@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <unordered_map>
 
-#include "grammar_ast.h"
+#include "grammar_data_structure.h"
 
 namespace xgrammar {
 

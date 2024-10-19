@@ -11,7 +11,7 @@
 
 #include <string>
 
-#include "grammar_ast.h"
+#include "grammar_data_structure.h"
 
 namespace xgrammar {
 

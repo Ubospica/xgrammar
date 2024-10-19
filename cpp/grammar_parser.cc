@@ -9,8 +9,8 @@
 
 #include <memory>
 
-#include "grammar_ast.h"
 #include "grammar_builder.h"
+#include "grammar_data_structure.h"
 #include "support/encoding.h"
 
 namespace xgrammar {

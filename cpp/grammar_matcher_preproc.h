@@ -11,7 +11,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "grammar_ast.h"
+#include "grammar_data_structure.h"
 #include "grammar_matcher_base.h"
 #include "support/dynamic_bitset.h"
 #include "support/encoding.h"
