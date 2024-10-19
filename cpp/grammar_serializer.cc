@@ -142,19 +142,46 @@ std::string BNFGrammarJSONSerializer::ToString() {
   }
   grammar_json_obj["rules"] = picojson::value(rules_json);
 
-  picojson::array rule_expr_data_json;
-  for (const auto& data : grammar_->rule_expr_data_) {
-    rule_expr_data_json.push_back(picojson::value(static_cast<int64_t>(data)));
-  }
-  grammar_json_obj["rule_expr_data"] = picojson::value(rule_expr_data_json);
-  picojson::array rule_expr_indptr_json;
-  for (const auto& index_ptr : grammar_->rule_expr_indptr_) {
-    rule_expr_indptr_json.push_back(picojson::value(static_cast<int64_t>(index_ptr)));
-  }
-  grammar_json_obj["rule_expr_indptr"] = picojson::value(rule_expr_indptr_json);
+  grammar_json_obj["rule_expr_data"] = grammar_->rule_expr_data_.Serialize();
 
   auto grammar_json = picojson::value(grammar_json_obj);
   return grammar_json.serialize(prettify_);
+}
+
+BNFGrammar BNFGrammarDeserializer::Deserialize(std::string json_string) {
+  auto node = std::make_shared<BNFGrammar::Impl>();
+
+  picojson::value serialized_value;
+  std::string err = picojson::parse(serialized_value, json_string);
+
+  XGRAMMAR_CHECK(err.empty() && serialized_value.is<picojson::object>())
+      << "Failed to parse JSON object from string: " << json_string;
+  auto serialized_obj = serialized_value.get<picojson::object>();
+
+  // rules
+  XGRAMMAR_CHECK(serialized_obj.count("rules") && serialized_obj["rules"].is<picojson::array>())
+      << "Missing or invalid 'rules' field in JSON object";
+  auto rules_array = serialized_obj["rules"].get<picojson::array>();
+
+  XGRAMMAR_CHECK(rules_array.size() > 0) << "Rules array is empty";
+  for (const auto& rule_value : rules_array) {
+    XGRAMMAR_CHECK(rule_value.is<picojson::object>()) << "Invalid rule object in rules array";
+    auto rule_obj = rule_value.get<picojson::object>();
+    XGRAMMAR_CHECK(rule_obj.count("name") && rule_obj["name"].is<std::string>())
+        << "Missing or invalid 'name' field in rule object";
+    auto name = rule_obj["name"].get<std::string>();
+    XGRAMMAR_CHECK(rule_obj.count("body_expr_id") && rule_obj["body_expr_id"].is<int64_t>())
+        << "Missing or invalid 'body_expr_id' field in rule object";
+    auto rule_expr = static_cast<int32_t>(rule_obj["body_expr_id"].get<int64_t>());
+    node->rules_.push_back(BNFGrammar::Impl::Rule({name, rule_expr}));
+  }
+
+  // rule_expr_data
+  XGRAMMAR_CHECK(serialized_obj.count("rule_expr_data"))
+      << "Missing or invalid 'rule_expr_data' field in JSON object";
+  node->rule_expr_data_ = CSRArray<int32_t>::Deserialize(serialized_obj["rule_expr_data"]);
+
+  return BNFGrammar(node);
 }
 
 }  // namespace xgrammar

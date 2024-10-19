@@ -1,5 +1,6 @@
 """This test uses the optimized JSON grammar provided by the grammar library."""
 
+import sys
 from typing import List, Optional
 
 import pytest
@@ -308,4 +309,4 @@ def test_stop_token_ids(tokenizer_path: str, stop_token_ids: List[int]):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    pytest.main(sys.argv)

@@ -11,6 +11,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 /*!
  * \brief Whether or not customize the logging output.
@@ -233,5 +234,22 @@ class LogMessage {
 #endif  // XGRAMMAR_ENABLE_LOG_DEBUG
 
 }  // namespace xgrammar
+
+namespace std {
+
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::vector<T>& vec) {
+  os << "[";
+  for (size_t i = 0; i < vec.size(); ++i) {
+    if (i > 0) {
+      os << ", ";
+    }
+    os << vec[i];
+  }
+  os << "]";
+  return os;
+}
+
+}  // namespace std
 
 #endif  // XGRAMMAR_SUPPORT_LOGGING_H_

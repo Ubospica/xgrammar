@@ -43,19 +43,6 @@ class EBNFParser {
   };
 };
 
-/*!
- * \brief Parse a BNF grammar from the raw representation of the AST in JSON format.
- */
-class BNFJSONParser {
- public:
-  /*!
-   * \brief Parse the JSON string
-   * \param json_string The JSON string.
-   * \return The parsed BNF grammar.
-   */
-  static BNFGrammar Parse(std::string json_string);
-};
-
 }  // namespace xgrammar
 
 #endif  // XGRAMMAR_GRAMMAR_PARSER_H_

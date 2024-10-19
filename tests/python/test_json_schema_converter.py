@@ -1,4 +1,5 @@
 import json
+import sys
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
@@ -488,4 +489,4 @@ main ::= "{" "" "\"name 1\"" ": " main_prop_0 "" "}"
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    pytest.main(sys.argv)

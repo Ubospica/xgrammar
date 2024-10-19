@@ -29,11 +29,11 @@ std::ostream& operator<<(std::ostream& os, const BNFGrammar& grammar) {
 }
 
 std::string BNFGrammar::Serialize(bool prettify) const {
-  return BNFGrammarJSONSerializer(*this).ToString();
+  return BNFGrammarJSONSerializer(*this, prettify).ToString();
 }
 
 BNFGrammar BNFGrammar::Deserialize(const std::string& json_string) {
-  return BNFJSONParser::Parse(json_string);
+  return BNFGrammarDeserializer::Deserialize(json_string);
 }
 
 // Optimized json grammar for the speed of the grammar matcher

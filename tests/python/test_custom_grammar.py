@@ -2,6 +2,7 @@
 a unoptimized, non-simplified EBNF string. This is to test the robustness of the grammar matcher.
 """
 
+import sys
 import time
 from typing import List, Optional
 
@@ -364,4 +365,4 @@ def test_find_next_rejected_tokens(
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    pytest.main(sys.argv)

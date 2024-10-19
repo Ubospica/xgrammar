@@ -1,5 +1,6 @@
 """This test uses the optimized JSON grammar provided by the grammar library."""
 
+import sys
 import time
 from typing import List, Optional
 
@@ -318,4 +319,4 @@ def test_find_next_rejected_tokens(
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    pytest.main(sys.argv)

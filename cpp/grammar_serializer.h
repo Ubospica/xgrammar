@@ -110,6 +110,19 @@ class BNFGrammarJSONSerializer : public BNFGrammarSerializer {
   bool prettify_;
 };
 
+/*!
+ * \brief Parse a BNF grammar from the raw representation of the AST in JSON format.
+ */
+class BNFGrammarDeserializer {
+ public:
+  /*!
+   * \brief Parse the JSON string
+   * \param json_string The JSON string.
+   * \return The parsed BNF grammar.
+   */
+  static BNFGrammar Deserialize(std::string json_string);
+};
+
 }  // namespace xgrammar
 
 #endif  // XGRAMMAR_GRAMMAR_SERIALIZER_H_

@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 
@@ -291,13 +292,14 @@ c ::= [a-z]
             {"body_expr_id": 9, "name": "b"},
             {"body_expr_id": 12, "name": "c"},
         ],
-        "rule_expr_indptr": [0, 3, 6, 10, 13, 16, 20, 24, 29, 32, 35, 40, 43],
-        "rule_expr_data": [
+        "rule_expr_data": {
             # fmt: off
-            4,1,1,4,1,2,5,2,0,1,4,1,1,4,1,0,5,2,3,4,6,2,2,5,0,3,98,99,
-            100,5,1,7,6,1,8,1,3,0,97,122,5,1,10,6,1,11,
+            "data": [
+                4,1,4,2,5,0,1,4,1,4,0,5,3,4,6,2,5,0,98,99,100,5,7,6,8,1,0,97,122,5,10,6,11
+            ],
+            "indptr": [0, 2, 4, 7, 9, 11, 14, 17, 21, 23, 25, 29, 31, 33]
             # fmt: on
-        ],
+        },
     }
     bnf_grammar = BNFGrammar(before, main_rule="main")
     after_str = bnf_grammar.serialize(prettify=False)
@@ -325,4 +327,4 @@ d_1 ::= ("" | ("d"))
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    pytest.main(sys.argv)

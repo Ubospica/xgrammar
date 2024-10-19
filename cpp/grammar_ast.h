@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "support/csr_array.h"
 #include "support/logging.h"
 
 namespace xgrammar {
@@ -120,8 +121,7 @@ class BNFGrammar::Impl {
     int32_t size() const { return data_len; }
     /*! \brief Get the i-th element of the data array. */
     const int32_t& operator[](int i) const {
-      XGRAMMAR_DCHECK(i >= 0 && i < static_cast<int32_t>(data_len))
-          << "Index " << i << " is out of bound";
+      XGRAMMAR_DCHECK(i >= 0 && i < size()) << "Index " << i << " is out of bound";
       return data[i];
     }
     const int32_t* begin() const { return data; }
@@ -129,35 +129,30 @@ class BNFGrammar::Impl {
   };
 
   /*! \brief Get the number of rule_exprs. */
-  size_t NumRuleExprs() const { return rule_expr_indptr_.size(); }
+  int32_t NumRuleExprs() const { return rule_expr_data_.Size(); }
   /*! \brief Get the rule_expr with the given id. */
   RuleExpr GetRuleExpr(int32_t rule_expr_id) const {
-    XGRAMMAR_DCHECK(
-        rule_expr_id >= 0 && rule_expr_id < static_cast<int32_t>(rule_expr_indptr_.size())
-    ) << "rule_expr_id "
-      << rule_expr_id << " is out of bound";
-    int start_index = rule_expr_indptr_[rule_expr_id];
-    auto start_ptr = rule_expr_data_.data() + start_index;
-    auto type = static_cast<RuleExprType>(start_ptr[0]);
-    auto data_ptr = start_ptr + 2;
-    auto data_len = start_ptr[1];
-    return {type, data_ptr, data_len};
+    XGRAMMAR_DCHECK(rule_expr_id >= 0 && rule_expr_id < NumRuleExprs())
+        << "rule_expr_id " << rule_expr_id << " is out of bound";
+    auto row = rule_expr_data_[rule_expr_id];
+    return {static_cast<RuleExprType>(row[0]), row.data + 1, row.data_len - 1};
   }
 
  private:
   /*! \brief The rules of the grammar. rule_id corresponds the index of this vector. */
   std::vector<Rule> rules_;
-  /*! \brief The data of all rule_exprs. */
-  std::vector<int32_t> rule_expr_data_;
-  /*! \brief The start index of every rule_expr in rule_expr_data_. rule_expr_id is the index
-   * to the elements in this vector. */
-  std::vector<int32_t> rule_expr_indptr_;
+  CSRArray<int32_t> rule_expr_data_;
+  // /*! \brief The data of all rule_exprs. */
+  // std::vector<int32_t> rule_expr_data_;
+  // /*! \brief The start index of every rule_expr in rule_expr_data_. rule_expr_id is the index
+  //  * to the elements in this vector. */
+  // std::vector<int32_t> rule_expr_indptr_;
   /*! \brief The id of the main rule. */
   int32_t main_rule_id_ = -1;
 
   friend class BNFGrammarBuilder;
   friend class BNFGrammarJSONSerializer;
-  friend class BNFJSONParser;
+  friend class BNFGrammarDeserializer;
 };
 
 }  // namespace xgrammar
