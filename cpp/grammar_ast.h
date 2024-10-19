@@ -142,12 +142,6 @@ class BNFGrammar::Impl {
   /*! \brief The rules of the grammar. rule_id corresponds the index of this vector. */
   std::vector<Rule> rules_;
   CSRArray<int32_t> rule_expr_data_;
-  // /*! \brief The data of all rule_exprs. */
-  // std::vector<int32_t> rule_expr_data_;
-  // /*! \brief The start index of every rule_expr in rule_expr_data_. rule_expr_id is the index
-  //  * to the elements in this vector. */
-  // std::vector<int32_t> rule_expr_indptr_;
-  /*! \brief The id of the main rule. */
   int32_t main_rule_id_ = -1;
 
   friend class BNFGrammarBuilder;

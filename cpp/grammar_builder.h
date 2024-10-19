@@ -53,16 +53,6 @@ class BNFGrammarBuilder {
     );
   }
 
-  // int32_t AddRuleExpr(const RuleExpr& rule_expr) {
-  //   grammar_->rule_expr_indptr_.push_back(grammar_->rule_expr_data_.size());
-  //   grammar_->rule_expr_data_.push_back(static_cast<int32_t>(rule_expr.type));
-  //   grammar_->rule_expr_data_.push_back(rule_expr.data_len);
-  //   grammar_->rule_expr_data_.insert(
-  //       grammar_->rule_expr_data_.end(), rule_expr.data, rule_expr.data + rule_expr.data_len
-  //   );
-  //   return static_cast<int32_t>(grammar_->rule_expr_indptr_.size()) - 1;
-  // }
-
   /*!
    * \brief Add a RuleExpr for string stored in bytes.
    * \param bytes A vector of int32_t, each representing a byte (0~255) in the string.
