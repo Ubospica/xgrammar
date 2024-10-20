@@ -9,8 +9,6 @@
 
 #include <xgrammar/xgrammar.h>
 
-#include "support/logging.h"
-
 namespace xgrammar {
 
 /*!
@@ -33,14 +31,6 @@ class EBNFParser {
    * \return The parsed grammar.
    */
   static BNFGrammar Parse(std::string ebnf_string, std::string root_rule = "root");
-
-  /*!
-   * \brief The exception thrown when parsing fails.
-   */
-  class ParseError : public Error {
-   public:
-    ParseError(const std::string& msg) : Error(msg) {}
-  };
 };
 
 }  // namespace xgrammar

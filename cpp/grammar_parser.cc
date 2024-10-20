@@ -22,7 +22,6 @@ class EBNFParserImpl {
 
  private:
   using Rule = BNFGrammar::Impl::Rule;
-  using ParseError = EBNFParser::ParseError;
 
   // Parsing different parts of the grammar
   std::string ParseName(bool accept_empty = false);
