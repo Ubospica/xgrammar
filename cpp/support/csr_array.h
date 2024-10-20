@@ -137,7 +137,7 @@ class CSRArray {
 
   /*!
    * \brief Insert a new row of non-contiguous data into the CSRArray. This method inserts a
-   * single element followed by a sequence of elements. This is useful in the RuleExpr data
+   * single element followed by a sequence of elements. This is useful in the GrammarExpr data
    * structure.
    * \param data_1 The first element to be inserted.
    * \param data_2 Pointer to the remaining data to be inserted.

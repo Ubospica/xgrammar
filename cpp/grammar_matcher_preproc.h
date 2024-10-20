@@ -173,8 +173,8 @@ class GrammarMatcherForInitContext : public GrammarMatcherBase {
   );
 
  private:
-  using RuleExpr = BNFGrammar::Impl::RuleExpr;
-  using RuleExprType = BNFGrammar::Impl::RuleExprType;
+  using GrammarExpr = BNFGrammar::Impl::GrammarExpr;
+  using GrammarExprType = BNFGrammar::Impl::GrammarExprType;
 
   /*! \brief Check if a token can pass the lookahead assertion. */
   bool IsTokenPassLookaheadAssertion(
@@ -356,7 +356,7 @@ inline CatagorizedTokens GrammarMatcherForInitContext::GetCatagorizedTokens(
 GrammarMatcherInitContext::Impl::Impl(
     const BNFGrammar& grammar, const std::vector<std::string>& raw_vocab
 ) {
-  using RuleExprType = BNFGrammar::Impl::RuleExprType;
+  using GrammarExprType = BNFGrammar::Impl::GrammarExprType;
 
   this->grammar = grammar;
   this->vocab_size = raw_vocab.size();
@@ -399,17 +399,17 @@ GrammarMatcherInitContext::Impl::Impl(
   auto root_rule_id = grammar->GetRootRuleId();
   for (int rule_id = 0; rule_id < static_cast<int>(grammar->NumRules()); ++rule_id) {
     auto rule = grammar->GetRule(rule_id);
-    auto rule_body = grammar->GetRuleExpr(rule.body_expr_id);
-    XGRAMMAR_DCHECK(rule_body.type == RuleExprType::kChoices);
+    auto rule_body = grammar->GetGrammarExpr(rule.body_expr_id);
+    XGRAMMAR_DCHECK(rule_body.type == GrammarExprType::kChoices);
     for (auto sequence_id : rule_body) {
-      auto sequence = grammar->GetRuleExpr(sequence_id);
-      if (sequence.type == RuleExprType::kEmptyStr) {
+      auto sequence = grammar->GetGrammarExpr(sequence_id);
+      if (sequence.type == GrammarExprType::kEmptyStr) {
         continue;
       }
-      XGRAMMAR_DCHECK(sequence.type == RuleExprType::kSequence);
+      XGRAMMAR_DCHECK(sequence.type == GrammarExprType::kSequence);
       for (int element_id = 0; element_id < sequence.size(); ++element_id) {
-        auto element = grammar->GetRuleExpr(sequence[element_id]);
-        if (element.type == RuleExprType::kRuleRef) {
+        auto element = grammar->GetGrammarExpr(sequence[element_id]);
+        if (element.type == GrammarExprType::kRuleRef) {
           continue;
         }
 
@@ -422,15 +422,15 @@ GrammarMatcherInitContext::Impl::Impl(
         };
 
         auto cur_rule_position = RulePosition(rule_id, sequence_id, element_id);
-        if (element.type == RuleExprType::kByteString) {
+        if (element.type == GrammarExprType::kByteString) {
           for (int idx = 0; idx < element.size(); ++idx) {
             cur_rule_position.element_in_string = idx;
             add_catagorized_tokens(cur_rule_position);
           }
         } else {
           XGRAMMAR_DCHECK(
-              element.type == RuleExprType::kCharacterClassStar ||
-              element.type == RuleExprType::kCharacterClass
+              element.type == GrammarExprType::kCharacterClassStar ||
+              element.type == GrammarExprType::kCharacterClass
           );
           for (int left_utf8_bytes = 0; left_utf8_bytes <= 3; ++left_utf8_bytes) {
             cur_rule_position.left_utf8_bytes = left_utf8_bytes;

@@ -16,38 +16,20 @@
 namespace xgrammar {
 
 /*!
- * \brief Serialize the abstract syntax tree of a BNF grammar to a string.
- */
-class BNFGrammarSerializer {
- public:
-  /*!
-   * \brief Constructor.
-   * \param grammar The grammar to print.
-   */
-  explicit BNFGrammarSerializer(const BNFGrammar& grammar) : grammar_(grammar) {}
-
-  /*! \brief Serialize the grammar to string. */
-  virtual std::string ToString() = 0;
-
- protected:
-  const BNFGrammar& grammar_;
-};
-
-/*!
  * \brief Prints the BNF AST with standard BNF format.
  */
-class BNFGrammarPrinter : public BNFGrammarSerializer {
+class BNFGrammarPrinter {
  private:
   using Rule = BNFGrammar::Impl::Rule;
-  using RuleExprType = BNFGrammar::Impl::RuleExprType;
-  using RuleExpr = BNFGrammar::Impl::RuleExpr;
+  using GrammarExprType = BNFGrammar::Impl::GrammarExprType;
+  using GrammarExpr = BNFGrammar::Impl::GrammarExpr;
 
  public:
   /*!
    * \brief Constructor.
    * \param grammar The grammar to print.
    */
-  explicit BNFGrammarPrinter(const BNFGrammar& grammar) : BNFGrammarSerializer(grammar) {}
+  explicit BNFGrammarPrinter(const BNFGrammar& grammar) {}
 
   /*! \brief Print the complete grammar. */
   std::string ToString() final;
@@ -56,26 +38,28 @@ class BNFGrammarPrinter : public BNFGrammarSerializer {
   std::string PrintRule(const Rule& rule);
   /*! \brief Print a rule corresponding to the given id. */
   std::string PrintRule(int32_t rule_id);
-  /*! \brief Print a RuleExpr. */
-  std::string PrintRuleExpr(const RuleExpr& rule_expr);
-  /*! \brief Print a RuleExpr corresponding to the given id. */
-  std::string PrintRuleExpr(int32_t rule_expr_id);
+  /*! \brief Print a GrammarExpr. */
+  std::string PrintGrammarExpr(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr corresponding to the given id. */
+  std::string PrintGrammarExpr(int32_t grammar_expr_id);
 
  private:
-  /*! \brief Print a RuleExpr for byte string. */
-  std::string PrintByteString(const RuleExpr& rule_expr);
-  /*! \brief Print a RuleExpr for character class. */
-  std::string PrintCharacterClass(const RuleExpr& rule_expr);
-  /*! \brief Print a RuleExpr for a star quantifier of a character class. */
-  std::string PrintCharacterClassStar(const RuleExpr& rule_expr);
-  /*! \brief Print a RuleExpr for empty string. */
-  std::string PrintEmptyStr(const RuleExpr& rule_expr);
-  /*! \brief Print a RuleExpr for rule reference. */
-  std::string PrintRuleRef(const RuleExpr& rule_expr);
-  /*! \brief Print a RuleExpr for rule_expr sequence. */
-  std::string PrintSequence(const RuleExpr& rule_expr);
-  /*! \brief Print a RuleExpr for rule_expr choices. */
-  std::string PrintChoices(const RuleExpr& rule_expr);
+  /*! \brief Print a GrammarExpr for byte string. */
+  std::string PrintByteString(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for character class. */
+  std::string PrintCharacterClass(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for a quantifier. */
+  std::string PrintQuantifier(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for a quantifier range. */
+  std::string PrintQuantifierRange(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for empty string. */
+  std::string PrintEmptyStr(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for rule reference. */
+  std::string PrintRuleRef(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for grammar_expr sequence. */
+  std::string PrintSequence(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for grammar_expr choices. */
+  std::string PrintChoices(const GrammarExpr& grammar_expr);
 };
 
 /*!
@@ -84,14 +68,14 @@ class BNFGrammarPrinter : public BNFGrammarSerializer {
  * \details JSON format:
  *  {
  *    "rules": [
- *      {"name": "...", "rule_expr": rule_expr_id},
- *      {"name": "...", "rule_expr": rule_expr_id},
+ *      {"name": "...", "grammar_expr": grammar_expr_id},
+ *      {"name": "...", "grammar_expr": grammar_expr_id},
  *    ],
- *    "rule_expr_data": [integers...],
- *    "rule_expr_indptr": [integers...],
+ *    "grammar_expr_data": [integers...],
+ *    "grammar_expr_indptr": [integers...],
  *  }
  */
-class BNFGrammarJSONSerializer : public BNFGrammarSerializer {
+class BNFGrammarJSONSerializer {
  public:
   /*!
    * \brief Constructor.

@@ -21,7 +21,7 @@ c ::= (("c"))
 
 
 def test_ebnf():
-    before = """root ::= b c | b main
+    before = """root ::= b c | b root
 b ::= "ab"*
 c ::= [acep-z]+
 d ::= "d"?
@@ -282,7 +282,7 @@ def test_error():
 
 
 def test_to_json():
-    before = """root ::= b c | b main
+    before = """root ::= b c | b root
 b ::= "bcd"
 c ::= [a-z]
 """
@@ -292,7 +292,7 @@ c ::= [a-z]
             {"body_expr_id": 9, "name": "b"},
             {"body_expr_id": 12, "name": "c"},
         ],
-        "rule_expr_data": {
+        "grammar_expr_data": {
             # fmt: off
             "data": [
                 4,1,4,2,5,0,1,4,1,4,0,5,3,4,6,2,5,0,98,99,100,5,7,6,8,1,0,97,122,5,10,6,11

@@ -29,19 +29,19 @@ class SingleElementExprEliminator : public BNFGrammarMutator {
     if (lookahead_assertion_id == -1) {
       return -1;
     }
-    auto rule_expr = grammar_->GetRuleExpr(lookahead_assertion_id);
-    XGRAMMAR_CHECK(rule_expr.type == RuleExprType::kSequence);
+    auto grammar_expr = grammar_->GetGrammarExpr(lookahead_assertion_id);
+    XGRAMMAR_CHECK(grammar_expr.type == GrammarExprType::kSequence);
 
     std::vector<int32_t> sequence_ids;
-    for (int32_t i : rule_expr) {
+    for (int32_t i : grammar_expr) {
       sequence_ids.push_back(VisitExpr(i));
     }
     return builder_.AddSequence(sequence_ids);
   }
 
-  int32_t VisitSequence(const RuleExpr& rule_expr) final {
+  int32_t VisitSequence(const GrammarExpr& grammar_expr) final {
     std::vector<int32_t> sequence_ids;
-    for (int32_t i : rule_expr) {
+    for (int32_t i : grammar_expr) {
       sequence_ids.push_back(VisitExpr(i));
     }
     if (sequence_ids.size() == 1) {
@@ -50,9 +50,9 @@ class SingleElementExprEliminator : public BNFGrammarMutator {
     return builder_.AddSequence(sequence_ids);
   }
 
-  int32_t VisitChoices(const RuleExpr& rule_expr) final {
+  int32_t VisitChoices(const GrammarExpr& grammar_expr) final {
     std::vector<int32_t> choice_ids;
-    for (int32_t i : rule_expr) {
+    for (int32_t i : grammar_expr) {
       choice_ids.push_back(VisitExpr(i));
     }
     if (choice_ids.size() == 1) {
@@ -61,9 +61,9 @@ class SingleElementExprEliminator : public BNFGrammarMutator {
     return builder_.AddChoices(choice_ids);
   }
 
-  int32_t VisitCharacterClass(const RuleExpr& rule_expr) final {
-    if (rule_expr.data_len == 3 && rule_expr[0] == 0 && rule_expr[1] == rule_expr[2]) {
-      std::string str = PrintAsUTF8(rule_expr[1]);
+  int32_t VisitCharacterClass(const GrammarExpr& grammar_expr) final {
+    if (grammar_expr.data_len == 3 && grammar_expr[0] == 0 && grammar_expr[1] == grammar_expr[2]) {
+      std::string str = PrintAsUTF8(grammar_expr[1]);
       std::vector<int32_t> bytes;
       bytes.reserve(str.size());
       for (char c : str) {
@@ -71,7 +71,7 @@ class SingleElementExprEliminator : public BNFGrammarMutator {
       }
       return builder_.AddByteString(bytes);
     }
-    return builder_.AddRuleExpr(rule_expr);
+    return builder_.AddGrammarExpr(grammar_expr);
   }
 };
 
@@ -102,9 +102,9 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
     }
     for (int i = 0; i < static_cast<int>(grammar_->NumRules()); ++i) {
       auto rule = grammar_->GetRule(i);
-      auto rule_expr = grammar_->GetRuleExpr(rule.body_expr_id);
+      auto grammar_expr = grammar_->GetGrammarExpr(rule.body_expr_id);
       cur_rule_name_ = rule.name;
-      auto new_body_expr_id = VisitRuleBody(rule_expr);
+      auto new_body_expr_id = VisitRuleBody(grammar_expr);
       builder_.UpdateRuleBody(i, new_body_expr_id);
       builder_.AddLookaheadAssertion(i, VisitLookaheadAssertion(rule.lookahead_assertion_id));
     }
@@ -116,52 +116,52 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
     if (lookahead_assertion_id == -1) {
       return -1;
     }
-    auto assertion_expr = grammar_->GetRuleExpr(lookahead_assertion_id);
+    auto assertion_expr = grammar_->GetGrammarExpr(lookahead_assertion_id);
     return builder_.AddSequence(VisitSequence_(assertion_expr));
   }
 
-  /*! \brief Visit a RuleExpr as a rule body. */
-  int32_t VisitRuleBody(const RuleExpr& rule_expr) {
-    switch (rule_expr.type) {
-      case RuleExprType::kSequence:
-        return builder_.AddChoices({builder_.AddSequence(VisitSequence_(rule_expr))});
-      case RuleExprType::kChoices:
-        return builder_.AddChoices(VisitChoices_(rule_expr));
-      case RuleExprType::kEmptyStr:
+  /*! \brief Visit a GrammarExpr as a rule body. */
+  int32_t VisitRuleBody(const GrammarExpr& grammar_expr) {
+    switch (grammar_expr.type) {
+      case GrammarExprType::kSequence:
+        return builder_.AddChoices({builder_.AddSequence(VisitSequence_(grammar_expr))});
+      case GrammarExprType::kChoices:
+        return builder_.AddChoices(VisitChoices_(grammar_expr));
+      case GrammarExprType::kEmptyStr:
         return builder_.AddChoices({builder_.AddEmptyStr()});
-      case RuleExprType::kByteString:
-      case RuleExprType::kCharacterClass:
-      case RuleExprType::kCharacterClassStar:
-      case RuleExprType::kRuleRef:
-        return builder_.AddChoices({builder_.AddSequence({builder_.AddRuleExpr(rule_expr)})});
+      case GrammarExprType::kByteString:
+      case GrammarExprType::kCharacterClass:
+      case GrammarExprType::kCharacterClassStar:
+      case GrammarExprType::kRuleRef:
+        return builder_.AddChoices({builder_.AddSequence({builder_.AddGrammarExpr(grammar_expr)})});
       default:
-        XGRAMMAR_LOG(FATAL) << "Unexpected sequence type: " << static_cast<int>(rule_expr.type);
+        XGRAMMAR_LOG(FATAL) << "Unexpected sequence type: " << static_cast<int>(grammar_expr.type);
     }
   }
 
   /*!
-   * \brief Visit a RuleExpr containing choices.
-   * \returns A list of new choice RuleExpr ids.
+   * \brief Visit a GrammarExpr containing choices.
+   * \returns A list of new choice GrammarExpr ids.
    */
-  std::vector<int32_t> VisitChoices_(const RuleExpr& rule_expr) {
+  std::vector<int32_t> VisitChoices_(const GrammarExpr& grammar_expr) {
     std::vector<int32_t> new_choice_ids;
     bool found_empty = false;
-    for (auto i : rule_expr) {
-      auto choice_expr = grammar_->GetRuleExpr(i);
+    for (auto i : grammar_expr) {
+      auto choice_expr = grammar_->GetGrammarExpr(i);
       switch (choice_expr.type) {
-        case RuleExprType::kSequence:
+        case GrammarExprType::kSequence:
           VisitSequenceInChoices(choice_expr, &new_choice_ids, &found_empty);
           break;
-        case RuleExprType::kChoices:
+        case GrammarExprType::kChoices:
           VisitChoicesInChoices(choice_expr, &new_choice_ids, &found_empty);
           break;
-        case RuleExprType::kEmptyStr:
+        case GrammarExprType::kEmptyStr:
           found_empty = true;
           break;
-        case RuleExprType::kByteString:
-        case RuleExprType::kCharacterClass:
-        case RuleExprType::kCharacterClassStar:
-        case RuleExprType::kRuleRef:
+        case GrammarExprType::kByteString:
+        case GrammarExprType::kCharacterClass:
+        case GrammarExprType::kCharacterClassStar:
+        case GrammarExprType::kRuleRef:
           VisitElementInChoices(choice_expr, &new_choice_ids);
           break;
         default:
@@ -175,11 +175,11 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
     return new_choice_ids;
   }
 
-  /*! \brief Visit a sequence RuleExpr that is one of a list of choices. */
+  /*! \brief Visit a sequence GrammarExpr that is one of a list of choices. */
   void VisitSequenceInChoices(
-      const RuleExpr& rule_expr, std::vector<int32_t>* new_choice_ids, bool* found_empty
+      const GrammarExpr& grammar_expr, std::vector<int32_t>* new_choice_ids, bool* found_empty
   ) {
-    auto sub_sequence_ids = VisitSequence_(rule_expr);
+    auto sub_sequence_ids = VisitSequence_(grammar_expr);
     if (sub_sequence_ids.size() == 0) {
       *found_empty = true;
     } else {
@@ -187,12 +187,13 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
     }
   }
 
-  /*! \brief Visit a choice RuleExpr that is one of a list of choices. */
+  /*! \brief Visit a choice GrammarExpr that is one of a list of choices. */
   void VisitChoicesInChoices(
-      const RuleExpr& rule_expr, std::vector<int32_t>* new_choice_ids, bool* found_empty
+      const GrammarExpr& grammar_expr, std::vector<int32_t>* new_choice_ids, bool* found_empty
   ) {
-    auto sub_choice_ids = VisitChoices_(rule_expr);
-    bool contains_empty = builder_.GetRuleExpr(sub_choice_ids[0]).type == RuleExprType::kEmptyStr;
+    auto sub_choice_ids = VisitChoices_(grammar_expr);
+    bool contains_empty =
+        builder_.GetGrammarExpr(sub_choice_ids[0]).type == GrammarExprType::kEmptyStr;
     if (contains_empty) {
       *found_empty = true;
       new_choice_ids->insert(
@@ -203,33 +204,35 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
     }
   }
 
-  /*! \brief Visit an atom element RuleExpr that is one of a list of choices. */
-  void VisitElementInChoices(const RuleExpr& rule_expr, std::vector<int32_t>* new_choice_ids) {
-    auto sub_expr_id = builder_.AddRuleExpr(rule_expr);
+  /*! \brief Visit an atom element GrammarExpr that is one of a list of choices. */
+  void VisitElementInChoices(
+      const GrammarExpr& grammar_expr, std::vector<int32_t>* new_choice_ids
+  ) {
+    auto sub_expr_id = builder_.AddGrammarExpr(grammar_expr);
     new_choice_ids->push_back(builder_.AddSequence({sub_expr_id}));
   }
 
   /*!
-   * \brief Visit a RuleExpr containing a sequence.
-   * \returns A list of new sequence RuleExpr ids.
+   * \brief Visit a GrammarExpr containing a sequence.
+   * \returns A list of new sequence GrammarExpr ids.
    */
-  std::vector<int32_t> VisitSequence_(const RuleExpr& rule_expr) {
+  std::vector<int32_t> VisitSequence_(const GrammarExpr& grammar_expr) {
     std::vector<int32_t> new_sequence_ids;
-    for (auto i : rule_expr) {
-      auto element_expr = grammar_->GetRuleExpr(i);
+    for (auto i : grammar_expr) {
+      auto element_expr = grammar_->GetGrammarExpr(i);
       switch (element_expr.type) {
-        case RuleExprType::kSequence:
+        case GrammarExprType::kSequence:
           VisitSequenceInSequence(element_expr, &new_sequence_ids);
           break;
-        case RuleExprType::kChoices:
+        case GrammarExprType::kChoices:
           VisitChoiceInSequence(element_expr, &new_sequence_ids);
           break;
-        case RuleExprType::kEmptyStr:
+        case GrammarExprType::kEmptyStr:
           break;
-        case RuleExprType::kByteString:
-        case RuleExprType::kCharacterClass:
-        case RuleExprType::kCharacterClassStar:
-        case RuleExprType::kRuleRef:
+        case GrammarExprType::kByteString:
+        case GrammarExprType::kCharacterClass:
+        case GrammarExprType::kCharacterClassStar:
+        case GrammarExprType::kRuleRef:
           VisitElementInSequence(element_expr, &new_sequence_ids);
           break;
         default:
@@ -240,20 +243,24 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
     return new_sequence_ids;
   }
 
-  /*! \brief Visit a sequence RuleExpr that is one element in another sequence. */
-  void VisitSequenceInSequence(const RuleExpr& rule_expr, std::vector<int32_t>* new_sequence_ids) {
-    auto sub_sequence_ids = VisitSequence_(rule_expr);
+  /*! \brief Visit a sequence GrammarExpr that is one element in another sequence. */
+  void VisitSequenceInSequence(
+      const GrammarExpr& grammar_expr, std::vector<int32_t>* new_sequence_ids
+  ) {
+    auto sub_sequence_ids = VisitSequence_(grammar_expr);
     new_sequence_ids->insert(
         new_sequence_ids->end(), sub_sequence_ids.begin(), sub_sequence_ids.end()
     );
   }
 
-  /*! \brief Visit a choice RuleExpr that is one element in a sequence. */
-  void VisitChoiceInSequence(const RuleExpr& rule_expr, std::vector<int32_t>* new_sequence_ids) {
-    auto sub_choice_ids = VisitChoices_(rule_expr);
+  /*! \brief Visit a choice GrammarExpr that is one element in a sequence. */
+  void VisitChoiceInSequence(
+      const GrammarExpr& grammar_expr, std::vector<int32_t>* new_sequence_ids
+  ) {
+    auto sub_choice_ids = VisitChoices_(grammar_expr);
     if (sub_choice_ids.size() == 1) {
-      auto choice_element_expr = builder_.GetRuleExpr(sub_choice_ids[0]);
-      if (choice_element_expr.type != RuleExprType::kEmptyStr) {
+      auto choice_element_expr = builder_.GetGrammarExpr(sub_choice_ids[0]);
+      if (choice_element_expr.type != GrammarExprType::kEmptyStr) {
         new_sequence_ids->insert(
             new_sequence_ids->end(), choice_element_expr.begin(), choice_element_expr.end()
         );
@@ -265,9 +272,11 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
     }
   }
 
-  /*! \brief Visit an atom element RuleExpr that is in a sequence. */
-  void VisitElementInSequence(const RuleExpr& rule_expr, std::vector<int32_t>* new_sequence_ids) {
-    new_sequence_ids->push_back(builder_.AddRuleExpr(rule_expr));
+  /*! \brief Visit an atom element GrammarExpr that is in a sequence. */
+  void VisitElementInSequence(
+      const GrammarExpr& grammar_expr, std::vector<int32_t>* new_sequence_ids
+  ) {
+    new_sequence_ids->push_back(builder_.AddGrammarExpr(grammar_expr));
   }
 };
 
@@ -280,12 +289,7 @@ std::vector<std::unique_ptr<BNFGrammarMutator>> BNFGrammarNormalizer::GetNormali
 }
 
 BNFGrammar BNFGrammarNormalizer::Apply(const BNFGrammar& grammar) {
-  std::vector<std::unique_ptr<BNFGrammarMutator>> normalizer_mutators = GetNormalizerList();
-  grammar_ = grammar;
-  for (auto& mutator : normalizer_mutators) {
-    grammar_ = mutator->Apply(grammar_);
-  }
-  return grammar_;
+  return SingleElementExprEliminator(grammar).Apply(grammar);
 }
 
 }  // namespace xgrammar

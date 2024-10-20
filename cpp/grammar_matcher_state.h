@@ -325,7 +325,7 @@ class StackTopsHistory {
 
 inline bool RulePositionTree::IsEndPosition(const RulePosition& rule_position) const {
   return rule_position.parent_id == RulePosition::kNoParent &&
-         grammar_->GetRuleExpr(rule_position.sequence_id).size() == rule_position.element_id;
+         grammar_->GetGrammarExpr(rule_position.sequence_id).size() == rule_position.element_id;
 }
 
 inline std::string RulePositionTree::PrintNode(int32_t id) const {
@@ -339,16 +339,16 @@ inline std::string RulePositionTree::PrintNode(const RulePosition& rule_position
     ss << ": " << grammar_->GetRule(rule_position.rule_id).name;
   }
   ss << ", sequence " << rule_position.sequence_id << ": "
-     << BNFGrammarPrinter(grammar_).PrintRuleExpr(rule_position.sequence_id);
+     << BNFGrammarPrinter(grammar_).PrintGrammarExpr(rule_position.sequence_id);
   ss << ", element id: " << rule_position.element_id;
 
-  auto sequence = grammar_->GetRuleExpr(rule_position.sequence_id);
+  auto sequence = grammar_->GetGrammarExpr(rule_position.sequence_id);
   if (rule_position.element_id < static_cast<int32_t>(sequence.size())) {
-    auto element = grammar_->GetRuleExpr(sequence[rule_position.element_id]);
-    if (element.type == BNFGrammar::Impl::RuleExprType::kByteString) {
+    auto element = grammar_->GetGrammarExpr(sequence[rule_position.element_id]);
+    if (element.type == BNFGrammar::Impl::GrammarExprType::kByteString) {
       ss << ", element in string: " << rule_position.element_in_string;
-    } else if (element.type == BNFGrammar::Impl::RuleExprType::kCharacterClass ||
-               element.type == BNFGrammar::Impl::RuleExprType::kCharacterClassStar) {
+    } else if (element.type == BNFGrammar::Impl::GrammarExprType::kCharacterClass ||
+               element.type == BNFGrammar::Impl::GrammarExprType::kCharacterClassStar) {
       ss << ", left utf8 bytes: " << rule_position.left_utf8_bytes;
     }
   }

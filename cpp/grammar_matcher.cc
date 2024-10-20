@@ -115,8 +115,8 @@ namespace xgrammar {
 /* \brief The concrete implementation of GrammarMatcherNode. */
 class GrammarMatcher::Impl : public GrammarMatcherBase {
  private:
-  using RuleExpr = BNFGrammar::Impl::RuleExpr;
-  using RuleExprType = BNFGrammar::Impl::RuleExprType;
+  using GrammarExpr = BNFGrammar::Impl::GrammarExpr;
+  using GrammarExprType = BNFGrammar::Impl::GrammarExprType;
   using SaveType = CatagorizedTokens::SaveType;
 
  public:
@@ -478,16 +478,16 @@ std::string GrammarMatcher::Impl::FindJumpForwardString() {
     int next_char = -1;
     for (auto stack_top : stack_tops) {
       auto rule_position = tree_[stack_top];
-      auto cur_sequence = grammar_->GetRuleExpr(rule_position.sequence_id);
+      auto cur_sequence = grammar_->GetGrammarExpr(rule_position.sequence_id);
       if (rule_position.parent_id == RulePosition::kNoParent &&
           rule_position.element_id == cur_sequence.size()) {
         can_find_next_char = false;
         break;
       }
 
-      auto cur_element = grammar_->GetRuleExpr(cur_sequence[rule_position.element_id]);
+      auto cur_element = grammar_->GetGrammarExpr(cur_sequence[rule_position.element_id]);
 
-      if (cur_element.type == RuleExprType::kByteString) {
+      if (cur_element.type == GrammarExprType::kByteString) {
         XGRAMMAR_DCHECK(rule_position.element_in_string < cur_element.size());
         if (next_char == -1) {
           next_char = cur_element[rule_position.element_in_string];
@@ -497,8 +497,8 @@ std::string GrammarMatcher::Impl::FindJumpForwardString() {
         }
       } else {
         XGRAMMAR_DCHECK(
-            cur_element.type == RuleExprType::kCharacterClass ||
-            cur_element.type == RuleExprType::kCharacterClassStar
+            cur_element.type == GrammarExprType::kCharacterClass ||
+            cur_element.type == GrammarExprType::kCharacterClassStar
         );
         if (rule_position.left_utf8_bytes > 0 || cur_element.size() != 3 || cur_element[0] != 0 ||
             cur_element[1] != cur_element[2]) {

@@ -22,14 +22,17 @@ class EBNFParserImpl {
 
  private:
   using Rule = BNFGrammar::Impl::Rule;
+  using GrammarExprType = BNFGrammar::Impl::GrammarExprType;
 
   // Parsing different parts of the grammar
   std::string ParseName(bool accept_empty = false);
+  int32_t ParseNonNegativeNumber();
   int32_t ParseCharacterClass();
   int32_t ParseString();
   int32_t ParseRuleRef();
   int32_t ParseElement();
   int32_t ParseQuantifier();
+  int32_t ParseQuantifierRange(int32_t grammar_expr_id);
   int32_t ParseLookaheadAssertion();
   int32_t ParseSequence();
   int32_t ParseChoices();
@@ -37,9 +40,9 @@ class EBNFParserImpl {
 
   // Helper functions
   // Helper for ParseQuantifier
-  int32_t HandleStarQuantifier(int32_t rule_expr_id);
-  int32_t HandlePlusQuantifier(int32_t rule_expr_id);
-  int32_t HandleQuestionQuantifier(int32_t rule_expr_id);
+  int32_t HandleStarQuantifier(int32_t grammar_expr_id);
+  int32_t HandlePlusQuantifier(int32_t grammar_expr_id);
+  int32_t HandleQuestionQuantifier(int32_t grammar_expr_id);
 
   // When parsing, we first find the names of all rules, and build the mapping from name to rule id.
   void BuildRuleNameToId();
@@ -68,7 +71,7 @@ class EBNFParserImpl {
   char Peek(int delta = 0) const { return *(cur_ + delta); }
 
   // Throw a ParseError with the given message and the line and column number.
-  [[noreturn]] void ThrowParseError(const std::string& msg) {
+  [[noreturn]] void RaiseError(const std::string& msg) {
     XGRAMMAR_LOG(FATAL) << "EBNF parse error at line " + std::to_string(cur_line_) + ", column " +
                                std::to_string(cur_column_) + ": " + msg;
   }
@@ -120,7 +123,7 @@ std::string EBNFParserImpl::ParseName(bool accept_empty) {
     first_char = false;
   }
   if (start == cur_ && !accept_empty) {
-    ThrowParseError("Expect rule name");
+    RaiseError("Expect rule name");
   }
   return std::string(start, cur_);
 }
@@ -151,7 +154,7 @@ int32_t EBNFParserImpl::ParseCharacterClass() {
   bool past_is_single_char = false;
   while (Peek() && Peek() != ']') {
     if (Peek() == '\r' || Peek() == '\n') {
-      ThrowParseError("Character class should not contain newline");
+      RaiseError("Character class should not contain newline");
     } else if (Peek() == '-' && Peek(1) != ']' && !past_is_hyphen && past_is_single_char) {
       Consume();
       past_is_hyphen = true;
@@ -161,16 +164,16 @@ int32_t EBNFParserImpl::ParseCharacterClass() {
 
     auto [codepoint, new_cur] = ParseNextUTF8OrEscaped(cur_, kCustomEscapeMap);
     if (codepoint == CharHandlingError::kInvalidUTF8) {
-      ThrowParseError("Invalid UTF8 sequence");
+      RaiseError("Invalid UTF8 sequence");
     }
     if (codepoint == CharHandlingError::kInvalidEscape) {
-      ThrowParseError("Invalid escape sequence");
+      RaiseError("Invalid escape sequence");
     }
     Consume(new_cur - cur_);
     if (past_is_hyphen) {
       XGRAMMAR_ICHECK(!elements.empty());
       if (elements.back().lower > codepoint) {
-        ThrowParseError("Invalid character class: lower bound is larger than upper bound");
+        RaiseError("Invalid character class: lower bound is larger than upper bound");
       }
       elements.back().upper = codepoint;
       past_is_hyphen = false;
@@ -195,15 +198,15 @@ int32_t EBNFParserImpl::ParseString() {
   std::vector<int32_t> codepoints;
   while (Peek() && Peek() != '\"') {
     if (Peek() == '\r' || Peek() == '\n') {
-      ThrowParseError("There should be no newline character in a string literal");
+      RaiseError("There should be no newline character in a string literal");
     }
 
     auto [codepoint, new_cur] = ParseNextUTF8OrEscaped(cur_);
     if (codepoint == CharHandlingError::kInvalidUTF8) {
-      ThrowParseError("Invalid utf8 sequence");
+      RaiseError("Invalid utf8 sequence");
     }
     if (codepoint == CharHandlingError::kInvalidEscape) {
-      ThrowParseError("Invalid escape sequence");
+      RaiseError("Invalid escape sequence");
     }
     Consume(new_cur - cur_);
     codepoints.push_back(codepoint);
@@ -229,7 +232,7 @@ int32_t EBNFParserImpl::ParseRuleRef() {
   std::string name = ParseName();
   auto rule_id = builder_.GetRuleId(name);
   if (rule_id == -1) {
-    ThrowParseError("Rule \"" + name + "\" is not defined");
+    RaiseError("Rule \"" + name + "\" is not defined");
   }
   return builder_.AddRuleRef(rule_id);
 }
@@ -241,105 +244,87 @@ int32_t EBNFParserImpl::ParseElement() {
       ConsumeSpace();
       auto prev_in_parentheses = in_parentheses_;
       in_parentheses_ = true;
-      auto rule_expr_id = ParseChoices();
+      auto grammar_expr_id = ParseChoices();
       ConsumeSpace();
       if (Peek() != ')') {
-        ThrowParseError("Expect )");
+        RaiseError("Expect )");
       }
       Consume();
       in_parentheses_ = prev_in_parentheses;
-      return rule_expr_id;
+      return grammar_expr_id;
     }
     case '[': {
       Consume();
-      auto rule_expr_id = ParseCharacterClass();
+      auto grammar_expr_id = ParseCharacterClass();
       if (Peek() != ']') {
-        ThrowParseError("Expect ]");
+        RaiseError("Expect ]");
       }
       Consume();
-      return rule_expr_id;
+      return grammar_expr_id;
     }
     case '\"': {
       Consume();
-      auto rule_expr_id = ParseString();
+      auto grammar_expr_id = ParseString();
       if (Peek() != '\"') {
-        ThrowParseError("Expect \"");
+        RaiseError("Expect \"");
       }
       Consume();
-      return rule_expr_id;
+      return grammar_expr_id;
     }
     default: {
       if (IsNameChar(Peek(), true)) {
         return ParseRuleRef();
       }
-      ThrowParseError("Expect element");
+      RaiseError("Expect element");
     }
   }
 }
 
-int32_t EBNFParserImpl::HandleStarQuantifier(int32_t rule_expr_id) {
-  BNFGrammar::Impl::RuleExpr rule_expr = builder_.GetRuleExpr(rule_expr_id);
-  if (rule_expr.type == BNFGrammarBuilder::RuleExprType::kCharacterClass) {
-    // We have special handling for character class star, e.g. [a-z]*
-    rule_expr.type = BNFGrammarBuilder::RuleExprType::kCharacterClassStar;
-    return builder_.AddRuleExpr(rule_expr);
-  } else {
-    // For other star quantifiers, we transform it into a rule:
-    // a*  -->  rule ::= a rule | ""
-    auto new_rule_name = builder_.GetNewRuleName(cur_rule_name_);
-    auto new_rule_id = builder_.AddEmptyRule(new_rule_name);
-    auto ref_to_new_rule = builder_.AddRuleRef(new_rule_id);
-    auto new_rule_expr_id = builder_.AddChoices(
-        {builder_.AddSequence({rule_expr_id, ref_to_new_rule}), builder_.AddEmptyStr()}
-    );
-    builder_.UpdateRuleBody(new_rule_id, new_rule_expr_id);
-
-    // Return the reference to the new rule
-    return builder_.AddRuleRef(new_rule_id);
+int32_t EBNFParserImpl::ParseQuantifier() {
+  int32_t grammar_expr_id = ParseElement();
+  ConsumeSpace(in_parentheses_);
+  switch (Peek()) {
+    case '*':
+      Consume();
+      return builder_.AddQuantifier(grammar_expr_id, GrammarExprType::kStarQuantifier);
+    case '+':
+      Consume();
+      return builder_.AddQuantifier(grammar_expr_id, GrammarExprType::kPlusQuantifier);
+    case '?':
+      Consume();
+      return builder_.AddQuantifier(grammar_expr_id, GrammarExprType::kQuestionQuantifier);
+    case '{':
+      return ParseQuantifierRange(grammar_expr_id);
+    default:
+      return grammar_expr_id;
   }
 }
 
-int32_t EBNFParserImpl::HandlePlusQuantifier(int32_t rule_expr_id) {
-  // a+  -->  rule ::= a rule | a
-  auto new_rule_name = builder_.GetNewRuleName(cur_rule_name_);
-  auto new_rule_id = builder_.AddEmptyRule(new_rule_name);
-  auto ref_to_new_rule = builder_.AddRuleRef(new_rule_id);
-  auto new_rule_expr_id =
-      builder_.AddChoices({builder_.AddSequence({rule_expr_id, ref_to_new_rule}), rule_expr_id});
-  builder_.UpdateRuleBody(new_rule_id, new_rule_expr_id);
-
-  // Return the reference to the new rule
-  return builder_.AddRuleRef(new_rule_id);
+int32_t EBNFParserImpl::ParseNonNegativeNumber() {
+  if (Peek() < '0' || Peek() > '9') {
+    RaiseError("Expect a non-negative number");
+  }
+  int32_t number = 0;
+  while (Peek() >= '0' && Peek() <= '9') {
+    number = number * 10 + (Peek() - '0');
+    Consume();
+  }
+  return number;
 }
 
-int32_t EBNFParserImpl::HandleQuestionQuantifier(int32_t rule_expr_id) {
-  // a?  -->  rule ::= a | empty
-  auto new_rule_name = builder_.GetNewRuleName(cur_rule_name_);
-  auto new_rule_expr_id = builder_.AddChoices({rule_expr_id, builder_.AddEmptyStr()});
-  auto new_rule_id = builder_.AddRule({new_rule_name, new_rule_expr_id});
-  return builder_.AddRuleRef(new_rule_id);
-}
-
-int32_t EBNFParserImpl::ParseQuantifier() {
-  int32_t rule_expr_id = ParseElement();
-  ConsumeSpace(in_parentheses_);
-  if (Peek() != '*' && Peek() != '+' && Peek() != '?') {
-    return rule_expr_id;
+int32_t EBNFParserImpl::ParseQuantifierRange(int32_t grammar_expr_id) {
+  Consume();
+  int32_t lower = Peek() == ',' ? 0 : ParseNonNegativeNumber();
+  if (Peek() != ',') {
+    RaiseError("Expect ',' in quantifier range");
   }
   Consume();
-
-  // We will transform a*, a+, a? into a rule, and return the reference to this rule
-  switch (Peek(-1)) {
-    case '*':
-      // We assume that the star quantifier should be the body of some rule now
-      return HandleStarQuantifier(rule_expr_id);
-    case '+':
-      return HandlePlusQuantifier(rule_expr_id);
-    case '?':
-      return HandleQuestionQuantifier(rule_expr_id);
-    default:
-      XGRAMMAR_LOG(FATAL) << "Unreachable";
+  int32_t upper = Peek() == '}' ? -1 : ParseNonNegativeNumber();
+  if (Peek() != '}') {
+    RaiseError("Expect '}' in quantifier range");
   }
+  Consume();
+  return builder_.AddQuantifierRange(grammar_expr_id, lower, upper);
 }
 
 int32_t EBNFParserImpl::ParseSequence() {
@@ -374,10 +359,10 @@ int32_t EBNFParserImpl::ParseLookaheadAssertion() {
   auto prev_in_parentheses = in_parentheses_;
   in_parentheses_ = true;
   ConsumeSpace(in_parentheses_);
-  auto result = ParseSequence();
+  auto result = ParseChoices();
   ConsumeSpace(in_parentheses_);
   if (Peek() != ')') {
-    ThrowParseError("Expect )");
+    RaiseError("Expect )");
   }
   Consume();
   in_parentheses_ = prev_in_parentheses;
@@ -389,7 +374,7 @@ EBNFParserImpl::Rule EBNFParserImpl::ParseRule() {
   cur_rule_name_ = name;
   ConsumeSpace();
   if (Peek() != ':' || Peek(1) != ':' || Peek(2) != '=') {
-    ThrowParseError("Expect ::=");
+    RaiseError("Expect ::=");
   }
   Consume(3);
   ConsumeSpace();
@@ -406,11 +391,11 @@ void EBNFParserImpl::BuildRuleNameToId() {
     ConsumeSpace(false);
     if (Peek() == ':' && Peek(1) == ':' && Peek(2) == '=') {
       if (name.empty()) {
-        ThrowParseError("Expect rule name");
+        RaiseError("Expect rule name");
       }
       Consume(3);
       if (builder_.GetRuleId(name) != -1) {
-        ThrowParseError("Rule \"" + name + "\" is defined multiple times");
+        RaiseError("Rule \"" + name + "\" is defined multiple times");
       }
       builder_.AddEmptyRule(name);
     }
@@ -438,7 +423,7 @@ BNFGrammar EBNFParserImpl::DoParse(std::string ebnf_string, std::string root_rul
   while (Peek()) {
     // Throw error when there are multiple lookahead assertions
     if (Peek() == '(' && Peek(1) == '=') {
-      ThrowParseError("Unexpected lookahead assertion");
+      RaiseError("Unexpected lookahead assertion");
     }
     auto new_rule = ParseRule();
     builder_.UpdateRuleBody(new_rule.name, new_rule.body_expr_id);
@@ -450,7 +435,7 @@ BNFGrammar EBNFParserImpl::DoParse(std::string ebnf_string, std::string root_rul
 
   // Check that the root rule is defined
   if (builder_.GetRuleId(root_rule) == -1) {
-    ThrowParseError("The root rule with name \"" + root_rule + "\" is not found.");
+    RaiseError("The root rule with name \"" + root_rule + "\" is not found.");
   }
 
   return builder_.Get(root_rule);
