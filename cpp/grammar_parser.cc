@@ -18,7 +18,7 @@ namespace xgrammar {
 class EBNFParserImpl {
  public:
   /*! \brief The logic of parsing the grammar string. */
-  BNFGrammar DoParse(std::string ebnf_string, std::string main_rule);
+  BNFGrammar DoParse(std::string ebnf_string, std::string root_rule);
 
  private:
   using Rule = BNFGrammar::Impl::Rule;
@@ -430,7 +430,7 @@ void EBNFParserImpl::ResetStringIterator(const char* cur) {
   in_parentheses_ = false;
 }
 
-BNFGrammar EBNFParserImpl::DoParse(std::string ebnf_string, std::string main_rule) {
+BNFGrammar EBNFParserImpl::DoParse(std::string ebnf_string, std::string root_rule) {
   ResetStringIterator(ebnf_string.c_str());
   BuildRuleNameToId();
 
@@ -449,17 +449,17 @@ BNFGrammar EBNFParserImpl::DoParse(std::string ebnf_string, std::string main_rul
     ConsumeSpace();
   }
 
-  // Check that the main rule is defined
-  if (builder_.GetRuleId(main_rule) == -1) {
-    ThrowParseError("The main rule with name \"" + main_rule + "\" is not found.");
+  // Check that the root rule is defined
+  if (builder_.GetRuleId(root_rule) == -1) {
+    ThrowParseError("The root rule with name \"" + root_rule + "\" is not found.");
   }
 
-  return builder_.Get(main_rule);
+  return builder_.Get(root_rule);
 }
 
-BNFGrammar EBNFParser::Parse(std::string ebnf_string, std::string main_rule) {
+BNFGrammar EBNFParser::Parse(std::string ebnf_string, std::string root_rule) {
   EBNFParserImpl parser;
-  return parser.DoParse(ebnf_string, main_rule);
+  return parser.DoParse(ebnf_string, root_rule);
 }
 
 }  // namespace xgrammar

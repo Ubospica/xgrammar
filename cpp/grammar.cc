@@ -12,14 +12,14 @@
 
 namespace xgrammar {
 
-inline BNFGrammar BNFGrammarCtor(const std::string& ebnf_string, const std::string& main_rule) {
-  auto grammar = EBNFParser::Parse(ebnf_string, main_rule);
+inline BNFGrammar BNFGrammarCtor(const std::string& ebnf_string, const std::string& root_rule) {
+  auto grammar = EBNFParser::Parse(ebnf_string, root_rule);
   grammar = BNFGrammarNormalizer().Apply(grammar);
   return grammar;
 }
 
-BNFGrammar::BNFGrammar(const std::string& ebnf_string, const std::string& main_rule)
-    : BNFGrammar(BNFGrammarCtor(ebnf_string, main_rule)) {}
+BNFGrammar::BNFGrammar(const std::string& ebnf_string, const std::string& root_rule)
+    : BNFGrammar(BNFGrammarCtor(ebnf_string, root_rule)) {}
 
 std::string BNFGrammar::ToString() const { return BNFGrammarPrinter(*this).ToString(); }
 
@@ -38,7 +38,7 @@ BNFGrammar BNFGrammar::Deserialize(const std::string& json_string) {
 
 // Optimized json grammar for the speed of the grammar matcher
 const std::string kJSONGrammarString = R"(
-main ::= (
+root ::= (
     "{" [ \n\t]* members_and_embrace |
     "[" [ \n\t]* elements_or_embrace
 )

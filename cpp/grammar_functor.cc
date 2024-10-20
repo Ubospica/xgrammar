@@ -108,7 +108,7 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
       builder_.UpdateRuleBody(i, new_body_expr_id);
       builder_.AddLookaheadAssertion(i, VisitLookaheadAssertion(rule.lookahead_assertion_id));
     }
-    return builder_.Get(grammar_->GetMainRule().name);
+    return builder_.Get(grammar_->GetRootRule().name);
   }
 
  private:
@@ -271,45 +271,11 @@ class NestedRuleUnwrapper : public BNFGrammarMutator {
   }
 };
 
-class ByteStringFuser : public BNFGrammarMutator {
- public:
-  using BNFGrammarMutator::Apply;
-  using BNFGrammarMutator::BNFGrammarMutator;
-
- private:
-  /*!
-   * \brief Visit a RuleExpr containing a sequence.
-   * \returns A list of new sequence RuleExpr ids.
-   */
-  int32_t VisitSequence(const RuleExpr& rule_expr) final {
-    std::vector<int32_t> new_sequence_ids;
-    std::vector<int32_t> cur_byte_string;
-    for (auto i : rule_expr) {
-      auto element_expr = grammar_->GetRuleExpr(i);
-      if (element_expr.type == RuleExprType::kByteString) {
-        cur_byte_string.insert(cur_byte_string.end(), element_expr.begin(), element_expr.end());
-        continue;
-      } else {
-        if (!cur_byte_string.empty()) {
-          new_sequence_ids.push_back(builder_.AddByteString(cur_byte_string));
-          cur_byte_string.clear();
-        }
-        new_sequence_ids.push_back(builder_.AddRuleExpr(element_expr));
-      }
-    }
-    if (!cur_byte_string.empty()) {
-      new_sequence_ids.push_back(builder_.AddByteString(cur_byte_string));
-    }
-    return builder_.AddSequence(new_sequence_ids);
-  }
-};
-
 // Return the list of all normalizers in the class. The normalizers are applied one by one.
 std::vector<std::unique_ptr<BNFGrammarMutator>> BNFGrammarNormalizer::GetNormalizerList() {
   std::vector<std::unique_ptr<BNFGrammarMutator>> normalizer_mutators;
   normalizer_mutators.emplace_back(std::make_unique<SingleElementExprEliminator>());
   normalizer_mutators.emplace_back(std::make_unique<NestedRuleUnwrapper>());
-  normalizer_mutators.emplace_back(std::make_unique<ByteStringFuser>());
   return normalizer_mutators;
 }
 

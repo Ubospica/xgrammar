@@ -29,10 +29,10 @@ class EBNFParser {
   /*!
    * \brief Parse the grammar string. If fails, throw ParseError with the error message.
    * \param ebnf_string The grammar string.
-   * \param main_rule The name of the main rule. Default is "main".
+   * \param root_rule The name of the root rule. Default is "root".
    * \return The parsed grammar.
    */
-  static BNFGrammar Parse(std::string ebnf_string, std::string main_rule = "main");
+  static BNFGrammar Parse(std::string ebnf_string, std::string root_rule = "root");
 
   /*!
    * \brief The exception thrown when parsing fails.

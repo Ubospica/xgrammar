@@ -267,7 +267,7 @@ def test_termination():
 
 
 def test_get_jump_forward_string():
-    grammar_ebnf = r"""main ::= "abb" | "abbd" | other_rule
+    grammar_ebnf = r"""root ::= "abb" | "abbd" | other_rule
 other_rule ::= "a" sub_rule "b"
 sub_rule ::= "b"
 """

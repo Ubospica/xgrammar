@@ -52,7 +52,7 @@ namespace xgrammar {
  *
  * ## Example
  * ### Grammar
- * main ::= [a] R
+ * root ::= [a] R
  * R ::= [b] S [c] | [b] [c] T
  * S ::= "" | [c] [d]
  * T ::= [e]
@@ -66,7 +66,7 @@ namespace xgrammar {
  * |
  * C<
  *
- * A: (rule main, choice 0, element 1)
+ * A: (rule root, choice 0, element 1)
  * B: (rule R, choice 0, element 1)
  * C: (rule S, choice 1, element 0)
  * D: (rule R, choice 0, element 2)
@@ -84,7 +84,7 @@ namespace xgrammar {
  * C<   F<<           I<<
  *
  * F: (rule S, choice 1, element 1)
- * G: (rule main, choice 0, element 2) (means the matching process has finished, and will be deleted
+ * G: (rule root, choice 0, element 2) (means the matching process has finished, and will be deleted
  * when the next char comes)
  * H: (rule R, choice 1, element 2)
  * I: (rule T, choice 0, element 0)

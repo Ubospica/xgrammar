@@ -83,13 +83,13 @@ class BNFGrammar::Impl {
         << "rule_id " << rule_id << " is out of bound";
     return rules_[rule_id];
   }
-  /*! \brief Get the main rule id of the grammar. */
-  int32_t GetMainRuleId() const { return main_rule_id_; }
-  /*! \brief Get the main rule of the grammar. */
-  const Rule& GetMainRule() const {
-    XGRAMMAR_DCHECK(main_rule_id_ >= 0 && main_rule_id_ < static_cast<int32_t>(rules_.size()))
-        << "main_rule_id " << main_rule_id_ << " is out of bound";
-    return rules_[main_rule_id_];
+  /*! \brief Get the root rule id of the grammar. */
+  int32_t GetRootRuleId() const { return root_rule_id_; }
+  /*! \brief Get the root rule of the grammar. */
+  const Rule& GetRootRule() const {
+    XGRAMMAR_DCHECK(root_rule_id_ >= 0 && root_rule_id_ < static_cast<int32_t>(rules_.size()))
+        << "root_rule_id " << root_rule_id_ << " is out of bound";
+    return rules_[root_rule_id_];
   }
 
   /*! \brief The type of the rule expr. */
@@ -142,7 +142,7 @@ class BNFGrammar::Impl {
   /*! \brief The rules of the grammar. rule_id corresponds the index of this vector. */
   std::vector<Rule> rules_;
   CSRArray<int32_t> rule_expr_data_;
-  int32_t main_rule_id_ = -1;
+  int32_t root_rule_id_ = -1;
 
   friend class BNFGrammarBuilder;
   friend class BNFGrammarJSONSerializer;

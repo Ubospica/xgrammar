@@ -231,7 +231,7 @@ class JSONSchemaToEBNFConverter {
    * \endcode
    * Rule (not considering the indent):
    * \code
-   * main ::= "[" basic_boolean ", " basic_integer (", " basic_string)* "]"
+   * root ::= "[" basic_boolean ", " basic_integer (", " basic_string)* "]"
    * \endcode
    */
   std::string VisitArray(const picojson::object& schema, const std::string& rule_name);
@@ -254,7 +254,7 @@ class JSONSchemaToEBNFConverter {
    *
    * Rule (not considering the indent):
    * \code
-   * main ::= "{" "a" ":" basic_string (", " "b" ":" basic_integer)*
+   * root ::= "{" "a" ":" basic_string (", " "b" ":" basic_integer)*
    *          (", " basic_string ": " basic_any)* "}"
    * \endcode
 
@@ -276,11 +276,11 @@ class JSONSchemaToEBNFConverter {
    *
    * Rule (indent=2):
    * \code
-   * main ::= "{" ("\n  " (a main_sub_1 | b main_sub_2 | c main_sub_3 | d main_sub_3)
+   * root ::= "{" ("\n  " (a root_sub_1 | b root_sub_2 | c root_sub_3 | d root_sub_3)
    *          "\n" | "") "}"
-   * main_sub_1 ::= ",\n  " b r2 | r2
-   * main_sub_2 ::= ",\n  " c r3 | r3
-   * main_sub_3 ::= (",\n  " d)*
+   * root_sub_1 ::= ",\n  " b r2 | r2
+   * root_sub_2 ::= ",\n  " c r3 | r3
+   * root_sub_3 ::= (",\n  " d)*
    * \endcode
    */
   std::string VisitObject(const picojson::object& schema, const std::string& rule_name);
@@ -362,7 +362,7 @@ JSONSchemaToEBNFConverter::JSONSchemaToEBNFConverter(
 }
 
 std::string JSONSchemaToEBNFConverter::Convert() {
-  CreateRuleFromSchema(json_schema_, "main");
+  CreateRuleFromSchema(json_schema_, "root");
   std::string res;
   for (auto& rule : rules_) {
     res += rule.first + " ::= " + rule.second + "\n";
@@ -621,7 +621,8 @@ std::string JSONSchemaToEBNFConverter::VisitEnum(
 
 std::string JSONSchemaToEBNFConverter::JSONStrToPrintableStr(const std::string& json_str) {
   static const std::vector<std::pair<std::string, std::string>> kReplaceMapping = {
-      {"\\", "\\\\"}, {"\"", "\\\""}};
+      {"\\", "\\\\"}, {"\"", "\\\""}
+  };
   std::string result = json_str;
   for (const auto& [k, v] : kReplaceMapping) {
     size_t pos = 0;
@@ -878,7 +879,7 @@ std::string JSONSchemaToEBNFConverter::GetPartialRuleForPropertiesAllOptional(
     rule_names[i] = cur_rule_name;
   }
 
-  // construct the main rule
+  // construct the root rule
   for (int i = 0; i < static_cast<int>(properties.size()); ++i) {
     if (i != 0) {
       res += " | ";

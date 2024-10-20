@@ -91,12 +91,12 @@ class BNFGrammar(XGObject):
         2. Use C-style unicode escape sequence \u01AB, \U000001AB, \xAB
         3. A-B (match A and not match B) is not supported
 
-    main_rule : str, default: "main"
-        The name of the main rule in the grammar.
+    root_rule : str, default: "root"
+        The name of the root rule in the grammar.
     """
 
-    def __init__(self, ebnf_string: str, *, main_rule: str = "main") -> None:
-        self.init_with_handle(_core.BNFGrammar(ebnf_string, main_rule))
+    def __init__(self, ebnf_string: str, *, root_rule: str = "root") -> None:
+        self.init_with_handle(_core.BNFGrammar(ebnf_string, root_rule))
 
     def to_string(self) -> str:
         """Print the BNF grammar to a string, in EBNF format.
@@ -152,7 +152,7 @@ class BNFGrammar(XGObject):
     @staticmethod
     def _init_no_normalization(
         ebnf_string: str,
-        main_rule: str = "main",
+        root_rule: str = "root",
     ) -> "BNFGrammar":
         r"""Construct a BNF grammar object with a EBNF string, but not normalize it. For test
         purposes.
@@ -162,8 +162,8 @@ class BNFGrammar(XGObject):
         ebnf_string : str
             The grammar string.
 
-        main_rule : str
-            The name of the main rule. Default: "main".
+        root_rule : str
+            The name of the root rule. Default: "root".
 
         Returns
         -------
@@ -171,7 +171,7 @@ class BNFGrammar(XGObject):
             The parsed BNF grammar.
         """
         return BNFGrammar.from_handle(
-            _core.BNFGrammar._init_no_normalization(ebnf_string, main_rule),
+            _core.BNFGrammar._init_no_normalization(ebnf_string, root_rule),
         )
 
 
