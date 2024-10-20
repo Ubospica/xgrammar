@@ -9,6 +9,7 @@
 #include <picojson.h>
 
 #include <cstdint>
+#include <queue>
 #include <vector>
 
 #include "logging.h"
@@ -20,7 +21,7 @@ constexpr int32_t INVALID_EDGE_ID = -1;
 template <typename LabelType>
 class Graph {
  public:
-  Graph() = default;
+  Graph(int32_t num_nodes = 0) : adj_heads_(num_nodes), out_in_degrees_(num_nodes) {}
   Graph(const Graph&) = default;
   Graph(Graph&&) = default;
   Graph& operator=(const Graph&) = default;
@@ -76,11 +77,12 @@ class Graph {
 
   void RemoveEdge(int32_t edge_id);
   void Coalesce(int32_t lhs, int32_t rhs);
-
-  bool WellFormed() const;
+  std::vector<int32_t> Simplify(const std::vector<int32_t>& start_nodes);
 
   picojson::value Serialize() const;
   // static Graph<LabelType> Deserialize(const picojson::value& value);
+
+  bool WellFormed() const;
 
   template <typename F>
   friend std::ostream& operator<<(std::ostream& os, const Graph<F>& graph);
@@ -171,6 +173,54 @@ void Graph<T>::Coalesce(int32_t lhs, int32_t rhs) {
   out_in_degrees_[rhs] = std::make_pair(0, 0);
 
   XGRAMMAR_DCHECK(WellFormed()) << "Graph is not well-formed after coalescing";
+}
+
+template <typename T>
+std::vector<int32_t> Graph<T>::Simplify(const std::vector<int32_t>& start_nodes) {
+  XGRAMMAR_DCHECK(WellFormed()) << "Graph is not well-formed before simplifying";
+  std::vector<int32_t> node_mapping(NumNodes(), -1);
+  Graph<T> new_graph;
+
+  std::queue<int32_t> queue;
+  for (int32_t start : start_nodes) {
+    std::cout << "start: " << start << std::endl;
+    if (node_mapping[start] == -1) {
+      queue.push(start);
+      node_mapping[start] = new_graph.AddNode();
+      std::cout << "node_mapping[start]: " << node_mapping[start] << std::endl;
+
+      while (!queue.empty()) {
+        int32_t current = queue.front();
+        queue.pop();
+
+        for (int32_t eid = FirstOutEdge(current); eid != INVALID_EDGE_ID; eid = NextOutEdge(eid)) {
+          const auto& edge = GetEdgeFromId(eid);
+          int32_t neighbor = edge.dst;
+          std::cout << "neighbor: " << neighbor << std::endl;
+          if (node_mapping[neighbor] == -1) {
+            node_mapping[neighbor] = new_graph.AddNode();
+            queue.push(neighbor);
+          }
+
+          new_graph.AddEdge(node_mapping[current], node_mapping[neighbor], edge.label);
+        }
+      }
+    }
+  }
+
+  *this = std::move(new_graph);
+
+  XGRAMMAR_DCHECK(WellFormed()) << "Graph is not well-formed after simplifying";
+
+  // Update start_nodes to reflect new node indices
+  std::vector<int32_t> new_start_nodes;
+  new_start_nodes.reserve(start_nodes.size());
+  for (auto node : start_nodes) {
+    if (node_mapping[node] != -1) {
+      new_start_nodes.push_back(node_mapping[node]);
+    }
+  }
+  return new_start_nodes;
 }
 
 template <typename T>
