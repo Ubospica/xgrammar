@@ -250,6 +250,12 @@ std::ostream& operator<<(std::ostream& os, const std::vector<T>& vec) {
   return os;
 }
 
+template <typename T1, typename T2>
+std::ostream& operator<<(std::ostream& os, const std::pair<T1, T2>& p) {
+  os << "(" << p.first << ", " << p.second << ")";
+  return os;
+}
+
 }  // namespace std
 
 #endif  // XGRAMMAR_SUPPORT_LOGGING_H_
