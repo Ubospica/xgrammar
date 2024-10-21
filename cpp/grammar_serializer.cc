@@ -30,7 +30,9 @@ std::string BNFGrammarPrinter::PrintGrammarExpr(const GrammarExpr& grammar_expr)
       return PrintByteString(grammar_expr);
     case GrammarExprType::kCharacterClass:
       return PrintCharacterClass(grammar_expr);
-    case GrammarExprType::kQuantifier:
+    case GrammarExprType::kStarQuantifier:
+    case GrammarExprType::kPlusQuantifier:
+    case GrammarExprType::kQuestionQuantifier:
       return PrintQuantifier(grammar_expr);
     case GrammarExprType::kQuantifierRange:
       return PrintQuantifierRange(grammar_expr);
@@ -152,7 +154,7 @@ std::string BNFGrammarPrinter::ToString() {
   return result;
 }
 
-std::string BNFGrammarJSONSerializer::ToString() {
+std::string BNFGrammarJSONSerializer::Serialize() {
   picojson::object grammar_json_obj;
 
   picojson::array rules_json;

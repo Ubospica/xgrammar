@@ -175,658 +175,658 @@ class BNFGrammar(XGObject):
         )
 
 
-class BuiltinGrammar:
-    @staticmethod
-    def json() -> BNFGrammar:
-        """Get the grammar of standard JSON. This is compatible with the official JSON grammar
-        in https://www.json.org/json-en.html.
-
-        Returns
-        -------
-        grammar : BNFGrammar
-            The JSON grammar.
-        """
-        return BNFGrammar.from_handle(_core.BuiltinGrammar.json())
-
-    @staticmethod
-    def json_schema(
-        schema: Union[str, Type[BaseModel]],
-        *,
-        indent: Optional[int] = None,
-        separators: Optional[Tuple[str, str]] = None,
-        strict_mode: bool = True,
-    ) -> BNFGrammar:
-        """Construct a BNF grammar from JSON schema. Pydantic model can be used to specify the
-        schema.
-
-        The format of the JSON schema can be specified with the `indent` and `separators`
-        parameters. The meaning and the default values of the parameters follows the convention in
-        json.dumps().
-
-        Parameters
-        ----------
-        schema : Union[str, Type[BaseModel]]
-            The schema string or Pydantic model.
-
-        indent : Optional[int], default: None
-            The number of spaces for indentation. If None, the output will be in one line.
-
-        separators : Optional[Tuple[str, str]], default: None
-            Two separators used in the schema: comma and colon. Examples: (",", ":"), (", ", ": ").
-            If None, the default separators will be used: (",", ": ") when the indent is not None,
-            and (", ", ": ") otherwise.
-
-        strict_mode : bool, default: True
-            Whether to use strict mode. In strict mode, the generated grammar will not allow
-            properties and items that is not specified in the schema. This is equivalent to
-            setting unevaluatedProperties and unevaluatedItems to false.
-
-            This helps LLM to generate accurate output in the grammar-guided generation with JSON
-            schema.
-
-        Returns
-        -------
-        grammar : BNFGrammar
-            The generated BNF grammar.
-        """
-        if isinstance(schema, type) and issubclass(schema, BaseModel):
-            schema = json.dumps(schema.model_json_schema())
-
-        return BNFGrammar.from_handle(
-            _core.BuiltinGrammar.json_schema(schema, indent, separators, strict_mode),
-        )
-
-    @staticmethod
-    def _json_schema_to_ebnf(
-        schema: str,
-        *,
-        indent: Optional[int] = None,
-        separators: Optional[Tuple[str, str]] = None,
-        strict_mode: bool = True,
-    ) -> str:
-        """Convert JSON schema string to EBNF grammar string. For test purposes.
-
-        Parameters
-        ----------
-        schema : str
-            The schema string.
-
-        indent : Optional[int], default: None
-            The number of spaces for indentation. If None, the output will be in one line.
-
-        separators : Optional[Tuple[str, str]], default: None
-            Two separators used in the schema: comma and colon. Examples: (",", ":"), (", ", ": ").
-            If None, the default separators will be used: (",", ": ") when the indent is not None,
-            and (", ", ": ") otherwise.
-
-        strict_mode : bool, default: True
-            Whether to use strict mode. In strict mode, the generated grammar will not allow
-            properties and items that is not specified in the schema. This is equivalent to
-            setting unevaluatedProperties and unevaluatedItems to false.
-
-            This helps LLM to generate accurate output in the grammar-guided generation with JSON
-            schema.
-
-
-        Returns
-        -------
-        ebnf_string : str
-            The EBNF grammar string.
-        """
-        return _core.BuiltinGrammar._json_schema_to_ebnf(
-            schema,
-            indent,
-            separators,
-            strict_mode,
-        )
-
-
-class VocabType(Enum):
-    """The type of the vocabulary. Used in TokenizerInfo. XGrammar supports three types of
-    vocabularies:
-
-    RAW
-        The vocabulary is in the raw format. The tokens in the vocabulary is the same as the input
-        string. This kind of tokenizer includes the tiktoken tokenizer, e.g.
-        microsoft/Phi-3-small-8k-instruct, Qwen/Qwen-7B-Chat, etc.
-
-    BYTE_FALLBACK
-        The vocabulary used in the byte fallback BPE tokenizer. The tokens are processed through
-        the byte-fallback conversion. E.g. "\u001B" -> "<0x1B>", " apple" -> "▁apple". This kind of
-        tokenizer includes meta-llama/Llama-2-7b-chat, microsoft/Phi-3.5-mini-instruct, etc.
-
-    BYTE_LEVEL
-        The vocabulary used in the byte level BPE tokenizer. The tokens are processed through
-        the byte-to-unicode conversion, as in
-        https://github.com/huggingface/transformers/blob/87be06ca77166e6a6215eee5a990ab9f07238a18/src/transformers/models/gpt2/tokenization_gpt2.py#L38-L59
-
-        This kind of tokenizer includes meta-llama/Meta-Llama-3-8B-Instruct,
-        meta-llama/Meta-Llama-3.1-8B-Instruct, etc.
-    """
-
-    RAW = "RAW"
-    BYTE_FALLBACK = "BYTE_FALLBACK"
-    BYTE_LEVEL = "BYTE_LEVEL"
-
-
-class TokenizerInfo(XGObject):
-    """The tokenizer info, which contains the vocabulary, the type of the vocabulary, and necessary
-    information for the grammar-guided generation.
-
-    This class should be the first choice when handling tokenizers in XGrammar. It eliminates the
-    overhead of converting the vocabulary between C++ and Python.
-
-    Parameters
-    ----------
-    vocab : Union[List[bytes], List[str]]
-        The vocabulary of the tokenizer.
-
-    vocab_type : VocabType, default: VocabType.RAW
-        The type of the vocabulary. See also VocabType.
-
-    prepend_space_in_tokenization : bool, default: False
-        Whether the tokenizer will prepend a space before the text in the tokenization process.
-    """
-
-    def __init__(
-        self,
-        vocab: Union[List[bytes], List[str]],
-        vocab_type: VocabType = VocabType.RAW,
-        prepend_space_in_tokenization: bool = False,
-    ) -> None:
-        self.init_with_handle(
-            _core.TokenizerInfo(vocab, vocab_type.value, prepend_space_in_tokenization)
-        )
-
-    @property
-    def vocab_size(self) -> int:
-        """The size of the vocabulary."""
-        return self.handle.vocab_size
-
-    @property
-    def vocab_type(self) -> VocabType:
-        """The type of the vocabulary."""
-        return VocabType(self.handle.vocab_type)
-
-    @property
-    def prepend_space_in_tokenization(self) -> bool:
-        """Whether the tokenizer will prepend a space before the text in the tokenization
-        process."""
-        return self.handle.prepend_space_in_tokenization
-
-    @property
-    def raw_vocab(self) -> List[bytes]:
-        """The raw vocabulary of the tokenizer. This converts the tokens in the LLM's vocabulary
-        back to the original format of the input text. E.g. for type ByteFallback, the token
-        <0x1B> is converted back to "\u001B" in the raw vocabulary.
-        """
-        return self.handle.raw_vocab
-
-    @staticmethod
-    def from_huggingface(tokenizer: PreTrainedTokenizerBase) -> "TokenizerInfo":
-        """Construct the tokenizer info from the huggingface tokenizer. This constructor supports
-        various tokenizer backends, including the huggingface fast tokenizer and tiktoken tokenizer.
-
-        Parameters
-        ----------
-        tokenizer : PreTrainedTokenizerBase
-            The huggingface tokenizer.
-
-        Returns
-        -------
-        tokenizer_info : TokenizerInfo
-            The tokenizer info.
-        """
-
-        try:
-            vocab = tokenizer.get_vocab()
-            vocab = [token for token, _ in sorted(vocab.items(), key=lambda x: x[1])]
-        except AttributeError as e:
-            msg = (
-                f"Cannot get the vocabulary of the tokenizer {type(tokenizer)}. The tokenizer "
-                "should have a get_vocab method."
-            )
-            raise ValueError(msg) from e
-
-        if isinstance(tokenizer, PreTrainedTokenizerFast):
-            # huggingface fast tokenizer
-            # Note this backend_str may not contain the full vocab. Some special tokens may
-            # be omitted. So we still need to pass the vocab to the constructor.
-            backend_str = tokenizer.backend_tokenizer.to_str()
-            return TokenizerInfo.from_handle(
-                _core.TokenizerInfo.from_huggingface(vocab, backend_str)
-            )
-        elif (
-            "vocab_file" in tokenizer.vocab_files_names
-            and "tiktoken" in tokenizer.vocab_files_names["vocab_file"]
-        ):
-            # tiktoken tokenizer
-            # e.g. Phi-3-small-8k-instruct, Qwen-7B-Chat, stablelm-2-12b-chat (previously)
-            return TokenizerInfo(vocab, VocabType.RAW, False)
-        else:
-            # TODO(yixin): sentencepiece tokenizer
-            raise ValueError(f"Unsupported tokenizer type: {type(tokenizer)}")
-
-    def dump_metadata(self) -> str:
-        """Dump the metadata of the tokenizer, mainly vocab_type and
-        prepend_space_in_tokenization."""
-        return self.handle.dump_metadata()
-
-    @staticmethod
-    def from_vocab_and_metadata(vocab: List[Union[bytes, str]], metadata: str) -> "TokenizerInfo":
-        """Construct the tokenizer info from the vocabulary and the metadata string.
-
-        Parameters
-        ----------
-        vocab : List[Union[bytes, str]]
-            The vocabulary of the tokenizer.
-
-        metadata : str
-            The metadata string.
-        """
-        return TokenizerInfo.from_handle(
-            _core.TokenizerInfo.from_vocab_and_metadata(vocab, metadata),
-        )
-
-
-class GrammarMatcherInitContext(XGObject):
-    """The initialization context for the grammar matcher. This object is used to fast initialize
-    the grammar matcher. It contains the grammar, the raw vocabulary, and the preprocessed cache
-    for the generating the mask in the grammar-guided generation.
-
-    Parameters
-    ----------
-    grammar : BNFGrammar
-        The BNF grammar to match.
-
-    tokenizer_or_vocab : Union[None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]], default: None
-        The tokenizer or the vocabulary. It can be None, a huggingface tokenizer, a tokenizer info,
-        or a list of raw tokens.
-
-        None means there is no vocabulary, then the grammar matcher can only handle string
-        operations. If a huggingface tokenizer or a list of raw tokens are provided, a TokenizerInfo
-        object will be constructed from the tokenizer or the vocabulary.
-    """
-
-    def __init__(
-        self,
-        grammar: BNFGrammar,
-        tokenizer_or_vocab: Union[
-            None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]
-        ] = None,
-    ) -> None:
-        # convert tokenizer_or_vocab to TokenizerInfo
-        if isinstance(tokenizer_or_vocab, PreTrainedTokenizerBase):
-            tokenizer_or_vocab = TokenizerInfo.from_huggingface(tokenizer_or_vocab)
-        elif isinstance(tokenizer_or_vocab, list):
-            tokenizer_or_vocab = TokenizerInfo(tokenizer_or_vocab)
-        elif tokenizer_or_vocab is None:
-            tokenizer_or_vocab = TokenizerInfo([])
-        if not isinstance(tokenizer_or_vocab, TokenizerInfo):
-            raise ValueError(f"Unsupported tokenizer_or_vocab type: {type(tokenizer_or_vocab)}")
-
-        self.init_with_handle(
-            _core.GrammarMatcherInitContext(grammar.handle, tokenizer_or_vocab.handle)
-        )
-
-
-class GrammarMatcherInitContextCache(XGObject):
-    """The cache for the grammar matcher initialization context. It is for eliminating the overhead
-    of constructing the GrammarMatcherInitContext of the same grammar for many times. This cache
-    is tokenizer-specific, i.e. different tokenizers should have different caches.
-
-    Parameters
-    ----------
-    tokenizer_or_vocab : Union[PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]]
-        The tokenizer or the vocabulary. Its meaning is the same as in GrammarMatcher.
-    """
-
-    def __init__(
-        self,
-        tokenizer_or_vocab: Union[PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]],
-    ):
-        # convert tokenizer_or_vocab to TokenizerInfo
-        if isinstance(tokenizer_or_vocab, PreTrainedTokenizerBase):
-            tokenizer_or_vocab = TokenizerInfo.from_huggingface(tokenizer_or_vocab)
-        elif isinstance(tokenizer_or_vocab, list):
-            tokenizer_or_vocab = TokenizerInfo(tokenizer_or_vocab)
-        if not isinstance(tokenizer_or_vocab, TokenizerInfo):
-            raise ValueError(f"Unsupported tokenizer_or_vocab type: {type(tokenizer_or_vocab)}")
-
-        self.init_with_handle(_core.GrammarMatcherInitContextCache(tokenizer_or_vocab.handle))
-
-    def get_init_context_for_json(self) -> GrammarMatcherInitContext:
-        """Get GrammarMatcherInitContext from the standard JSON.
-
-        Returns
-        -------
-        init_context : GrammarMatcherInitContext
-            The initialization context for the grammar matcher.
-        """
-        return GrammarMatcherInitContext.from_handle(self.handle.get_init_context_for_json())
-
-    def get_init_context_for_json_schema(
-        self,
-        schema: Union[str, Type[BaseModel]],
-        *,
-        indent: Optional[int] = None,
-        separators: Optional[Tuple[str, str]] = None,
-        strict_mode: bool = True,
-    ) -> GrammarMatcherInitContext:
-        """Get GrammarMatcherInitContext from the specified JSON schema and format. The indent
-        and separators parameters follow the same convention as in json.dumps().
-
-        Parameters
-        ----------
-        schema : Union[str, Type[BaseModel]]
-            The schema string or Pydantic model.
-
-        indent : Optional[int], default: None
-            The number of spaces for indentation. If None, the output will be in one line.
-
-        separators : Optional[Tuple[str, str]], default: None
-            Two separators used in the schema: comma and colon. Examples: (",", ":"), (", ", ": ").
-            If None, the default separators will be used: (",", ": ") when the indent is not None,
-            and (", ", ": ") otherwise.
-
-        strict_mode : bool, default: True
-            Whether to use strict mode. In strict mode, the generated grammar will not allow
-            properties and items that is not specified in the schema. This is equivalent to
-            setting unevaluatedProperties and unevaluatedItems to false.
-
-        Returns
-        -------
-        init_context : GrammarMatcherInitContext
-            The initialization context for the grammar matcher.
-        """
-        if isinstance(schema, type) and issubclass(schema, BaseModel):
-            schema = json.dumps(schema.model_json_schema())
-
-        return GrammarMatcherInitContext.from_handle(
-            self.handle.get_init_context_for_json_schema(schema, indent, separators, strict_mode)
-        )
-
-
-class GrammarMatcher(XGObject):
-    """Match the output of the LLM to the specified grammar, then generate the mask for the next
-    token. This is the core class in the grammar-guided generation.
-
-    This class maintains a stateful matcher that can accept tokens and strings, then match them
-    to the specified grammar. The matcher can provide a bitmask for the next token prediction,
-    so that the output of the LLM follows the specified grammar. Its state can be reset and
-    rolled back by tokens. It also provides utilities for jump-forward decoding.
-
-    After matching the whole grammar, the matcher can still accept a stop token. The token mask at
-    this time will also allow stop tokens. After accepting the stop token, the matcher will
-    terminate, then it cannot accept any new token or generate a new token mask.
-
-    Under the hood, it utilizes a recursive descent parser with backtracking to match the grammar,
-    with optimizations specific to LLM token mask generation.
-    """
-
-    @overload
-    def __init__(
-        self,
-        grammar: BNFGrammar,
-        tokenizer_or_vocab: Union[
-            None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]
-        ] = None,
-        *,
-        stop_token_ids: Union[None, int, List[int]] = None,
-        terminate_without_stop_token: bool = False,
-        mask_vocab_size: Optional[int] = None,
-        max_rollback_tokens: int = 0,
-    ) -> None:
-        """Initialize the grammar matcher with a grammar and a tokenizer or vocabulary.
-
-        Parameters
-        ----------
-        grammar : BNFGrammar
-            The BNF grammar to match.
-
-        tokenizer_or_vocab : Union[None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]], default: None
-            The tokenizer or the vocabulary. It can be None, a huggingface tokenizer, a tokenizer info,
-            or a list of raw tokens.
-
-            None means there is no vocabulary, then the grammar matcher can only handle string
-            operations. If a huggingface tokenizer or a list of raw tokens are provided, a TokenizerInfo
-            object will be constructed from the tokenizer or the vocabulary.
-
-        stop_token_ids : Union[None, int, List[int]], default: None
-            The ids of the stop tokens. If None, the stop tokens are detected from the vocabulary.
-
-        terminate_without_stop_token : bool, default: False
-            Whether to accept a stop token before terminating. If True, the matcher will directly
-            terminate after matching the whole grammar.
-
-        mask_vocab_size : Optional[int], default: None
-            The size of the mask. Some LLMs may have a larger model vocabulary size (i.e. the
-            dimension of the logits) than the tokenizer vocabulary size (i.e. the number of tokens
-            in the vocabulary), as the model vocabulary size may be rounded up to the multiple of
-            the power of 64. In this case, the model vocabulary size should be passed to align the
-            mask size with the model vocabulary size.
-
-            If None, the mask size is set to the tokenizer vocabulary size.
-
-        max_rollback_tokens : int, default: 0
-            The maximum number of tokens to rollback. When larger, more matcher states need to be
-            recorded in the memory.
-        """
-        ...
-
-    @overload
-    def __init__(
-        self,
-        grammar_matcher_init_context: GrammarMatcherInitContext,
-        *,
-        stop_token_ids: Union[None, int, List[int]] = None,
-        terminate_without_stop_token: bool = False,
-        mask_vocab_size: Optional[int] = None,
-        max_rollback_tokens: int = 0,
-    ) -> None:
-        """Initialize the grammar matcher with a grammar matcher initialization context. This
-        initialization is very fast.
-
-        Parameters
-        ----------
-        grammar_matcher_init_context : GrammarMatcherInitContext
-            The initialization context for the grammar matcher.
-        """
-        ...
-
-    def __init__(
-        self,
-        grammar_or_context: Union[BNFGrammar, GrammarMatcherInitContext],
-        tokenizer_or_vocab: Union[
-            None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]
-        ] = None,
-        *,
-        stop_token_ids: Union[None, int, List[int]] = None,
-        terminate_without_stop_token: bool = False,
-        mask_vocab_size: Optional[int] = None,
-        max_rollback_tokens: int = 0,
-    ) -> None:
-        if isinstance(grammar_or_context, BNFGrammar):
-            grammar_matcher_init_context = GrammarMatcherInitContext(
-                grammar_or_context, tokenizer_or_vocab
-            )
-        else:
-            grammar_matcher_init_context = grammar_or_context
-
-        if isinstance(stop_token_ids, int):
-            stop_token_ids = [stop_token_ids]
-
-        self.init_with_handle(
-            _core.GrammarMatcher(
-                grammar_matcher_init_context.handle,
-                stop_token_ids,
-                terminate_without_stop_token,
-                mask_vocab_size,
-                max_rollback_tokens,
-            )
-        )
-
-    def accept_token(self, token_id: int, *, verbose: bool = False) -> bool:
-        """Accept one token and update the state of the matcher.
-
-        Parameters
-        ----------
-        token_id : int
-            The id of the token to accept.
-
-        verbose : bool, default: False
-            Whether to print information about the internal state of the matcher. Helpful
-            for debugging.
-
-        Returns
-        -------
-        accepted : bool
-            Whether the token is accepted.
-        """
-        return self.handle.accept_token(token_id, verbose)
-
-    def accept_string(self, input_str: Union[str, bytes], *, verbose: bool = False) -> bool:
-        """Accept a string and update the state of the matcher. The whole string is considered
-        as one token in rollback. It is only used to complement the functionality of accept_token.
-
-        Parameters
-        ----------
-        input_str : Union[str, bytes]
-            The string to be accepted.
-
-        verbose : bool, default: False
-            Whether to print information about the internal state of the matcher. Helpful for
-            debugging.
-
-        Returns
-        -------
-        accepted : bool
-            Whether the string is accepted.
-        """
-        return self.handle.accept_string(input_str, verbose)
-
-    def find_next_token_bitmask(self) -> torch.Tensor:
-        """Find the bitmask for the next token prediction. The mask is packed in 32-bit integers,
-        where each bit corresponds to one token. Allowed tokens are ones, while disallowed tokens
-        are zeros.
-
-        Returns
-        -------
-        bitmask : torch.Tensor
-            The bitmask for the next token prediction. It is a tensor on CPU with dtype torch.int32
-            and shape (ceil(mask_vocab_size / 32),).
-        """
-        return self.handle.find_next_token_bitmask()
-
-    @staticmethod
-    def get_rejected_tokens_from_bitmask(bitmask: torch.Tensor, mask_vocab_size: int) -> List[int]:
-        """Get the ids of the rejected tokens from the bitmask.
-
-        Parameters
-        ----------
-        bitmask : torch.Tensor
-            The rejected token bitmask.
-
-        Returns
-        -------
-        rejected_token_ids : List[int]
-            A list of rejected token ids.
-        """
-        return _core.GrammarMatcher.get_rejected_tokens_from_bitmask(bitmask, mask_vocab_size)
-
-    @staticmethod
-    def apply_token_bitmask(logits: torch.Tensor, bitmask: torch.Tensor):
-        """Apply the bitmask to the logits in-place.
-
-        Parameters
-        ----------
-        logits : torch.Tensor
-            The tensor to apply the bitmask to. This should be a 1D tensor,
-            with the dimension of the vocabulary.
-
-        bitmask : torch.Tensor
-            The bitmask to apply. This should be a 1D tensor of int32 values,
-            where each bit represents whether a token is allowed (1) or not (0).
-
-        Returns
-        -------
-        masked_tensor : torch.Tensor
-            The masked tensor, where disallowed tokens are set to negative infinity.
-        """
-        rejected_tokens = GrammarMatcher.get_rejected_tokens_from_bitmask(bitmask, logits.shape[-1])
-        print(rejected_tokens)
-        logits[rejected_tokens] = float("-inf")
-
-    def find_jump_forward_string(self) -> str:
-        """Find the jump-forward string for jump-forward decoding. This is the longest string that
-        certainly conforms with the current grammar from the current matcher state. This string
-        can become the output of the LLM without requiring LLM decoding.
-
-        This method does not change the matcher state.
-
-        Returns
-        -------
-        jump_forward_string : str
-            The jump-forward string.
-        """
-        return self.handle.find_jump_forward_string()
-
-    def rollback(self, num_tokens: int = 1) -> None:
-        """Rollback the matcher to a previous state by several tokens.
-
-        Parameters
-        ----------
-        num_tokens : int, default: 1
-            The number of tokens to rollback. It cannot exceed the current number of steps, nor can
-            it exceed the specified maximum number of rollback tokens.
-        """
-        self.handle.rollback(num_tokens)
-
-    def is_terminated(self) -> bool:
-        """Check if the matcher has terminated. If terminate_without_stop_token is False, the
-        matcher will terminate if it has accepted the stop token. Otherwise, the matcher will
-        terminate after matching the whole grammar.
-
-        Returns
-        -------
-        terminated : bool
-            Whether the matcher has terminated.
-        """
-        return self.handle.is_terminated()
-
-    def reset(self) -> None:
-        """Reset the matcher to the initial state."""
-        return self.handle.reset()
-
-    @property
-    def max_rollback_tokens(self) -> int:
-        """Get the maximum number of rollback tokens allowed.
-
-        Returns
-        -------
-        max_rollback_tokens : int
-            The maximum number of rollback tokens.
-        """
-        return self.handle.max_rollback_tokens
-
-    @property
-    def mask_vocab_size(self) -> int:
-        """The size of the vocabulary in the generated mask.
-
-        Returns
-        -------
-        mask_vocab_size : int
-            The size of the vocabulary in the generated mask.
-        """
-        return self.handle.mask_vocab_size
-
-    @property
-    def stop_token_ids(self) -> List[int]:
-        """The ids of the stop tokens used in the matcher.
-
-        Returns
-        -------
-        stop_token_ids : List[int]
-            The ids of the stop tokens.
-        """
-        return self.handle.stop_token_ids
+# class BuiltinGrammar:
+#     @staticmethod
+#     def json() -> BNFGrammar:
+#         """Get the grammar of standard JSON. This is compatible with the official JSON grammar
+#         in https://www.json.org/json-en.html.
+
+#         Returns
+#         -------
+#         grammar : BNFGrammar
+#             The JSON grammar.
+#         """
+#         return BNFGrammar.from_handle(_core.BuiltinGrammar.json())
+
+#     @staticmethod
+#     def json_schema(
+#         schema: Union[str, Type[BaseModel]],
+#         *,
+#         indent: Optional[int] = None,
+#         separators: Optional[Tuple[str, str]] = None,
+#         strict_mode: bool = True,
+#     ) -> BNFGrammar:
+#         """Construct a BNF grammar from JSON schema. Pydantic model can be used to specify the
+#         schema.
+
+#         The format of the JSON schema can be specified with the `indent` and `separators`
+#         parameters. The meaning and the default values of the parameters follows the convention in
+#         json.dumps().
+
+#         Parameters
+#         ----------
+#         schema : Union[str, Type[BaseModel]]
+#             The schema string or Pydantic model.
+
+#         indent : Optional[int], default: None
+#             The number of spaces for indentation. If None, the output will be in one line.
+
+#         separators : Optional[Tuple[str, str]], default: None
+#             Two separators used in the schema: comma and colon. Examples: (",", ":"), (", ", ": ").
+#             If None, the default separators will be used: (",", ": ") when the indent is not None,
+#             and (", ", ": ") otherwise.
+
+#         strict_mode : bool, default: True
+#             Whether to use strict mode. In strict mode, the generated grammar will not allow
+#             properties and items that is not specified in the schema. This is equivalent to
+#             setting unevaluatedProperties and unevaluatedItems to false.
+
+#             This helps LLM to generate accurate output in the grammar-guided generation with JSON
+#             schema.
+
+#         Returns
+#         -------
+#         grammar : BNFGrammar
+#             The generated BNF grammar.
+#         """
+#         if isinstance(schema, type) and issubclass(schema, BaseModel):
+#             schema = json.dumps(schema.model_json_schema())
+
+#         return BNFGrammar.from_handle(
+#             _core.BuiltinGrammar.json_schema(schema, indent, separators, strict_mode),
+#         )
+
+#     @staticmethod
+#     def _json_schema_to_ebnf(
+#         schema: str,
+#         *,
+#         indent: Optional[int] = None,
+#         separators: Optional[Tuple[str, str]] = None,
+#         strict_mode: bool = True,
+#     ) -> str:
+#         """Convert JSON schema string to EBNF grammar string. For test purposes.
+
+#         Parameters
+#         ----------
+#         schema : str
+#             The schema string.
+
+#         indent : Optional[int], default: None
+#             The number of spaces for indentation. If None, the output will be in one line.
+
+#         separators : Optional[Tuple[str, str]], default: None
+#             Two separators used in the schema: comma and colon. Examples: (",", ":"), (", ", ": ").
+#             If None, the default separators will be used: (",", ": ") when the indent is not None,
+#             and (", ", ": ") otherwise.
+
+#         strict_mode : bool, default: True
+#             Whether to use strict mode. In strict mode, the generated grammar will not allow
+#             properties and items that is not specified in the schema. This is equivalent to
+#             setting unevaluatedProperties and unevaluatedItems to false.
+
+#             This helps LLM to generate accurate output in the grammar-guided generation with JSON
+#             schema.
+
+
+#         Returns
+#         -------
+#         ebnf_string : str
+#             The EBNF grammar string.
+#         """
+#         return _core.BuiltinGrammar._json_schema_to_ebnf(
+#             schema,
+#             indent,
+#             separators,
+#             strict_mode,
+#         )
+
+
+# class VocabType(Enum):
+#     """The type of the vocabulary. Used in TokenizerInfo. XGrammar supports three types of
+#     vocabularies:
+
+#     RAW
+#         The vocabulary is in the raw format. The tokens in the vocabulary is the same as the input
+#         string. This kind of tokenizer includes the tiktoken tokenizer, e.g.
+#         microsoft/Phi-3-small-8k-instruct, Qwen/Qwen-7B-Chat, etc.
+
+#     BYTE_FALLBACK
+#         The vocabulary used in the byte fallback BPE tokenizer. The tokens are processed through
+#         the byte-fallback conversion. E.g. "\u001B" -> "<0x1B>", " apple" -> "▁apple". This kind of
+#         tokenizer includes meta-llama/Llama-2-7b-chat, microsoft/Phi-3.5-mini-instruct, etc.
+
+#     BYTE_LEVEL
+#         The vocabulary used in the byte level BPE tokenizer. The tokens are processed through
+#         the byte-to-unicode conversion, as in
+#         https://github.com/huggingface/transformers/blob/87be06ca77166e6a6215eee5a990ab9f07238a18/src/transformers/models/gpt2/tokenization_gpt2.py#L38-L59
+
+#         This kind of tokenizer includes meta-llama/Meta-Llama-3-8B-Instruct,
+#         meta-llama/Meta-Llama-3.1-8B-Instruct, etc.
+#     """
+
+#     RAW = "RAW"
+#     BYTE_FALLBACK = "BYTE_FALLBACK"
+#     BYTE_LEVEL = "BYTE_LEVEL"
+
+
+# class TokenizerInfo(XGObject):
+#     """The tokenizer info, which contains the vocabulary, the type of the vocabulary, and necessary
+#     information for the grammar-guided generation.
+
+#     This class should be the first choice when handling tokenizers in XGrammar. It eliminates the
+#     overhead of converting the vocabulary between C++ and Python.
+
+#     Parameters
+#     ----------
+#     vocab : Union[List[bytes], List[str]]
+#         The vocabulary of the tokenizer.
+
+#     vocab_type : VocabType, default: VocabType.RAW
+#         The type of the vocabulary. See also VocabType.
+
+#     prepend_space_in_tokenization : bool, default: False
+#         Whether the tokenizer will prepend a space before the text in the tokenization process.
+#     """
+
+#     def __init__(
+#         self,
+#         vocab: Union[List[bytes], List[str]],
+#         vocab_type: VocabType = VocabType.RAW,
+#         prepend_space_in_tokenization: bool = False,
+#     ) -> None:
+#         self.init_with_handle(
+#             _core.TokenizerInfo(vocab, vocab_type.value, prepend_space_in_tokenization)
+#         )
+
+#     @property
+#     def vocab_size(self) -> int:
+#         """The size of the vocabulary."""
+#         return self.handle.vocab_size
+
+#     @property
+#     def vocab_type(self) -> VocabType:
+#         """The type of the vocabulary."""
+#         return VocabType(self.handle.vocab_type)
+
+#     @property
+#     def prepend_space_in_tokenization(self) -> bool:
+#         """Whether the tokenizer will prepend a space before the text in the tokenization
+#         process."""
+#         return self.handle.prepend_space_in_tokenization
+
+#     @property
+#     def raw_vocab(self) -> List[bytes]:
+#         """The raw vocabulary of the tokenizer. This converts the tokens in the LLM's vocabulary
+#         back to the original format of the input text. E.g. for type ByteFallback, the token
+#         <0x1B> is converted back to "\u001B" in the raw vocabulary.
+#         """
+#         return self.handle.raw_vocab
+
+#     @staticmethod
+#     def from_huggingface(tokenizer: PreTrainedTokenizerBase) -> "TokenizerInfo":
+#         """Construct the tokenizer info from the huggingface tokenizer. This constructor supports
+#         various tokenizer backends, including the huggingface fast tokenizer and tiktoken tokenizer.
+
+#         Parameters
+#         ----------
+#         tokenizer : PreTrainedTokenizerBase
+#             The huggingface tokenizer.
+
+#         Returns
+#         -------
+#         tokenizer_info : TokenizerInfo
+#             The tokenizer info.
+#         """
+
+#         try:
+#             vocab = tokenizer.get_vocab()
+#             vocab = [token for token, _ in sorted(vocab.items(), key=lambda x: x[1])]
+#         except AttributeError as e:
+#             msg = (
+#                 f"Cannot get the vocabulary of the tokenizer {type(tokenizer)}. The tokenizer "
+#                 "should have a get_vocab method."
+#             )
+#             raise ValueError(msg) from e
+
+#         if isinstance(tokenizer, PreTrainedTokenizerFast):
+#             # huggingface fast tokenizer
+#             # Note this backend_str may not contain the full vocab. Some special tokens may
+#             # be omitted. So we still need to pass the vocab to the constructor.
+#             backend_str = tokenizer.backend_tokenizer.to_str()
+#             return TokenizerInfo.from_handle(
+#                 _core.TokenizerInfo.from_huggingface(vocab, backend_str)
+#             )
+#         elif (
+#             "vocab_file" in tokenizer.vocab_files_names
+#             and "tiktoken" in tokenizer.vocab_files_names["vocab_file"]
+#         ):
+#             # tiktoken tokenizer
+#             # e.g. Phi-3-small-8k-instruct, Qwen-7B-Chat, stablelm-2-12b-chat (previously)
+#             return TokenizerInfo(vocab, VocabType.RAW, False)
+#         else:
+#             # TODO(yixin): sentencepiece tokenizer
+#             raise ValueError(f"Unsupported tokenizer type: {type(tokenizer)}")
+
+#     def dump_metadata(self) -> str:
+#         """Dump the metadata of the tokenizer, mainly vocab_type and
+#         prepend_space_in_tokenization."""
+#         return self.handle.dump_metadata()
+
+#     @staticmethod
+#     def from_vocab_and_metadata(vocab: List[Union[bytes, str]], metadata: str) -> "TokenizerInfo":
+#         """Construct the tokenizer info from the vocabulary and the metadata string.
+
+#         Parameters
+#         ----------
+#         vocab : List[Union[bytes, str]]
+#             The vocabulary of the tokenizer.
+
+#         metadata : str
+#             The metadata string.
+#         """
+#         return TokenizerInfo.from_handle(
+#             _core.TokenizerInfo.from_vocab_and_metadata(vocab, metadata),
+#         )
+
+
+# class GrammarMatcherInitContext(XGObject):
+#     """The initialization context for the grammar matcher. This object is used to fast initialize
+#     the grammar matcher. It contains the grammar, the raw vocabulary, and the preprocessed cache
+#     for the generating the mask in the grammar-guided generation.
+
+#     Parameters
+#     ----------
+#     grammar : BNFGrammar
+#         The BNF grammar to match.
+
+#     tokenizer_or_vocab : Union[None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]], default: None
+#         The tokenizer or the vocabulary. It can be None, a huggingface tokenizer, a tokenizer info,
+#         or a list of raw tokens.
+
+#         None means there is no vocabulary, then the grammar matcher can only handle string
+#         operations. If a huggingface tokenizer or a list of raw tokens are provided, a TokenizerInfo
+#         object will be constructed from the tokenizer or the vocabulary.
+#     """
+
+#     def __init__(
+#         self,
+#         grammar: BNFGrammar,
+#         tokenizer_or_vocab: Union[
+#             None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]
+#         ] = None,
+#     ) -> None:
+#         # convert tokenizer_or_vocab to TokenizerInfo
+#         if isinstance(tokenizer_or_vocab, PreTrainedTokenizerBase):
+#             tokenizer_or_vocab = TokenizerInfo.from_huggingface(tokenizer_or_vocab)
+#         elif isinstance(tokenizer_or_vocab, list):
+#             tokenizer_or_vocab = TokenizerInfo(tokenizer_or_vocab)
+#         elif tokenizer_or_vocab is None:
+#             tokenizer_or_vocab = TokenizerInfo([])
+#         if not isinstance(tokenizer_or_vocab, TokenizerInfo):
+#             raise ValueError(f"Unsupported tokenizer_or_vocab type: {type(tokenizer_or_vocab)}")
+
+#         self.init_with_handle(
+#             _core.GrammarMatcherInitContext(grammar.handle, tokenizer_or_vocab.handle)
+#         )
+
+
+# class GrammarMatcherInitContextCache(XGObject):
+#     """The cache for the grammar matcher initialization context. It is for eliminating the overhead
+#     of constructing the GrammarMatcherInitContext of the same grammar for many times. This cache
+#     is tokenizer-specific, i.e. different tokenizers should have different caches.
+
+#     Parameters
+#     ----------
+#     tokenizer_or_vocab : Union[PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]]
+#         The tokenizer or the vocabulary. Its meaning is the same as in GrammarMatcher.
+#     """
+
+#     def __init__(
+#         self,
+#         tokenizer_or_vocab: Union[PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]],
+#     ):
+#         # convert tokenizer_or_vocab to TokenizerInfo
+#         if isinstance(tokenizer_or_vocab, PreTrainedTokenizerBase):
+#             tokenizer_or_vocab = TokenizerInfo.from_huggingface(tokenizer_or_vocab)
+#         elif isinstance(tokenizer_or_vocab, list):
+#             tokenizer_or_vocab = TokenizerInfo(tokenizer_or_vocab)
+#         if not isinstance(tokenizer_or_vocab, TokenizerInfo):
+#             raise ValueError(f"Unsupported tokenizer_or_vocab type: {type(tokenizer_or_vocab)}")
+
+#         self.init_with_handle(_core.GrammarMatcherInitContextCache(tokenizer_or_vocab.handle))
+
+#     def get_init_context_for_json(self) -> GrammarMatcherInitContext:
+#         """Get GrammarMatcherInitContext from the standard JSON.
+
+#         Returns
+#         -------
+#         init_context : GrammarMatcherInitContext
+#             The initialization context for the grammar matcher.
+#         """
+#         return GrammarMatcherInitContext.from_handle(self.handle.get_init_context_for_json())
+
+#     def get_init_context_for_json_schema(
+#         self,
+#         schema: Union[str, Type[BaseModel]],
+#         *,
+#         indent: Optional[int] = None,
+#         separators: Optional[Tuple[str, str]] = None,
+#         strict_mode: bool = True,
+#     ) -> GrammarMatcherInitContext:
+#         """Get GrammarMatcherInitContext from the specified JSON schema and format. The indent
+#         and separators parameters follow the same convention as in json.dumps().
+
+#         Parameters
+#         ----------
+#         schema : Union[str, Type[BaseModel]]
+#             The schema string or Pydantic model.
+
+#         indent : Optional[int], default: None
+#             The number of spaces for indentation. If None, the output will be in one line.
+
+#         separators : Optional[Tuple[str, str]], default: None
+#             Two separators used in the schema: comma and colon. Examples: (",", ":"), (", ", ": ").
+#             If None, the default separators will be used: (",", ": ") when the indent is not None,
+#             and (", ", ": ") otherwise.
+
+#         strict_mode : bool, default: True
+#             Whether to use strict mode. In strict mode, the generated grammar will not allow
+#             properties and items that is not specified in the schema. This is equivalent to
+#             setting unevaluatedProperties and unevaluatedItems to false.
+
+#         Returns
+#         -------
+#         init_context : GrammarMatcherInitContext
+#             The initialization context for the grammar matcher.
+#         """
+#         if isinstance(schema, type) and issubclass(schema, BaseModel):
+#             schema = json.dumps(schema.model_json_schema())
+
+#         return GrammarMatcherInitContext.from_handle(
+#             self.handle.get_init_context_for_json_schema(schema, indent, separators, strict_mode)
+#         )
+
+
+# class GrammarMatcher(XGObject):
+#     """Match the output of the LLM to the specified grammar, then generate the mask for the next
+#     token. This is the core class in the grammar-guided generation.
+
+#     This class maintains a stateful matcher that can accept tokens and strings, then match them
+#     to the specified grammar. The matcher can provide a bitmask for the next token prediction,
+#     so that the output of the LLM follows the specified grammar. Its state can be reset and
+#     rolled back by tokens. It also provides utilities for jump-forward decoding.
+
+#     After matching the whole grammar, the matcher can still accept a stop token. The token mask at
+#     this time will also allow stop tokens. After accepting the stop token, the matcher will
+#     terminate, then it cannot accept any new token or generate a new token mask.
+
+#     Under the hood, it utilizes a recursive descent parser with backtracking to match the grammar,
+#     with optimizations specific to LLM token mask generation.
+#     """
+
+#     @overload
+#     def __init__(
+#         self,
+#         grammar: BNFGrammar,
+#         tokenizer_or_vocab: Union[
+#             None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]
+#         ] = None,
+#         *,
+#         stop_token_ids: Union[None, int, List[int]] = None,
+#         terminate_without_stop_token: bool = False,
+#         mask_vocab_size: Optional[int] = None,
+#         max_rollback_tokens: int = 0,
+#     ) -> None:
+#         """Initialize the grammar matcher with a grammar and a tokenizer or vocabulary.
+
+#         Parameters
+#         ----------
+#         grammar : BNFGrammar
+#             The BNF grammar to match.
+
+#         tokenizer_or_vocab : Union[None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]], default: None
+#             The tokenizer or the vocabulary. It can be None, a huggingface tokenizer, a tokenizer info,
+#             or a list of raw tokens.
+
+#             None means there is no vocabulary, then the grammar matcher can only handle string
+#             operations. If a huggingface tokenizer or a list of raw tokens are provided, a TokenizerInfo
+#             object will be constructed from the tokenizer or the vocabulary.
+
+#         stop_token_ids : Union[None, int, List[int]], default: None
+#             The ids of the stop tokens. If None, the stop tokens are detected from the vocabulary.
+
+#         terminate_without_stop_token : bool, default: False
+#             Whether to accept a stop token before terminating. If True, the matcher will directly
+#             terminate after matching the whole grammar.
+
+#         mask_vocab_size : Optional[int], default: None
+#             The size of the mask. Some LLMs may have a larger model vocabulary size (i.e. the
+#             dimension of the logits) than the tokenizer vocabulary size (i.e. the number of tokens
+#             in the vocabulary), as the model vocabulary size may be rounded up to the multiple of
+#             the power of 64. In this case, the model vocabulary size should be passed to align the
+#             mask size with the model vocabulary size.
+
+#             If None, the mask size is set to the tokenizer vocabulary size.
+
+#         max_rollback_tokens : int, default: 0
+#             The maximum number of tokens to rollback. When larger, more matcher states need to be
+#             recorded in the memory.
+#         """
+#         ...
+
+#     @overload
+#     def __init__(
+#         self,
+#         grammar_matcher_init_context: GrammarMatcherInitContext,
+#         *,
+#         stop_token_ids: Union[None, int, List[int]] = None,
+#         terminate_without_stop_token: bool = False,
+#         mask_vocab_size: Optional[int] = None,
+#         max_rollback_tokens: int = 0,
+#     ) -> None:
+#         """Initialize the grammar matcher with a grammar matcher initialization context. This
+#         initialization is very fast.
+
+#         Parameters
+#         ----------
+#         grammar_matcher_init_context : GrammarMatcherInitContext
+#             The initialization context for the grammar matcher.
+#         """
+#         ...
+
+#     def __init__(
+#         self,
+#         grammar_or_context: Union[BNFGrammar, GrammarMatcherInitContext],
+#         tokenizer_or_vocab: Union[
+#             None, PreTrainedTokenizerBase, TokenizerInfo, List[Union[bytes, str]]
+#         ] = None,
+#         *,
+#         stop_token_ids: Union[None, int, List[int]] = None,
+#         terminate_without_stop_token: bool = False,
+#         mask_vocab_size: Optional[int] = None,
+#         max_rollback_tokens: int = 0,
+#     ) -> None:
+#         if isinstance(grammar_or_context, BNFGrammar):
+#             grammar_matcher_init_context = GrammarMatcherInitContext(
+#                 grammar_or_context, tokenizer_or_vocab
+#             )
+#         else:
+#             grammar_matcher_init_context = grammar_or_context
+
+#         if isinstance(stop_token_ids, int):
+#             stop_token_ids = [stop_token_ids]
+
+#         self.init_with_handle(
+#             _core.GrammarMatcher(
+#                 grammar_matcher_init_context.handle,
+#                 stop_token_ids,
+#                 terminate_without_stop_token,
+#                 mask_vocab_size,
+#                 max_rollback_tokens,
+#             )
+#         )
+
+#     def accept_token(self, token_id: int, *, verbose: bool = False) -> bool:
+#         """Accept one token and update the state of the matcher.
+
+#         Parameters
+#         ----------
+#         token_id : int
+#             The id of the token to accept.
+
+#         verbose : bool, default: False
+#             Whether to print information about the internal state of the matcher. Helpful
+#             for debugging.
+
+#         Returns
+#         -------
+#         accepted : bool
+#             Whether the token is accepted.
+#         """
+#         return self.handle.accept_token(token_id, verbose)
+
+#     def accept_string(self, input_str: Union[str, bytes], *, verbose: bool = False) -> bool:
+#         """Accept a string and update the state of the matcher. The whole string is considered
+#         as one token in rollback. It is only used to complement the functionality of accept_token.
+
+#         Parameters
+#         ----------
+#         input_str : Union[str, bytes]
+#             The string to be accepted.
+
+#         verbose : bool, default: False
+#             Whether to print information about the internal state of the matcher. Helpful for
+#             debugging.
+
+#         Returns
+#         -------
+#         accepted : bool
+#             Whether the string is accepted.
+#         """
+#         return self.handle.accept_string(input_str, verbose)
+
+#     def find_next_token_bitmask(self) -> torch.Tensor:
+#         """Find the bitmask for the next token prediction. The mask is packed in 32-bit integers,
+#         where each bit corresponds to one token. Allowed tokens are ones, while disallowed tokens
+#         are zeros.
+
+#         Returns
+#         -------
+#         bitmask : torch.Tensor
+#             The bitmask for the next token prediction. It is a tensor on CPU with dtype torch.int32
+#             and shape (ceil(mask_vocab_size / 32),).
+#         """
+#         return self.handle.find_next_token_bitmask()
+
+#     @staticmethod
+#     def get_rejected_tokens_from_bitmask(bitmask: torch.Tensor, mask_vocab_size: int) -> List[int]:
+#         """Get the ids of the rejected tokens from the bitmask.
+
+#         Parameters
+#         ----------
+#         bitmask : torch.Tensor
+#             The rejected token bitmask.
+
+#         Returns
+#         -------
+#         rejected_token_ids : List[int]
+#             A list of rejected token ids.
+#         """
+#         return _core.GrammarMatcher.get_rejected_tokens_from_bitmask(bitmask, mask_vocab_size)
+
+#     @staticmethod
+#     def apply_token_bitmask(logits: torch.Tensor, bitmask: torch.Tensor):
+#         """Apply the bitmask to the logits in-place.
+
+#         Parameters
+#         ----------
+#         logits : torch.Tensor
+#             The tensor to apply the bitmask to. This should be a 1D tensor,
+#             with the dimension of the vocabulary.
+
+#         bitmask : torch.Tensor
+#             The bitmask to apply. This should be a 1D tensor of int32 values,
+#             where each bit represents whether a token is allowed (1) or not (0).
+
+#         Returns
+#         -------
+#         masked_tensor : torch.Tensor
+#             The masked tensor, where disallowed tokens are set to negative infinity.
+#         """
+#         rejected_tokens = GrammarMatcher.get_rejected_tokens_from_bitmask(bitmask, logits.shape[-1])
+#         print(rejected_tokens)
+#         logits[rejected_tokens] = float("-inf")
+
+#     def find_jump_forward_string(self) -> str:
+#         """Find the jump-forward string for jump-forward decoding. This is the longest string that
+#         certainly conforms with the current grammar from the current matcher state. This string
+#         can become the output of the LLM without requiring LLM decoding.
+
+#         This method does not change the matcher state.
+
+#         Returns
+#         -------
+#         jump_forward_string : str
+#             The jump-forward string.
+#         """
+#         return self.handle.find_jump_forward_string()
+
+#     def rollback(self, num_tokens: int = 1) -> None:
+#         """Rollback the matcher to a previous state by several tokens.
+
+#         Parameters
+#         ----------
+#         num_tokens : int, default: 1
+#             The number of tokens to rollback. It cannot exceed the current number of steps, nor can
+#             it exceed the specified maximum number of rollback tokens.
+#         """
+#         self.handle.rollback(num_tokens)
+
+#     def is_terminated(self) -> bool:
+#         """Check if the matcher has terminated. If terminate_without_stop_token is False, the
+#         matcher will terminate if it has accepted the stop token. Otherwise, the matcher will
+#         terminate after matching the whole grammar.
+
+#         Returns
+#         -------
+#         terminated : bool
+#             Whether the matcher has terminated.
+#         """
+#         return self.handle.is_terminated()
+
+#     def reset(self) -> None:
+#         """Reset the matcher to the initial state."""
+#         return self.handle.reset()
+
+#     @property
+#     def max_rollback_tokens(self) -> int:
+#         """Get the maximum number of rollback tokens allowed.
+
+#         Returns
+#         -------
+#         max_rollback_tokens : int
+#             The maximum number of rollback tokens.
+#         """
+#         return self.handle.max_rollback_tokens
+
+#     @property
+#     def mask_vocab_size(self) -> int:
+#         """The size of the vocabulary in the generated mask.
+
+#         Returns
+#         -------
+#         mask_vocab_size : int
+#             The size of the vocabulary in the generated mask.
+#         """
+#         return self.handle.mask_vocab_size
+
+#     @property
+#     def stop_token_ids(self) -> List[int]:
+#         """The ids of the stop tokens used in the matcher.
+
+#         Returns
+#         -------
+#         stop_token_ids : List[int]
+#             The ids of the stop tokens.
+#         """
+#         return self.handle.stop_token_ids

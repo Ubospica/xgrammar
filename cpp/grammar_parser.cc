@@ -314,16 +314,26 @@ int32_t EBNFParserImpl::ParseNonNegativeNumber() {
 
 int32_t EBNFParserImpl::ParseQuantifierRange(int32_t grammar_expr_id) {
   Consume();
+  ConsumeSpace();
   int32_t lower = Peek() == ',' ? 0 : ParseNonNegativeNumber();
+  ConsumeSpace();
   if (Peek() != ',') {
     RaiseError("Expect ',' in quantifier range");
   }
   Consume();
+  ConsumeSpace();
   int32_t upper = Peek() == '}' ? -1 : ParseNonNegativeNumber();
+  ConsumeSpace();
   if (Peek() != '}') {
     RaiseError("Expect '}' in quantifier range");
   }
   Consume();
+  if (upper != -1 && lower > upper) {
+    RaiseError(
+        "Invalid quantifier range: lower bound " + std::to_string(lower) +
+        " is larger than upper bound " + std::to_string(upper)
+    );
+  }
   return builder_.AddQuantifierRange(grammar_expr_id, lower, upper);
 }
 

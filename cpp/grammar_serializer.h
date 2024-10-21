@@ -29,10 +29,10 @@ class BNFGrammarPrinter {
    * \brief Constructor.
    * \param grammar The grammar to print.
    */
-  explicit BNFGrammarPrinter(const BNFGrammar& grammar) {}
+  explicit BNFGrammarPrinter(const BNFGrammar& grammar) : grammar_(grammar) {}
 
   /*! \brief Print the complete grammar. */
-  std::string ToString() final;
+  std::string ToString();
 
   /*! \brief Print a rule. */
   std::string PrintRule(const Rule& rule);
@@ -60,6 +60,8 @@ class BNFGrammarPrinter {
   std::string PrintSequence(const GrammarExpr& grammar_expr);
   /*! \brief Print a GrammarExpr for grammar_expr choices. */
   std::string PrintChoices(const GrammarExpr& grammar_expr);
+
+  BNFGrammar grammar_;
 };
 
 /*!
@@ -82,15 +84,16 @@ class BNFGrammarJSONSerializer {
    * \param grammar The grammar to print.
    */
   explicit BNFGrammarJSONSerializer(const BNFGrammar& grammar, bool prettify = true)
-      : BNFGrammarSerializer(grammar), prettify_(prettify) {}
+      : prettify_(prettify) {}
 
   /*!
    * \brief Dump the raw representation of the AST to a JSON file.
    * \param prettify Whether to format the JSON string. If false, all whitespaces will be removed.
    */
-  std::string ToString() final;
+  std::string Serialize();
 
  private:
+  BNFGrammar grammar_;
   bool prettify_;
 };
 

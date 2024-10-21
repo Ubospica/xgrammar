@@ -16,10 +16,10 @@
 # under the License.
 from .xgrammar import (
     BNFGrammar,
-    BuiltinGrammar,
-    GrammarMatcher,
-    GrammarMatcherInitContext,
-    GrammarMatcherInitContextCache,
-    TokenizerInfo,
-    VocabType,
+    # BuiltinGrammar,
+    # GrammarMatcher,
+    # GrammarMatcherInitContext,
+    # GrammarMatcherInitContextCache,
+    # TokenizerInfo,
+    # VocabType,
 )
