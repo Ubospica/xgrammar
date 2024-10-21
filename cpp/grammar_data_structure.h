@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "support/csr_array.h"
+#include "support/graph.h"
 #include "support/logging.h"
 
 namespace xgrammar {
@@ -145,11 +146,28 @@ class BNFGrammar::Impl {
     return {static_cast<GrammarExprType>(row[0]), row.data + 1, row.data_len - 1};
   }
 
+  enum class EdgeType : int8_t {
+    kCharacter,
+    kCharacterRange,
+    kRuleRef,
+    kEpsilon,
+  };
+
+  struct EdgeLabel {
+    EdgeType type;
+    int16_t data_1;
+    int16_t data_2;
+  };
+
+  const Graph<EdgeLabel>& GetGrammarGraph() const { return grammar_graph_; }
+
  private:
   /*! \brief The rules of the grammar. rule_id corresponds the index of this vector. */
   std::vector<Rule> rules_;
   CSRArray<int32_t> grammar_expr_data_;
   int32_t root_rule_id_ = -1;
+
+  Graph<EdgeLabel> grammar_graph_;
 
   friend class BNFGrammarBuilder;
   friend class BNFGrammarJSONSerializer;

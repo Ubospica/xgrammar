@@ -28,6 +28,9 @@ namespace xgrammar {
   /* Access the impl pointer. Useful in implementation. */                     \
   Impl* operator->() { return pimpl_.get(); }                                  \
   const Impl* operator->() const { return pimpl_.get(); }                      \
+  /* Clone the content of the object and create a new object. Impl */          \
+  /* should have a value copy constructor. */                                  \
+  TypeName Clone() const { return TypeName(std::make_shared<Impl>(*pimpl_)); } \
                                                                                \
  private:                                                                      \
   std::shared_ptr<Impl> pimpl_

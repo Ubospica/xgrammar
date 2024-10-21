@@ -9,6 +9,8 @@
 
 #include <xgrammar/xgrammar.h>
 
+#include <string>
+
 namespace xgrammar {
 
 /*!
