@@ -84,30 +84,26 @@ enum CharHandlingError : TCodepoint {
  * \brief Parse all codepoints in a UTF-8 string.
  * \param utf8 The UTF-8 string.
  * \return All codepoints. If the UTF-8 string is invalid, and the error policy is
- * kReturnInvalid, the function returns {CharHandlingError::kInvalidUTF8}.
+ * kReturnInvalid, the function returns {CharHandlingError::kInvalidUTF8, first_invalid_byte_index}.
  */
 std::vector<TCodepoint> ParseUTF8(const char* utf8, bool return_byte_on_error = false);
 
+/*!
+ * \brief Handle escape sequences in a string. Suppose data[0] is a backslash.
+ * \param data Pointer to the start of the escape sequence (should point to the backslash).
+ * \param additional_escape_map Additional map of custom escape sequences. It maps from the first
+ * byte of the escape sequence to the corresponding codepoint.
+ * \tparam CharType The type of the data pointer. Could be char, TCodepoint, etc.
+ * \return A pair containing the parsed codepoint and the number of characters consumed. If
+ * the escape sequence is invalid, it returns (CharHandlingError::kInvalidEscape, 0).
+ */
 template <typename CharType>
 std::pair<TCodepoint, int32_t> HandleEscape(
     const CharType* data, const std::unordered_map<char, TCodepoint>& additional_escape_map = {}
 );
 
-/*!
- * \brief Parse the first codepoint from a UTF-8 string. Also checks escape sequences and converts
- * the escaped char to its original value.
- * \param utf8 The UTF-8 string or the escape sequence.
- * \param additional_escape_map A map from escape sequence to codepoint. If the escape sequence is
- * in the map, it will be converted to the corresponding codepoint. e.g. {{"\\-", '-'}}.
- * \return The codepoint and the new pointer. If the UTF-8 string or the escape sequence is
- * invalid, and the error policy is kReturnInvalid, the function returns
- * (CharHandlingError::kInvalidUTF8, input char pointer).
- */
-std::pair<TCodepoint, int32_t> ParseNextUTF8OrEscaped(
-    const char* utf8, const std::unordered_map<char, TCodepoint>& additional_escape_map = {}
-);
+/********** Template implementations **********/
 
-// Template implementation
 template <typename CharType>
 std::pair<TCodepoint, int32_t> HandleEscape(
     const CharType* data, const std::unordered_map<char, TCodepoint>& additional_escape_map
@@ -127,7 +123,7 @@ std::pair<TCodepoint, int32_t> HandleEscape(
       {'0', '\0'},
       {'e', '\x1B'}
   };
-  if (data[0] != '\\') {
+  if (data[0] != '\\' || data[1] > 127 || data[1] < 0) {
     return {CharHandlingError::kInvalidEscape, 0};
   }
   if (auto it = additional_escape_map.find(static_cast<char>(data[1]));

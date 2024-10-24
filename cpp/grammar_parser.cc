@@ -48,8 +48,11 @@ class EBNFParserImpl {
   void ConsumeSpace(bool allow_newline = true);
   // Check the validity of a name
   static bool IsNameChar(TCodepoint c, bool first_char = false);
+  // Initialize the parser with the given EBNF string. The EBNF string is first converted from utf8
+  // to codepoints.
+  void Init(const std::string& ebnf_string);
   // Reset the parser to the beginning of the string.
-  void ResetStringIterator(const char* cur);
+  void Reset();
 
   // Consume a specified number of characters, and maintain the line and column number.
   void Consume(int cnt = 1) {
@@ -66,18 +69,19 @@ class EBNFParserImpl {
   }
 
   // Peek the next character.
-  char Peek(int delta = 0) const { return *(cur_ + delta); }
+  TCodepoint Peek(int delta = 0) const { return cur_[delta]; }
 
   // Throw a ParseError with the given message and the line and column number.
-  [[noreturn]] void ThrowParseError(const std::string& msg) {
+  [[noreturn]] void RaiseError(const std::string& msg) {
     XGRAMMAR_LOG(FATAL) << "EBNF parse error at line " + std::to_string(cur_line_) + ", column " +
                                std::to_string(cur_column_) + ": " + msg;
   }
 
   // The grammar builder
   BNFGrammarBuilder builder_;
+  std::vector<TCodepoint> codepoints_;
   // A pointer to the current parse position in the string
-  const char* cur_ = nullptr;
+  const TCodepoint* cur_ = nullptr;
   // The current line and column number
   int cur_line_ = 1;
   int cur_column_ = 1;
@@ -114,16 +118,17 @@ bool EBNFParserImpl::IsNameChar(TCodepoint c, bool first_char) {
 
 // name should be a char string (not a utf8 string)
 std::string EBNFParserImpl::ParseName(bool accept_empty) {
-  auto start = cur_;
+  std::string name;
   bool first_char = true;
   while (Peek() && IsNameChar(Peek(), first_char)) {
+    name += static_cast<char>(Peek());
     Consume();
     first_char = false;
   }
-  if (start == cur_ && !accept_empty) {
-    ThrowParseError("Expect rule name");
+  if (name.empty() && !accept_empty) {
+    RaiseError("Expect rule name");
   }
-  return std::string(start, cur_);
+  return name;
 }
 
 // Character class:
@@ -135,7 +140,7 @@ std::string EBNFParserImpl::ParseName(bool accept_empty) {
 // [\]] means ]
 // Character class should not contain newlines.
 int32_t EBNFParserImpl::ParseCharacterClass() {
-  static constexpr TCodepoint kUnknownUpperBound = -4;
+  static constexpr TCodepoint UNKNOWN_UPPER_BOUND = -4;
   static const std::unordered_map<char, TCodepoint> CUSTOM_ESCAPE_MAP = {{'-', '-'}, {']', ']'}};
 
   std::vector<BNFGrammarBuilder::CharacterClassElement> elements;
@@ -150,7 +155,7 @@ int32_t EBNFParserImpl::ParseCharacterClass() {
   bool past_is_single_char = false;
   while (Peek() && Peek() != ']') {
     if (Peek() == '\r' || Peek() == '\n') {
-      ThrowParseError("Character class should not contain newline");
+      RaiseError("Character class should not contain newline");
     } else if (Peek() == '-' && Peek(1) != ']' && !past_is_hyphen && past_is_single_char) {
       Consume();
       past_is_hyphen = true;
@@ -158,30 +163,35 @@ int32_t EBNFParserImpl::ParseCharacterClass() {
       continue;
     }
 
-    auto [codepoint, len] = ParseNextUTF8OrEscaped(cur_, CUSTOM_ESCAPE_MAP);
-    if (codepoint == CharHandlingError::kInvalidUTF8) {
-      ThrowParseError("Invalid UTF8 sequence");
+    TCodepoint codepoint;
+    if (Peek() == '\\') {
+      int32_t len;
+      std::tie(codepoint, len) = HandleEscape(cur_, CUSTOM_ESCAPE_MAP);
+      if (codepoint == CharHandlingError::kInvalidEscape) {
+        RaiseError("Invalid escape sequence");
+      }
+      Consume(len);
+    } else {
+      codepoint = Peek();
+      Consume();
     }
-    if (codepoint == CharHandlingError::kInvalidEscape) {
-      ThrowParseError("Invalid escape sequence");
-    }
-    Consume(len);
+
     if (past_is_hyphen) {
       XGRAMMAR_ICHECK(!elements.empty());
       if (elements.back().lower > codepoint) {
-        ThrowParseError("Invalid character class: lower bound is larger than upper bound");
+        RaiseError("Invalid character class: lower bound is larger than upper bound");
       }
       elements.back().upper = codepoint;
       past_is_hyphen = false;
       XGRAMMAR_ICHECK(past_is_single_char == false);
     } else {
-      elements.push_back({codepoint, kUnknownUpperBound});
+      elements.push_back({codepoint, UNKNOWN_UPPER_BOUND});
       past_is_single_char = true;
     }
   }
 
   for (auto& element : elements) {
-    if (element.upper == kUnknownUpperBound) {
+    if (element.upper == UNKNOWN_UPPER_BOUND) {
       element.upper = element.lower;
     }
   }
@@ -191,32 +201,29 @@ int32_t EBNFParserImpl::ParseCharacterClass() {
 
 // parse a c style string with utf8 support
 int32_t EBNFParserImpl::ParseString() {
-  std::vector<int32_t> codepoints;
+  std::string str;
   while (Peek() && Peek() != '\"') {
     if (Peek() == '\r' || Peek() == '\n') {
-      ThrowParseError("There should be no newline character in a string literal");
+      RaiseError("There should be no newline character in a string literal");
     }
 
-    auto [codepoint, len] = ParseNextUTF8OrEscaped(cur_);
-    if (codepoint == CharHandlingError::kInvalidUTF8) {
-      ThrowParseError("Invalid utf8 sequence");
+    if (Peek() == '\\') {
+      auto [codepoint, len] = HandleEscape(cur_);
+      if (codepoint == CharHandlingError::kInvalidEscape) {
+        RaiseError("Invalid escape sequence");
+      }
+      str += PrintAsUTF8(codepoint);
+      Consume(len);
+    } else {
+      str += PrintAsUTF8(Peek());
+      Consume();
     }
-    if (codepoint == CharHandlingError::kInvalidEscape) {
-      ThrowParseError("Invalid escape sequence");
-    }
-    Consume(len);
-    codepoints.push_back(codepoint);
   }
-  if (codepoints.empty()) {
+  if (str.empty()) {
     return builder_.AddEmptyStr();
   }
 
-  // convert codepoints to string
-  std::string str;
-  for (auto codepoint : codepoints) {
-    str += PrintAsUTF8(codepoint);
-  }
-  // convert str to int32_t vector
+  // convert str to int32_t vector to fit in RuleExpr
   std::vector<int32_t> bytes;
   for (auto c : str) {
     bytes.push_back(static_cast<int32_t>(static_cast<uint8_t>(c)));
@@ -228,7 +235,7 @@ int32_t EBNFParserImpl::ParseRuleRef() {
   std::string name = ParseName();
   auto rule_id = builder_.GetRuleId(name);
   if (rule_id == -1) {
-    ThrowParseError("Rule \"" + name + "\" is not defined");
+    RaiseError("Rule \"" + name + "\" is not defined");
   }
   return builder_.AddRuleRef(rule_id);
 }
@@ -243,7 +250,7 @@ int32_t EBNFParserImpl::ParseElement() {
       auto rule_expr_id = ParseChoices();
       ConsumeSpace();
       if (Peek() != ')') {
-        ThrowParseError("Expect )");
+        RaiseError("Expect )");
       }
       Consume();
       in_parentheses_ = prev_in_parentheses;
@@ -253,7 +260,7 @@ int32_t EBNFParserImpl::ParseElement() {
       Consume();
       auto rule_expr_id = ParseCharacterClass();
       if (Peek() != ']') {
-        ThrowParseError("Expect ]");
+        RaiseError("Expect ]");
       }
       Consume();
       return rule_expr_id;
@@ -262,7 +269,7 @@ int32_t EBNFParserImpl::ParseElement() {
       Consume();
       auto rule_expr_id = ParseString();
       if (Peek() != '\"') {
-        ThrowParseError("Expect \"");
+        RaiseError("Expect \"");
       }
       Consume();
       return rule_expr_id;
@@ -271,7 +278,7 @@ int32_t EBNFParserImpl::ParseElement() {
       if (IsNameChar(Peek(), true)) {
         return ParseRuleRef();
       }
-      ThrowParseError("Expect element");
+      RaiseError("Expect element");
     }
   }
 }
@@ -376,7 +383,7 @@ int32_t EBNFParserImpl::ParseLookaheadAssertion() {
   auto result = ParseSequence();
   ConsumeSpace(in_parentheses_);
   if (Peek() != ')') {
-    ThrowParseError("Expect )");
+    RaiseError("Expect )");
   }
   Consume();
   in_parentheses_ = prev_in_parentheses;
@@ -388,7 +395,7 @@ EBNFParserImpl::Rule EBNFParserImpl::ParseRule() {
   cur_rule_name_ = name;
   ConsumeSpace();
   if (Peek() != ':' || Peek(1) != ':' || Peek(2) != '=') {
-    ThrowParseError("Expect ::=");
+    RaiseError("Expect ::=");
   }
   Consume(3);
   ConsumeSpace();
@@ -405,11 +412,11 @@ void EBNFParserImpl::BuildRuleNameToId() {
     ConsumeSpace(false);
     if (Peek() == ':' && Peek(1) == ':' && Peek(2) == '=') {
       if (name.empty()) {
-        ThrowParseError("Expect rule name");
+        RaiseError("Expect rule name");
       }
       Consume(3);
       if (builder_.GetRuleId(name) != -1) {
-        ThrowParseError("Rule \"" + name + "\" is defined multiple times");
+        RaiseError("Rule \"" + name + "\" is defined multiple times");
       }
       builder_.AddEmptyRule(name);
     }
@@ -420,8 +427,22 @@ void EBNFParserImpl::BuildRuleNameToId() {
   }
 }
 
-void EBNFParserImpl::ResetStringIterator(const char* cur) {
-  cur_ = cur;
+void EBNFParserImpl::Init(const std::string& ebnf_string) {
+  codepoints_ = ParseUTF8(ebnf_string.c_str(), false);
+  if (codepoints_[0] == CharHandlingError::kInvalidUTF8) {
+    XGRAMMAR_LOG(FATAL) << "EBNF parse error: Invalid UTF8 sequence at position "
+                        << codepoints_[1] + 1;
+  }
+  codepoints_.push_back(0);
+  cur_ = codepoints_.data();
+  cur_line_ = 1;
+  cur_column_ = 1;
+  cur_rule_name_ = "";
+  in_parentheses_ = false;
+}
+
+void EBNFParserImpl::Reset() {
+  cur_ = codepoints_.data();
   cur_line_ = 1;
   cur_column_ = 1;
   cur_rule_name_ = "";
@@ -429,15 +450,15 @@ void EBNFParserImpl::ResetStringIterator(const char* cur) {
 }
 
 BNFGrammar EBNFParserImpl::DoParse(std::string ebnf_string, std::string root_rule) {
-  ResetStringIterator(ebnf_string.c_str());
+  Init(ebnf_string);
   BuildRuleNameToId();
 
-  ResetStringIterator(ebnf_string.c_str());
+  Reset();
   ConsumeSpace();
   while (Peek()) {
     // Throw error when there are multiple lookahead assertions
     if (Peek() == '(' && Peek(1) == '=') {
-      ThrowParseError("Unexpected lookahead assertion");
+      RaiseError("Unexpected lookahead assertion");
     }
     auto new_rule = ParseRule();
     builder_.UpdateRuleBody(new_rule.name, new_rule.body_expr_id);
@@ -449,7 +470,7 @@ BNFGrammar EBNFParserImpl::DoParse(std::string ebnf_string, std::string root_rul
 
   // Check that the root rule is defined
   if (builder_.GetRuleId(root_rule) == -1) {
-    ThrowParseError("The root rule with name \"" + root_rule + "\" is not found.");
+    RaiseError("The root rule with name \"" + root_rule + "\" is not found.");
   }
 
   return builder_.Get(root_rule);
