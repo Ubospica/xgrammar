@@ -280,6 +280,12 @@ def test_error():
     ):
         BNFGrammar('root ::= "a" (="a") (="b")')
 
+    with pytest.raises(
+        RuntimeError,
+        match="EBNF parse error: Invalid UTF8 sequence at position 12",
+    ):
+        BNFGrammar(b'root ::= "a\xFF\xFEb"')
+
 
 def test_to_json():
     before = """root ::= b c | b root

@@ -107,7 +107,7 @@ std::tuple<bool, int, TCodepoint> HandleUTF8FirstByte(uint8_t byte) {
      2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
      2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
      3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
-    4,  4,  4,  4,  4,  4,  4,  4, -1, -1, -1, -1, -1, -1, -1, -1,
+     4,  4,  4,  4,  4,  4,  4,  4, -1, -1, -1, -1, -1, -1, -1, -1,
   };
   // clang-format on
   auto num_bytes = kUtf8Bytes[static_cast<uint8_t>(byte)];
@@ -150,76 +150,16 @@ std::pair<TCodepoint, const char*> ParseNextUTF8(const char* utf8, bool return_b
 
 std::vector<TCodepoint> ParseUTF8(const char* utf8, bool return_byte_on_error) {
   std::vector<TCodepoint> codepoints;
+  const char* start = utf8;
   while (*utf8 != 0) {
     TCodepoint codepoint;
     std::tie(codepoint, utf8) = ParseNextUTF8(utf8, return_byte_on_error);
     if (codepoint == CharHandlingError::kInvalidUTF8) {
-      return {codepoint};
+      return {codepoint, static_cast<int32_t>(utf8 - start)};
     }
     codepoints.push_back(codepoint);
   }
   return codepoints;
-}
-
-std::pair<TCodepoint, int32_t> ParseNextUTF8OrEscaped(
-    const char* utf8, const std::unordered_map<char, TCodepoint>& additional_escape_map
-) {
-  static const std::unordered_map<char, TCodepoint> kEscapeToCodepoint = {
-      {'\'', '\''},
-      {'\"', '\"'},
-      {'\?', '\?'},
-      {'\\', '\\'},
-      {'a', '\a'},
-      {'b', '\b'},
-      {'f', '\f'},
-      {'n', '\n'},
-      {'r', '\r'},
-      {'t', '\t'},
-      {'v', '\v'},
-      {'0', '\0'},
-      {'e', '\x1B'}
-  };
-  if (utf8[0] != '\\') {
-    auto result = ParseNextUTF8(utf8, false);
-    return {result.first, result.second - utf8};
-  }
-
-  if (auto it = additional_escape_map.find(utf8[1]); it != additional_escape_map.end()) {
-    return {it->second, 2};
-  }
-  if (auto it = kEscapeToCodepoint.find(utf8[1]); it != kEscapeToCodepoint.end()) {
-    return {it->second, 2};
-  }
-
-  if (utf8[1] == 'x') {
-    // arbitrary length hex
-    int len = 0;
-    TCodepoint codepoint = 0;
-    int32_t digit;
-    while ((digit = HexCharToInt(utf8[2 + len])) != -1) {
-      codepoint = codepoint * 16 + digit;
-      ++len;
-    }
-    if (len == 0) {
-      return {CharHandlingError::kInvalidEscape, 0};
-    }
-    return {codepoint, len + 2};
-  } else if (utf8[1] == 'u' || utf8[1] == 'U') {
-    // 4- or 8-digit hex
-    int len = utf8[1] == 'u' ? 4 : 8;
-    TCodepoint codepoint = 0;
-
-    for (int i = 0; i < len; ++i) {
-      auto digit = HexCharToInt(utf8[i + 2]);
-      if (digit == -1) {
-        return {CharHandlingError::kInvalidEscape, 0};
-      }
-      codepoint = codepoint * 16 + digit;
-    }
-    return {codepoint, len + 2};
-  } else {
-    return {CharHandlingError::kInvalidEscape, 0};
-  }
 }
 
 }  // namespace xgrammar
