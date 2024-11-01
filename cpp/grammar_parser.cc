@@ -53,6 +53,8 @@ class EBNFParserImpl {
   void Init(const std::string& ebnf_string);
   // Reset the parser to the beginning of the string.
   void Reset();
+  // Convert the regex in the original EBNF string to EBNF, then return the converted EBNF string.
+  std::string ConvertRegex(const std::string& original_ebnf_string);
 
   // Consume a specified number of characters, and maintain the line and column number.
   void Consume(int cnt = 1) {
@@ -448,6 +450,26 @@ void EBNFParserImpl::Reset() {
   cur_rule_name_ = "";
   in_parentheses_ = false;
 }
+
+// if (Peek() == '\n' || (Peek() == '\r' && Peek(1) != '\n')) {
+//   ++cur_line_;
+//   cur_column_ = 1;
+// } else {
+//   ++cur_column_;
+// }
+// ++cur_;
+
+// std::string EBNFParserImpl::ConvertRegex(const std::string& original_ebnf_string) {
+//   cur_line_ = 1;
+//   cur_column_ = 1;
+//   const char* cur = original_ebnf_string.c_str();
+//   std::string converted_ebnf_string;
+//   while (*cur) {
+//     if (*cur) {
+
+//     }
+//   }
+// }
 
 BNFGrammar EBNFParserImpl::DoParse(std::string ebnf_string, std::string root_rule) {
   Init(ebnf_string);

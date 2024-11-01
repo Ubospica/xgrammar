@@ -265,6 +265,8 @@ bool GrammarMatcherForInitContext::IsTokenPassLookaheadAssertion(
   return false;
 }
 
+// int num_uncertain = 0;
+
 inline CatagorizedTokens GrammarMatcherForInitContext::GetCatagorizedTokens(
     size_t vocab_size,
     const std::vector<std::pair<int32_t, std::string>>& sorted_raw_vocab,
@@ -342,6 +344,7 @@ inline CatagorizedTokens GrammarMatcherForInitContext::GetCatagorizedTokens(
   }
   // Rollback the last matched part
   RollbackChars(prev_matched_size);
+  num_uncertain = std::max(num_uncertain, static_cast<int>(tmp_uncertain_indices_.size()));
   return CatagorizedTokens(
       vocab_size,
       sorted_raw_vocab,
@@ -357,6 +360,7 @@ GrammarMatcherInitContext::Impl::Impl(
     const BNFGrammar& grammar, const std::vector<std::string>& raw_vocab
 ) {
   using RuleExprType = BNFGrammar::Impl::RuleExprType;
+  auto start_time = std::chrono::high_resolution_clock::now();
 
   this->grammar = grammar;
   this->vocab_size = raw_vocab.size();
@@ -392,6 +396,8 @@ GrammarMatcherInitContext::Impl::Impl(
     return a.second < b.second;
   };
   std::sort(this->sorted_raw_vocab.begin(), this->sorted_raw_vocab.end(), f_compare_token);
+
+  // num_uncertain = 0;
 
   // Find the corresponding catagorized tokens for:
   // 1. All character class or character class star (with last_utf8_bytes=0, 1, 2, 3)
@@ -440,6 +446,11 @@ GrammarMatcherInitContext::Impl::Impl(
       }
     }
   }
+  // std::cout << "Max number of uncertain tokens: " << num_uncertain << std::endl;
+  auto end_time = std::chrono::high_resolution_clock::now();
+  std::cout << "Time for preprocess: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count()
+            << "ms" << std::endl;
 }
 
 GrammarMatcherInitContext::GrammarMatcherInitContext(

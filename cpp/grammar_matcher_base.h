@@ -203,6 +203,8 @@ inline RulePosition GrammarMatcherBase::UpdatePositionWithChar(
   }
 }
 
+int32_t max_num_stack_tops = 0;
+
 inline bool GrammarMatcherBase::AcceptChar(uint8_t char_value, bool verbose) {
   if (verbose) {
     XGRAMMAR_LOG(INFO) << "Matching char: " << static_cast<int>(char_value) << " \""
@@ -210,6 +212,8 @@ inline bool GrammarMatcherBase::AcceptChar(uint8_t char_value, bool verbose) {
     XGRAMMAR_LOG(INFO) << "Previous stack: " << PrintStackState();
   }
   const auto& prev_stack_tops = stack_tops_history_.GetLatest();
+  // std::cout << "prev_stack_tops: " << prev_stack_tops.size() << std::endl;
+  max_num_stack_tops = std::max(max_num_stack_tops, static_cast<int>(prev_stack_tops.size()));
 
   tmp_new_stack_tops_.clear();
   for (auto prev_top : prev_stack_tops) {

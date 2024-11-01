@@ -140,7 +140,7 @@ class DynamicBitset {
     return result < size_ ? result : -1;
   }
 
- private:
+ public:
   static int LowestBit(uint32_t value) {
 #ifdef __GNUC__
     return __builtin_ctz(value);

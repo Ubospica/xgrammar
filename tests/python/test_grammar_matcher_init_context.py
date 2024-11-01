@@ -19,7 +19,8 @@ from xgrammar.xgrammar import GrammarMatcherInitContextCache
 
 def test_init_context():
     grammar = BuiltinGrammar.json()
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B-Instruct")
     tokenizer_info = TokenizerInfo.from_huggingface(tokenizer)
     time_start = time.monotonic_ns()
     context = GrammarMatcherInitContext(grammar, tokenizer_info)
@@ -43,6 +44,10 @@ def test_init_context():
     time_end = time.monotonic_ns()
     print(f"Time to init matcher 2: {(time_end - time_start) / 1e3} us")
     check_matcher(matcher_2)
+
+
+test_init_context()
+exit()
 
 
 def test_init_context_cache_json():

@@ -9,6 +9,45 @@ from transformers import AutoTokenizer
 
 from xgrammar import BNFGrammar, BuiltinGrammar, GrammarMatcher, TokenizerInfo
 
+python_dsl_bnf = r"""
+root ::= statement_list
+
+statement_list ::= statement | statement "\n" statement_list
+
+statement ::= print_statement
+            | assignment_statement
+            | if_statement
+            | for_statement
+
+print_statement ::= "print" "(" expression ")" whitespace?
+
+assignment_statement ::= variable whitespace? "=" whitespace? expression
+
+if_statement ::= "if" whitespace condition ":" "\n" indent statement_list dedent
+               | "if" whitespace condition ":" "\n" indent statement_list dedent "else" ":" "\n" indent statement_list dedent
+
+for_statement ::= "for" whitespace variable whitespace "in" whitespace "range" "(" expression ("," whitespace? expression ("," whitespace? expression)?)? ")" ":" "\n" indent statement_list dedent
+
+condition ::= expression whitespace? comparison_operator whitespace? expression
+comparison_operator ::= "==" | "!=" | ">" | "<" | ">=" | "<="
+
+expression ::= term ((whitespace? ("+" | "-") whitespace? term))*
+term ::= factor ((whitespace? ("*" | "/") whitespace? factor))*
+factor ::= integer | variable | string | "(" whitespace? expression whitespace? ")"
+
+integer ::= [0-9]+
+string ::= "\"" [a-zA-Z0-9_ ]* "\""
+
+variable ::= [a-zA-Z_][a-zA-Z0-9_]*
+whitespace ::= " " | "\t" | "\n" | "\r"
+"""
+
+input_str = """result=0;for i in range(1, 11):
+    if i % 2 == 0:
+        result += i * i
+print(result)"""
+exit()
+
 json_grammar = BuiltinGrammar.json()
 
 

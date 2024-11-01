@@ -301,6 +301,8 @@ bool GrammarMatcher::Impl::AcceptString(const std::string& input_str, bool verbo
     return false;
   }
 
+  max_num_stack_tops = 0;
+
   int accepted_cnt = 0;
   for (auto char_value : input_str) {
     if (!AcceptChar(char_value, verbose)) {
@@ -312,6 +314,9 @@ bool GrammarMatcher::Impl::AcceptString(const std::string& input_str, bool verbo
     }
     ++accepted_cnt;
   }
+  max_num_stack_tops =
+      std::max(max_num_stack_tops, static_cast<int>(stack_tops_history_.GetLatest().size()));
+  std::cout << "Max number of stack tops: " << max_num_stack_tops << std::endl;
   token_length_history.push_back(input_str.size());
   if (static_cast<int>(token_length_history.size()) > max_rollback_tokens_) {
     DiscardEarliestChars(token_length_history.front());
@@ -336,6 +341,8 @@ void GrammarMatcher::Impl::CheckTokenBitmaskValidity(
       << "The provided bitmask is not large enough to store the token set. The length should be "
       << DynamicBitset::CalculateBufferSize(mask_vocab_size) << " at least";
 }
+
+int max_uncertain = 0;
 
 void GrammarMatcher::Impl::FindNextTokenBitmask(DLTensor* next_token_bitmask) {
   XGRAMMAR_CHECK(!IsTerminated()
@@ -363,6 +370,8 @@ void GrammarMatcher::Impl::FindNextTokenBitmask(DLTensor* next_token_bitmask) {
     }
 
     const auto& catagorized_tokens = catagorized_tokens_for_grammar.at(cur_rule_position);
+    max_uncertain =
+        std::max(max_uncertain, static_cast<int>(catagorized_tokens.uncertain_indices.size()));
 
     // For each stack, we will check every uncertain token and put them into the accepted or
     // rejected list.
