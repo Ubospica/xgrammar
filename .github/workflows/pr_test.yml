@@ -1,0 +1,63 @@
+name: PR Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cpp/**"
+      - "python/xgrammar/**"
+      - "test/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "cpp/**"
+      - "python/xgrammar/**"
+      - "test/**"
+  workflow_dispatch:
+
+concurrency:
+  group: pr-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+
+      - name: Install pre-commit hook
+        run: |
+          python -m pip install pre-commit
+          pre-commit install
+
+      - name: Linting
+        run: pre-commit run --all-files
+
+  unit-test:
+    if: github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request'
+    runs-on: 1-gpu-runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          bash scripts/ci_install_dependency.sh
+
+      - name: Run test
+        timeout-minutes: 10
+        run: |
+          cd test/lang
+          python3 run_suite.py --suite minimal
+
+  finish:
+    needs: [lint, unit-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finish
+        run: echo "This is an empty step to ensure that all jobs are completed."
