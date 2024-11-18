@@ -1,4 +1,5 @@
-"""This script benchmarks the time for grammar compilation and mask generation."""
+"""This script benchmarks the time for grammar compilation and mask
+generation for unconstrained JSON."""
 
 import argparse
 import json
@@ -6,27 +7,48 @@ import time
 
 import datasets
 import torch
-from lmformatenforcer import JsonSchemaParser, TokenEnforcer
-from lmformatenforcer.integrations.transformers import (
-    TokenEnforcerTokenizerData,
-    build_token_enforcer_tokenizer_data,
-)
-from outlines.fsm.guide import Guide, RegexGuide
-from outlines.fsm.json_schema import build_regex_from_schema, convert_json_schema_to_str
+from outlines import disable_cache
+from outlines.fsm.guide import CFGGuide, Guide
 from outlines.generate.generator import bias_logits
-from outlines.models import TransformerTokenizer
+from outlines.models.transformers import TransformerTokenizer
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from xgrammar import BuiltinGrammar, GrammarMatcher, TokenizerInfo
+from xgrammar import (
+    BuiltinGrammar,
+    CachedGrammarCompiler,
+    CompiledGrammar,
+    GrammarMatcher,
+    TokenizerInfo,
+)
 
-wrong_data_indices = [1]
+JSON_GRAMMAR_LARK = r"""
+?start: object | array
+
+?value: object
+| array
+| UNESCAPED_STRING
+| SIGNED_NUMBER      -> number
+| "true"             -> true
+| "false"            -> false
+| "null"             -> null
+
+array  : "[" [value ("," value)*] "]"
+object : "{" [pair ("," pair)*] "}"
+pair   : UNESCAPED_STRING ":" value
+
+%import common.UNESCAPED_STRING
+%import common.SIGNED_NUMBER
+%import common.WS
+
+%ignore WS
+"""
 
 
-def xgrammar_build(schema: str, tokenizer_info: TokenizerInfo):
-    grammar = BuiltinGrammar.json_schema(schema, strict_mode=False)
-    matcher = GrammarMatcher(grammar, tokenizer_info)
-    return matcher
+def xgrammar_build(tokenizer_info: TokenizerInfo):
+    json_grammar = BuiltinGrammar.json()
+    compiled_grammar = CompiledGrammar(json_grammar, tokenizer_info)
+    return GrammarMatcher(compiled_grammar)
 
 
 def xgrammar_exec(
@@ -40,10 +62,8 @@ def xgrammar_exec(
     return
 
 
-def outlines_build(schema: str, tokenizer: TransformerTokenizer):
-    schema_str = convert_json_schema_to_str(json_schema=schema)
-    regex_string = build_regex_from_schema(schema_str, whitespace_pattern=None)
-    guide = RegexGuide.from_regex(regex_string, tokenizer)
+def outlines_build(tokenizer: TransformerTokenizer):
+    guide = CFGGuide(JSON_GRAMMAR_LARK, tokenizer)
     return guide
 
 
@@ -58,26 +78,12 @@ def outlines_exec(guide: Guide, logits: torch.Tensor, token_id: int, state=None)
     return next_state
 
 
-def lmformatenforcer_build(schema: str, tokenizer: TokenEnforcerTokenizerData):
-    parser = JsonSchemaParser(json.loads(schema))
-    token_enforcer = TokenEnforcer(tokenizer, parser)
-    return token_enforcer
-
-
-def lmformatenforcer_exec(token_enforcer: TokenEnforcer, logits: torch.Tensor, token_ids):
-    # Logits processing
-    allowed_tokens = token_enforcer.get_allowed_tokens(token_ids)
-    logits[allowed_tokens] = float("-inf")
-    # Update state
-    return
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--backend",
         type=str,
-        choices=["xgrammar", "outlines", "lmformatenforcer"],
+        choices=["xgrammar", "outlines", "outlines_new"],
         default="xgrammar",
     )
     parser.add_argument("--num_iters", type=int, default=5)
@@ -94,8 +100,8 @@ if __name__ == "__main__":
 
     hf_tokenizer = AutoTokenizer.from_pretrained(hf_model_path)
     xgrammar_tokenizer_info = TokenizerInfo.from_huggingface(hf_tokenizer)
+    grammar_compiler = CachedGrammarCompiler(xgrammar_tokenizer_info)
     outlines_tokenizer = TransformerTokenizer(hf_tokenizer)
-    lmformatenforcer_tokenizer = build_token_enforcer_tokenizer_data(hf_tokenizer)
 
     vocab_size = len(hf_tokenizer)
 
@@ -104,6 +110,9 @@ if __name__ == "__main__":
     total_data_points = 0
     total_tokens = 0
     fail_cnt = 0
+
+    if backend == "outlines" or backend == "outlines_new":
+        disable_cache()
 
     tqdm_iter = tqdm(range(-num_warmup, num_iters))
     for iter in tqdm_iter:
@@ -122,8 +131,6 @@ if __name__ == "__main__":
             tqdm_data_point_iter.set_description(
                 f"Backend: {backend}, Data Point: {data_point_idx}"
             )
-            if data_point_idx in wrong_data_indices:
-                continue
 
             schema = dataset["schema"][data_point_idx]
             completion = dataset["completion"][data_point_idx]
@@ -132,23 +139,23 @@ if __name__ == "__main__":
                 dataset["prompt"][data_point_idx], tokenize=False
             )
             prompt_token_ids = hf_tokenizer.encode(prompt)
-            print(f"Prompt: {prompt}, Schema: {schema}")
+            # print(f"Prompt: {prompt}, Schema: {schema}")
 
             start = time.perf_counter()
             try:
                 if backend == "xgrammar":
-                    worker = xgrammar_build(schema, xgrammar_tokenizer_info)
+                    worker = xgrammar_build(xgrammar_tokenizer_info)
                     bitmask = GrammarMatcher.allocate_token_bitmask(worker.vocab_size)
-                elif backend == "outlines":
-                    worker = outlines_build(schema, outlines_tokenizer)
-                elif backend == "lmformatenforcer":
-                    worker = lmformatenforcer_build(schema, lmformatenforcer_tokenizer)
+                elif backend == "outlines" or backend == "outlines_new":
+                    worker = outlines_build(outlines_tokenizer)
             except Exception as e:
+                raise e
                 if iter >= 0:
                     fail_cnt += 1
                 continue
 
             build_time += time.perf_counter() - start
+            print(f"Build time: {time.perf_counter() - start:.4f}s")
 
             # use different logits for each mask generation process
             # to avoid caching effects between different tokens
@@ -157,20 +164,22 @@ if __name__ == "__main__":
             torch.cuda.synchronize()
             start = time.perf_counter()
             fail_flag = False
+            print("num tokens: ", len(token_ids))
             for idx, token_id in enumerate(token_ids):
                 # Logits processing
+                # start = time.perf_counter()
                 try:
                     if backend == "xgrammar":
+                        print(f"string: {hf_tokenizer.decode(token_ids[:idx+1])}")
                         xgrammar_exec(worker, logits[idx], bitmask, token_id)
-                    elif backend == "outlines":
+                    elif backend == "outlines" or backend == "outlines_new":
                         if idx == 0:
                             state = None
                         state = outlines_exec(worker, logits[idx], token_id, state)
-                    elif backend == "lmformatenforcer":
-                        lmformatenforcer_exec(
-                            worker, logits[idx], prompt_token_ids + token_ids[:idx]
-                        )
+                    # end = time.perf_counter()
+                    # print(f"Exec time: {end - start:.4f}s")
                 except Exception as e:
+                    raise e
                     if iter >= 0:
                         fail_cnt += 1
                     fail_flag = True
@@ -187,6 +196,6 @@ if __name__ == "__main__":
                 total_tokens += len(token_ids)
 
     print(f"Backend: {backend}")
-    print(f"Fail count: {fail_cnt / num_iters:.0f} / {len(dataset) - len(wrong_data_indices)}")
+    print(f"Fail count: {fail_cnt / num_iters:.0f} / {len(dataset)}")
     print(f"Grammar preprocessing time (ms): {build_time/total_data_points * 1e3:.4f}")
     print(f"Mask generation time (us/token): {exec_time/total_tokens * 1e6:.4f}")
