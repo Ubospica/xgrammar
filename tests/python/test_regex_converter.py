@@ -2,7 +2,6 @@ import sys
 import time
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
 import xgrammar as xgr

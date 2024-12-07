@@ -864,6 +864,34 @@ std::string JSONSchemaConverter::VisitNumber(
   return "(\"0\" | \"-\"? [1-9] [0-9]*) (\".\" [0-9]+)? ([eE] [+-]? [0-9]+)?";
 }
 
+std::string JSONSchemaConverter::HandleFormat(const std::string& format) {
+  static const std::unordered_map<std::string, std::string> format_to_regex = {
+      {"ipv4",
+       R"(((25[0-5]|2[0-4]\d|[01]?\d\d?).)((25[0-5]|2[0-4]\d|[01]?\d\d?).)((25[0-5]|2[0-4]\d|[01]?\d\d?).)(25[0-5]|2[0-4]\d|[01]?\d\d?))"
+      },
+      {"ipv6",
+       "(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))
+       "
+      },
+      {
+          "date",
+      },
+      {
+          "time",
+      },
+      {
+          "date-time",
+      },
+      {
+          "hostname",
+      }
+  };
+  if (format_to_regex.count(format)) {
+    return format_to_regex.at(format);
+  }
+  return "";
+}
+
 std::string JSONSchemaConverter::VisitString(
     const picojson::object& schema, const std::string& rule_name
 ) {
@@ -874,13 +902,18 @@ std::string JSONSchemaConverter::VisitString(
       {
           "minLength",
           "maxLength",
-          "format",
       }
   );
   if (schema.count("pattern")) {
     std::string regex_pattern = schema.at("pattern").get<std::string>();
     std::string converted_regex = RegexToEBNF(regex_pattern, false);
     return "\"\\\"\" " + converted_regex + " \"\\\"\"";
+  }
+  if (schema.count("format")) {
+    std::string format = schema.at("format").get<std::string>();
+    if (format == "date-time") {
+      return "\"\\\"\" " + kBasicStringSub + " \"\\\"\"";
+    }
   }
   return "[\"] " + kBasicStringSub;
 }
