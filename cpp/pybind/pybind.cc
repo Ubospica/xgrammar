@@ -1,6 +1,6 @@
 /*!
  *  Copyright (c) 2024 by Contributors
- * \file xgrammar/pybind.cc
+ * \file xgrammar/pybind/pybind.cc
  */
 
 #include <pybind11/pybind11.h>

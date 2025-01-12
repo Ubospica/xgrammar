@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "fsm.h"
 #include "support/logging.h"
 
 namespace xgrammar {
@@ -147,6 +148,12 @@ class Grammar::Impl {
     return {type, data_ptr, data_len};
   }
 
+  /*! \brief The fsm for the root tag dispatch rule. Initially it is not built. It is built during
+   * the grammar compilation process. */
+  std::optional<CompactFSM> root_tag_dispatch_fsm = std::nullopt;
+  /*! \brief The map from the end nodes of the root tag dispatch fsm to the rule ids. */
+  std::unordered_map<int32_t, int32_t> tag_dispatch_end_node_to_rule_id;
+
  private:
   /*! \brief The rules of the grammar. rule_id corresponds the index of this vector. */
   std::vector<Rule> rules_;
@@ -161,6 +168,7 @@ class Grammar::Impl {
   friend class GrammarBuilder;
   friend class GrammarSerializer;
   friend class GrammarDeserializer;
+  friend class GrammarCompiler;
 };
 
 }  // namespace xgrammar
