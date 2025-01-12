@@ -252,6 +252,14 @@ CompiledGrammar MultiThreadCompileGrammar(
   compiled_grammar_impl->grammar = grammar;
   compiled_grammar_impl->tokenizer_info = tokenizer_info;
 
+  auto root_rule_id = grammar->GetRootRuleId();
+  auto root_rule_expr = grammar->GetRuleExpr(grammar->GetRule(root_rule_id).body_expr_id);
+  if (root_rule_expr.type == RuleExprType::kTagDispatch && !grammar->root_tag_dispatch_fsm) {
+    // TODO(yixin): consider corner case: multiple threads compiling same grammar with different
+    // tokenizer info.
+    BuildTagDispatchFSM(grammar, root_rule_expr);
+  }
+
   if (tokenizer_info.GetVocabSize() == 0) {
     return CompiledGrammar(compiled_grammar_impl);
   }
@@ -271,7 +279,6 @@ CompiledGrammar MultiThreadCompileGrammar(
     adaptive_token_mask_cache_mutex.emplace();
   }
 
-  auto root_rule_id = grammar->GetRootRuleId();
   for (int32_t rule_id = 0; rule_id < static_cast<int>(grammar->NumRules()); ++rule_id) {
     auto rule = grammar->GetRule(rule_id);
     auto rule_body = grammar->GetRuleExpr(rule.body_expr_id);
@@ -335,11 +342,6 @@ CompiledGrammar MultiThreadCompileGrammar(
   }
   if (max_threads > 1) {
     thread_pool->Join();
-  }
-
-  auto root_rule_expr = grammar->GetRuleExpr(grammar->GetRule(root_rule_id).body_expr_id);
-  if (root_rule_expr.type == RuleExprType::kTagDispatch && !grammar->root_tag_dispatch_fsm) {
-    BuildTagDispatchFSM(grammar, root_rule_expr);
   }
 
   return CompiledGrammar(compiled_grammar_impl);

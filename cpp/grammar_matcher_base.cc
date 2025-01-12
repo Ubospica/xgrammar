@@ -304,4 +304,5 @@ bool GrammarMatcherBase::ExpandStackElement(
   }
   return true;
 }
+
 }  // namespace xgrammar
