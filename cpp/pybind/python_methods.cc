@@ -1,6 +1,6 @@
 /*!
  *  Copyright (c) 2024 by Contributors
- * \file xgrammar/grammar.cc
+ * \file xgrammar/pybind/python_methods.cc
  */
 
 #include "python_methods.h"
