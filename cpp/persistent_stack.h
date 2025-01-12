@@ -23,7 +23,8 @@ struct StackElement {
   int32_t rule_id = -1;
   /*! \brief Which choice in this rule is selected. */
   int32_t sequence_id = -1;
-  /*! \brief Which element of the choice sequence is to be visited. */
+  /*! \brief Which element of the choice sequence is to be visited. When the current sequence is
+   * a tag dispatch rule, this element id the currently visited node. */
   int32_t element_id = -1;
 
   /*! \brief The number of left utf8 bytes in the current element. Used when the element is
