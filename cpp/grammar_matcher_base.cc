@@ -53,6 +53,44 @@ bool GrammarMatcherBase::CheckIfAccepted(const StackElement& stack_element, uint
   }
 }
 
+std::pair<bool, StackElement> GrammarMatcherBase::MoveToNextPosition(
+    const StackElement& stack_element, bool consider_parent
+) {
+  auto sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
+
+  auto next_position = stack_element;
+  next_position.element_id += 1;
+  next_position.element_in_string = 0;
+  next_position.left_utf8_bytes = 0;
+
+  XGRAMMAR_DCHECK(next_position.element_id <= sequence.size());
+
+  if (next_position.element_id < sequence.size()) {
+    return {true, next_position};
+  }
+
+  if (!consider_parent) {
+    return {false, kInvalidStackElement};
+  }
+
+  // Find the next position in the parent rule
+  while (next_position.parent_id != StackElement::kNoParent) {
+    next_position = persistent_stack_[next_position.parent_id];
+    next_position.element_id += 1;
+    XGRAMMAR_DCHECK(next_position.element_in_string == 0);
+    XGRAMMAR_DCHECK(next_position.left_utf8_bytes == 0);
+
+    sequence = grammar_->GetRuleExpr(next_position.sequence_id);
+    XGRAMMAR_DCHECK(next_position.element_id <= sequence.size());
+
+    if (next_position.element_id < sequence.size()) {
+      break;
+    }
+  }
+
+  return {true, next_position};
+}
+
 StackElement GrammarMatcherBase::AdvanceStackWithChar(
     const StackElement& stack_element, uint8_t char_value
 ) {
@@ -199,44 +237,6 @@ void GrammarMatcherBase::PushInitialState(
       stack_tops_history_.PushHistory({persistent_stack_.NewNode(init_stack_element)});
     }
   }
-}
-
-std::pair<bool, StackElement> GrammarMatcherBase::MoveToNextPosition(
-    const StackElement& stack_element, bool consider_parent
-) {
-  auto sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
-
-  auto next_position = stack_element;
-  next_position.element_id += 1;
-  next_position.element_in_string = 0;
-  next_position.left_utf8_bytes = 0;
-
-  XGRAMMAR_DCHECK(next_position.element_id <= sequence.size());
-
-  if (next_position.element_id < sequence.size()) {
-    return {true, next_position};
-  }
-
-  if (!consider_parent) {
-    return {false, kInvalidStackElement};
-  }
-
-  // Find the next position in the parent rule
-  while (next_position.parent_id != StackElement::kNoParent) {
-    next_position = persistent_stack_[next_position.parent_id];
-    next_position.element_id += 1;
-    XGRAMMAR_DCHECK(next_position.element_in_string == 0);
-    XGRAMMAR_DCHECK(next_position.left_utf8_bytes == 0);
-
-    sequence = grammar_->GetRuleExpr(next_position.sequence_id);
-    XGRAMMAR_DCHECK(next_position.element_id <= sequence.size());
-
-    if (next_position.element_id < sequence.size()) {
-      break;
-    }
-  }
-
-  return {true, next_position};
 }
 
 bool GrammarMatcherBase::FindEquivalentStackElements(
