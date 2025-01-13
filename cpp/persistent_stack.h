@@ -326,8 +326,15 @@ class StackTopsHistory {
 };
 
 inline bool PersistentStack::IsEndOfGrammar(const StackElement& stack_element) const {
-  return stack_element.parent_id == StackElement::kNoParent &&
-         grammar_->GetRuleExpr(stack_element.sequence_id).size() == stack_element.element_id;
+  if (stack_element.parent_id != StackElement::kNoParent) {
+    return false;
+  }
+  auto seq_expr = grammar_->GetRuleExpr(stack_element.sequence_id);
+  if (seq_expr.type == Grammar::Impl::RuleExprType::kTagDispatch) {
+    return stack_element.element_id != -1;
+  } else {
+    return seq_expr.size() == stack_element.element_id;
+  }
 }
 
 inline std::string PersistentStack::PrintNode(int32_t id) const {

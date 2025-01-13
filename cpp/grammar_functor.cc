@@ -396,7 +396,7 @@ class GrammarUnionFunctorImpl : public SubGrammarAdder {
   }
 
   // Avoid hiding the original Apply(const Grammar&)
-  Grammar Apply(const Grammar& grammar) override { XGRAMMAR_LOG(FATAL) << "Not implemented"; }
+  Grammar Apply(const Grammar& grammar) override { XGRAMMAR_LOG(FATAL) << "Should not be called"; }
 };
 
 class GrammarConcatFunctorImpl : public SubGrammarAdder {
@@ -423,7 +423,7 @@ class GrammarConcatFunctorImpl : public SubGrammarAdder {
   }
 
   // Avoid hiding the original Apply(const Grammar&)
-  Grammar Apply(const Grammar& grammar) override { XGRAMMAR_LOG(FATAL) << "Not implemented"; }
+  Grammar Apply(const Grammar& grammar) override { XGRAMMAR_LOG(FATAL) << "Should not be called"; }
 };
 
 /*************************** Forward grammar functors to their impl ***************************/

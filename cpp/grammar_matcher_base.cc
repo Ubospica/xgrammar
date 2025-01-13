@@ -21,6 +21,10 @@ namespace xgrammar {
 bool GrammarMatcherBase::CheckIfAccepted(const StackElement& stack_element, uint8_t char_value)
     const {
   auto current_sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
+  if (current_sequence.type == Grammar::Impl::RuleExprType::kTagDispatch) {
+    XGRAMMAR_DCHECK(stack_element.element_id != -1);
+    return true;
+  }
   auto current_element = grammar_->GetRuleExpr(current_sequence[stack_element.element_id]);
   if (current_element.type == RuleExprType::kCharacterClass ||
       current_element.type == RuleExprType::kCharacterClassStar) {
@@ -49,10 +53,12 @@ bool GrammarMatcherBase::CheckIfAccepted(const StackElement& stack_element, uint
   }
 }
 
-StackElement GrammarMatcherBase::UpdateStackElementWithChar(
+StackElement GrammarMatcherBase::AdvanceStackWithChar(
     const StackElement& stack_element, uint8_t char_value
-) const {
+) {
   auto current_sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
+  if (current_sequence.type == Grammar::Impl::RuleExprType::kTagDispatch) {
+  }
   auto current_element = grammar_->GetRuleExpr(current_sequence[stack_element.element_id]);
   StackElement new_stack_element = stack_element;
   switch (current_element.type) {
@@ -61,7 +67,7 @@ StackElement GrammarMatcherBase::UpdateStackElementWithChar(
         new_stack_element.left_utf8_bytes -= 1;
         return new_stack_element;
       } else if (stack_element.left_utf8_bytes == 1) {
-        return GetNextPositionInSequence(stack_element, true).second;
+        return MoveToNextPosition(stack_element, true).second;
       }
       // If no left utf8 bytes, check the first byte to find the left bytes needed.
       XGRAMMAR_DCHECK(stack_element.left_utf8_bytes == 0);
@@ -71,7 +77,7 @@ StackElement GrammarMatcherBase::UpdateStackElementWithChar(
         new_stack_element.left_utf8_bytes = num_bytes - 1;
         return new_stack_element;
       }
-      return GetNextPositionInSequence(stack_element, true).second;
+      return MoveToNextPosition(stack_element, true).second;
     }
     case RuleExprType::kCharacterClassStar: {
       if (stack_element.left_utf8_bytes >= 1) {
@@ -89,10 +95,10 @@ StackElement GrammarMatcherBase::UpdateStackElementWithChar(
         new_stack_element.element_in_string += 1;
         return new_stack_element;
       }
-      return GetNextPositionInSequence(stack_element, true).second;
+      return MoveToNextPosition(stack_element, true).second;
     }
     default:
-      XGRAMMAR_LOG(FATAL) << "Unexpected RuleExprType in UpdateStackElementWithChar: "
+      XGRAMMAR_LOG(FATAL) << "Unexpected RuleExprType in AdvanceStackWithChar: "
                           << static_cast<int>(current_element.type);
   }
 }
@@ -108,9 +114,7 @@ bool GrammarMatcherBase::AcceptChar(uint8_t char_value, bool debug_print) {
   tmp_new_stack_tops_.clear();
   for (auto prev_top : prev_stack_tops) {
     auto cur_stack_element = persistent_stack_[prev_top];
-    auto current_sequence = grammar_->GetRuleExpr(cur_stack_element.sequence_id);
-    if (cur_stack_element.parent_id == StackElement::kNoParent &&
-        cur_stack_element.element_id == current_sequence.size()) {
+    if (persistent_stack_.IsEndOfGrammar(cur_stack_element)) {
       // This StackElement means previous elements has matched the complete rule.
       // But we are still need to accept a new character, so this stack will become invalid.
       continue;
@@ -121,12 +125,12 @@ bool GrammarMatcherBase::AcceptChar(uint8_t char_value, bool debug_print) {
       continue;
     }
 
-    auto new_stack_element = UpdateStackElementWithChar(cur_stack_element, char_value);
+    auto new_stack_element = AdvanceStackWithChar(cur_stack_element, char_value);
 
     if (new_stack_element == cur_stack_element) {
-      ExpandStackElement(new_stack_element, &tmp_new_stack_tops_, true, prev_top);
+      FindEquivalentStackElements(new_stack_element, &tmp_new_stack_tops_, prev_top);
     } else {
-      ExpandStackElement(new_stack_element, &tmp_new_stack_tops_, true);
+      FindEquivalentStackElements(new_stack_element, &tmp_new_stack_tops_);
     }
   }
   if (tmp_new_stack_tops_.empty()) {
@@ -180,7 +184,7 @@ void GrammarMatcherBase::PushInitialState(
     for (auto i : root_rule_body) {
       auto init_stack_element = StackElement(0, i, 0, StackElement::kNoParent);
       if (expand_init_stack_element) {
-        ExpandStackElement(init_stack_element, &tmp_new_stack_tops_, true);
+        FindEquivalentStackElements(init_stack_element, &tmp_new_stack_tops_);
       } else {
         tmp_new_stack_tops_.push_back(persistent_stack_.NewNode(init_stack_element));
       }
@@ -189,7 +193,7 @@ void GrammarMatcherBase::PushInitialState(
   } else {
     if (expand_init_stack_element) {
       tmp_new_stack_tops_.clear();
-      ExpandStackElement(init_stack_element, &tmp_new_stack_tops_, true);
+      FindEquivalentStackElements(init_stack_element, &tmp_new_stack_tops_);
       stack_tops_history_.PushHistory(tmp_new_stack_tops_);
     } else {
       stack_tops_history_.PushHistory({persistent_stack_.NewNode(init_stack_element)});
@@ -197,9 +201,9 @@ void GrammarMatcherBase::PushInitialState(
   }
 }
 
-std::pair<bool, StackElement> GrammarMatcherBase::GetNextPositionInSequence(
+std::pair<bool, StackElement> GrammarMatcherBase::MoveToNextPosition(
     const StackElement& stack_element, bool consider_parent
-) const {
+) {
   auto sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
 
   auto next_position = stack_element;
@@ -235,18 +239,17 @@ std::pair<bool, StackElement> GrammarMatcherBase::GetNextPositionInSequence(
   return {true, next_position};
 }
 
-bool GrammarMatcherBase::ExpandStackElement(
+bool GrammarMatcherBase::FindEquivalentStackElements(
     StackElement cur_stack_element,
     std::vector<int32_t>* new_stack_tops,
-    bool consider_parent,
-    int32_t first_id_if_inserted
+    int32_t first_id_if_inserted,
+    bool is_inner_recursion
 ) {
   bool is_first = false;
   bool is_iteration_successful = true;
 
-  for (; is_iteration_successful;
-       std::tie(is_iteration_successful, cur_stack_element) =
-           GetNextPositionInSequence(cur_stack_element, consider_parent)) {
+  for (; is_iteration_successful; std::tie(is_iteration_successful, cur_stack_element) =
+                                      MoveToNextPosition(cur_stack_element, !is_inner_recursion)) {
     // Insert the node to the tree, if not inserted before.
     int32_t new_node_id;
     if (is_first && first_id_if_inserted != -1) {
@@ -257,7 +260,7 @@ bool GrammarMatcherBase::ExpandStackElement(
     is_first = false;
 
     // Case 1. The current position points to the end of the grammar.
-    if (consider_parent) {
+    if (!is_inner_recursion) {
       if (persistent_stack_.IsEndOfGrammar(cur_stack_element)) {
         new_stack_tops->push_back(new_node_id);
         return true;
@@ -284,7 +287,7 @@ bool GrammarMatcherBase::ExpandStackElement(
         }
         auto ref_stack_element = StackElement(element[0], sequence_id, 0, new_node_id);
         // Find the positions in every choice of the referred rule
-        can_be_empty |= ExpandStackElement(ref_stack_element, new_stack_tops, false);
+        can_be_empty |= FindEquivalentStackElements(ref_stack_element, new_stack_tops, -1, true);
       }
     } else if (element.type == RuleExprType::kCharacterClass ||
                element.type == RuleExprType::kByteString) {
