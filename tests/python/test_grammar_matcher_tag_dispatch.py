@@ -234,12 +234,8 @@ def test_structural_tag_mask_gen():
 
     # Set up grammar from schemas
     tags = [
-        xgr.StructuralTagItem(
-            start="<function=f>", schema=json.dumps(Schema1.model_json_schema()), end="</function>"
-        ),
-        xgr.StructuralTagItem(
-            start="<function=g>", schema=json.dumps(Schema2.model_json_schema()), end="</function>"
-        ),
+        xgr.StructuralTagItem(start="<function=f>", schema=Schema1, end="</function>"),
+        xgr.StructuralTagItem(start="<function=g>", schema=Schema2, end="</function>"),
     ]
     triggers = ["<function=f", "<function=g"]
 
