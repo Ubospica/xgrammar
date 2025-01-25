@@ -359,7 +359,7 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
   if (debug_print) {
     XGRAMMAR_LOG(INFO) << "Accepting token id " << token_id << ", string: \""
                        << PrintAsEscapedUTF8(tokenizer_info_.GetDecodedVocab()[token_id])
-                       << "\", state state:\n"
+                       << "\", stack state:\n"
                        << PrintStackState();
   }
 

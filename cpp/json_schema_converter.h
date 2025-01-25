@@ -63,6 +63,11 @@ std::string JSONSchemaToEBNF(
     bool strict_mode = true
 );
 
+/*! \brief Generate the regex for the range. */
+std::string GenerateRangeRegex(
+    std::optional<int> start = std::nullopt, std::optional<int> end = std::nullopt
+);
+
 }  // namespace xgrammar
 
 #endif  // XGRAMMAR_JSON_SCHEMA_CONVERTER_H_

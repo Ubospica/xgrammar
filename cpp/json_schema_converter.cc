@@ -157,9 +157,6 @@ class JSONSchemaConverter {
    * will be ignored when finding the corresponding cache rule. */
   std::string GetSchemaCacheIndex(const picojson::value& schema);
 
-  /*! \brief Generate the regex for the range. */
-  static std::string GenerateRangeRegex(std::optional<int> start, std::optional<int> end);
-
   /*!
    * \brief Create a rule with the given schema and rule name hint.
    * \returns The name of the rule will be returned. That is not necessarily the same as the
@@ -742,9 +739,7 @@ std::string JSONSchemaConverter::VisitAny(
          kBasicArray + " | " + kBasicObject;
 }
 
-std::string JSONSchemaConverter::GenerateRangeRegex(
-    std::optional<int> start, std::optional<int> end
-) {
+std::string GenerateRangeRegex(std::optional<int> start, std::optional<int> end) {
   if (!start && !end) {
     return "^\\d+$";  // Match any positive number if no start or end is specified
   }
