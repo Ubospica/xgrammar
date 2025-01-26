@@ -36,32 +36,39 @@ namespace xgrammar {
 /******************* AdaptiveTokenMask and CompiledGrammar *******************/
 
 AdaptiveTokenMask::AdaptiveTokenMask(
-    size_t vocab_size,
+    [[maybe_unused]] size_t vocab_size,
     const std::vector<std::pair<int32_t, std::string>>& sorted_decoded_vocab,
-    const std::vector<int32_t>& accepted_indices,
-    const std::vector<int32_t>& rejected_indices,
-    const std::vector<int32_t>& uncertain_indices
+    [[maybe_unused]] const std::vector<int32_t>& accepted_indices,
+    [[maybe_unused]] const std::vector<int32_t>& rejected_indices,
+    [[maybe_unused]] const std::vector<int32_t>& uncertain_indices
 ) {
-  auto size_acc = accepted_indices.size();
-  auto size_rej = rejected_indices.size();
+  // auto size_acc = accepted_indices.size();
+  // auto size_rej = rejected_indices.size();
 
-  store_type = size_acc >= USE_BITSET_THRESHOLD && size_rej >= USE_BITSET_THRESHOLD
-                   ? StoreType::kAcceptedBitset
-               : size_acc < size_rej ? StoreType::kAccepted
-                                     : StoreType::kRejected;
+  store_type = StoreType::kAccepted;
+  this->accepted_indices.clear();
 
-  if (store_type == StoreType::kAcceptedBitset) {
-    accepted_bitset = DynamicBitset(vocab_size);
-    for (auto idx : accepted_indices) {
-      accepted_bitset.Set(sorted_decoded_vocab[idx].first, true);
-    }
-  } else if (store_type == StoreType::kAccepted) {
-    this->accepted_indices = accepted_indices;
-  } else {
-    this->rejected_indices = rejected_indices;
+  for (int i = 0; i < static_cast<int>(sorted_decoded_vocab.size()); ++i) {
+    this->uncertain_indices.push_back(i);
   }
 
-  this->uncertain_indices = uncertain_indices;
+  // store_type = size_acc >= USE_BITSET_THRESHOLD && size_rej >= USE_BITSET_THRESHOLD
+  //                  ? StoreType::kAcceptedBitset
+  //              : size_acc < size_rej ? StoreType::kAccepted
+  //                                    : StoreType::kRejected;
+
+  // if (store_type == StoreType::kAcceptedBitset) {
+  //   accepted_bitset = DynamicBitset(vocab_size);
+  //   for (auto idx : accepted_indices) {
+  //     accepted_bitset.Set(sorted_decoded_vocab[idx].first, true);
+  //   }
+  // } else if (store_type == StoreType::kAccepted) {
+  //   this->accepted_indices = accepted_indices;
+  // } else {
+  //   this->rejected_indices = rejected_indices;
+  // }
+
+  // this->uncertain_indices = uncertain_indices;
 }
 
 std::string AdaptiveTokenMask::Print(const TokenizerInfo& tokenizer_info) const {

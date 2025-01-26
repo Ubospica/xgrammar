@@ -2,4 +2,5 @@ all: 32.2861
 
 json: 18.1240
 - context expansion: 35.2847
--
+- inlining: 154.4197
+- cache: 38280
