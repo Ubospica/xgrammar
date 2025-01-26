@@ -59,20 +59,20 @@ value_non_str ::= (
     "false" |
     "null"
 )
-members_and_embrace ::= ("\"" characters_and_colon space members_suffix | "}")
+members_and_embrace ::= ("\"" ([^"\\\x00-\x1F] | "\\" escape)* "\"" space ":" space members_suffix | "}")
 members_suffix ::= (
     value_non_str space member_suffix_suffix |
-    "\"" characters_and_embrace |
-    "\"" characters_and_comma space "\"" characters_and_colon space members_suffix
+    "\"" ([^"\\\x00-\x1F] | "\\" escape)* "\"" space "}" |
+    "\"" ([^"\\\x00-\x1F] | "\\" escape)* "\"" space "," space "\"" ([^"\\\x00-\x1F] | "\\" escape)* "\"" space ":" space members_suffix
 )
 member_suffix_suffix ::= (
     "}" |
-    "," space "\"" characters_and_colon space members_suffix
+    "," space "\"" ([^"\\\x00-\x1F] | "\\" escape)* "\"" space ":" space members_suffix
 )
 elements_or_embrace ::= (
     "{" space members_and_embrace elements_rest space "]" |
     "[" space elements_or_embrace elements_rest space "]" |
-    "\"" characters_item elements_rest space "]" |
+    "\"" ([^"\\\x00-\x1F] | "\\" escape)* "\"" elements_rest space "]" |
     "0" fraction exponent elements_rest space "]" |
     [1-9] [0-9]* fraction exponent elements_rest space "]" |
     "-" "0" fraction exponent elements_rest space "]" |
@@ -85,7 +85,7 @@ elements_or_embrace ::= (
 elements ::= (
     "{" space members_and_embrace elements_rest |
     "[" space elements_or_embrace elements_rest |
-    "\"" characters_item elements_rest |
+    "\"" ([^"\\\x00-\x1F] | "\\" escape)* "\"" elements_rest |
     "0" fraction exponent elements_rest |
     [1-9] [0-9]* fraction exponent elements_rest |
     "-" [0-9] fraction exponent elements_rest |
@@ -97,26 +97,6 @@ elements ::= (
 elements_rest ::= (
     "" |
     space "," space elements
-)
-characters_and_colon ::= (
-    "\"" space ":" |
-    [^"\\\x00-\x1F] characters_and_colon |
-    "\\" escape characters_and_colon
-)
-characters_and_comma ::= (
-    "\"" space "," |
-    [^"\\\x00-\x1F] characters_and_comma |
-    "\\" escape characters_and_comma
-)
-characters_and_embrace ::= (
-    "\"" space "}" |
-    [^"\\\x00-\x1F] characters_and_embrace |
-    "\\" escape characters_and_embrace
-)
-characters_item ::= (
-    "\"" |
-    [^"\\\x00-\x1F] characters_item |
-    "\\" escape characters_item
 )
 space ::= [ \n\t]*
 escape ::= ["\\/bfnrt] | "u" [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9]
