@@ -1,0 +1,17 @@
+document ::= (COMMENT | SEA_WS)* element (COMMENT | SEA_WS)*
+
+content ::= (TEXT | element | reference | COMMENT)*
+
+element ::= '<' Name (SEA_WS? attribute)* ('>' content '<' '/' Name '>' | '/>')
+
+reference ::= '&' Name '' | '&#' [0-9]+ '' | '&#x' [a-fA-F0-9]+ ''
+
+attribute ::= Name SEA_WS? '=' SEA_WS? STRING
+
+COMMENT ::= '<!--' ( [^-] | '-' [^-] | '--' [^-] )* '-->'
+
+SEA_WS ::= [ \t\r\n]+
+
+TEXT ::= [^<&]+
+
+Name ::= [_:a-zA-Z] [_:a-zA-Z\-.0-9]*
