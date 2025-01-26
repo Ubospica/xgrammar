@@ -26,27 +26,28 @@ wrong_data_indices = [1]
 
 
 xml_grammar = """
-document ::= (COMMENT | SEA_WS)* element (COMMENT | SEA_WS)*
+root ::= (COMMENT | SEA_WS)* element (COMMENT | SEA_WS)*
 
 content ::= (TEXT | element | reference | COMMENT)*
 
-element ::= '<' Name (SEA_WS? attribute)* ('>' content '<' '/' Name '>' | '/>')
+element ::= "<" Name (SEA_WS? attribute)* (">" content "<" "/" Name ">" | "/>")
 
-reference ::= '&' Name '' | '&#' [0-9]+ '' | '&#x' [a-fA-F0-9]+ ''
+reference ::= "&" Name ";" | "&#" [0-9]+ ";" | "&#x" [a-fA-F0-9]+ ";"
 
-attribute ::= Name SEA_WS? '=' SEA_WS? STRING
+attribute ::= Name SEA_WS? "=" SEA_WS? STRING
 
-COMMENT ::= '<!--' ( [^-] | '-' [^-] | '--' [^-] )* '-->'
+COMMENT ::= "<!--" ( [^-] | "-" [^-] | "--" [^-] )* "-->"
 
-SEA_WS ::= [ \t\r\n]+
+SEA_WS ::= [ \\t\\r\\n]+
 
 TEXT ::= [^<&]+
 
-Name ::= [_:a-zA-Z] [_:a-zA-Z\-.0-9]*
+Name ::= [_:a-zA-Z] [_:a-zA-Z\\-.0-9]*
+
+STRING ::= "\\"" [^<"]* "\\"" | "\\'" [^<"]* "\\'"
 """
 
-input_str = """
-<RestaurantReservation>
+input_str = """<RestaurantReservation>
   <reservationID>AH-158394</reservationID>
   <guestName>Alexander Hamilton</guestName>
   <reservationTime>2023-04-15T19:30:00Z</reservationTime>
@@ -58,20 +59,16 @@ input_str = """
 """
 
 
-def xgrammar_build(schema: str, grammar_compiler: xgr.GrammarCompiler):
-    compiled_grammar = grammar_compiler.compile_grammar(xml_grammar)
+def xgrammar_build(grammar_str: str, grammar_compiler: xgr.GrammarCompiler):
+    compiled_grammar = grammar_compiler.compile_grammar(grammar_str)
     # print(compiled_grammar.grammar)
     matcher = xgr.GrammarMatcher(compiled_grammar)
     return matcher
 
 
-def xgrammar_exec(
-    matcher: xgr.GrammarMatcher, logits: torch.Tensor, bitmask: torch.Tensor, token_id: int
-):
+def xgrammar_exec(matcher: xgr.GrammarMatcher, bitmask: torch.Tensor, token_id: int):
     # Logits processing
     matcher.fill_next_token_bitmask(bitmask)
-    # xgr.apply_token_bitmask_inplace(logits, bitmask)
-    # Update state
     assert matcher.accept_token(token_id)
     return
 
@@ -116,15 +113,9 @@ if __name__ == "__main__":
         choices=["xgrammar", "outlines", "lmformatenforcer"],
         default="xgrammar",
     )
-    parser.add_argument("--num_iters", type=int, default=1)
-    parser.add_argument("--num_warmup", type=int, default=0)
     args = parser.parse_args()
 
     backend = args.backend
-    num_iters = args.num_iters
-    num_warmup = args.num_warmup if args.num_warmup != -1 else 5 if num_iters >= 40 else 1
-
-    dataset = datasets.load_dataset("NousResearch/json-mode-eval", split="train")
 
     hf_model_path = "meta-llama/Llama-3.1-8B-Instruct"
 
@@ -138,95 +129,35 @@ if __name__ == "__main__":
 
     build_time = 0
     exec_time = 0
-    total_data_points = 0
     total_tokens = 0
     fail_cnt = 0
 
-    tqdm_iter = tqdm(range(-num_warmup, num_iters))
-    for iter in tqdm_iter:
-        if iter < 0:
-            tqdm_iter.set_description(f"Backend: {backend}, Warmup Iter: {iter + num_warmup}")
-        else:
-            tqdm_iter.set_description(f"Backend: {backend}, Iter: {iter}")
+    start = time.perf_counter()
+    if backend == "xgrammar":
+        worker = xgrammar_build(xml_grammar, xgrammar_grammar_compiler)
+    # elif backend == "outlines":
+    #     worker = outlines_build(schema, outlines_tokenizer)
+    # elif backend == "lmformatenforcer":
+    #     worker = lmformatenforcer_build(schema, lmformatenforcer_tokenizer)
 
-        if iter == 0:
-            # Reset time
-            build_time = 0
-            exec_time = 0
+    build_time = time.perf_counter() - start
 
-        tqdm_data_point_iter = tqdm(range(len(dataset)))
-        for data_point_idx in tqdm_data_point_iter:
-            tqdm_data_point_iter.set_description(
-                f"Backend: {backend}, Data Point: {data_point_idx}"
-            )
-            if data_point_idx in wrong_data_indices:
-                continue
+    print(f"Grammar preprocessing time (ms): {build_time * 1e3:.4f}")
 
-            schema = dataset["schema"][data_point_idx]
-            completion = dataset["completion"][data_point_idx]
-            token_ids = hf_tokenizer.encode(completion, add_special_tokens=False)
-            prompt = hf_tokenizer.apply_chat_template(
-                dataset["prompt"][data_point_idx], tokenize=False
-            )
-            prompt_token_ids = hf_tokenizer.encode(prompt)
-            print(f"Prompt: {prompt}")
-            print(f"Schema: {schema}")
-            print(f"Completion: {completion}")
+    input_ids = hf_tokenizer.encode(input_str, add_special_tokens=False)
+    bitmask = xgr.allocate_token_bitmask(1, xgrammar_tokenizer_info.vocab_size)
+    start = time.perf_counter()
+    for idx, token_id in enumerate(input_ids):
+        if backend == "xgrammar":
+            xgrammar_exec(worker, bitmask, token_id)
+        # elif backend == "outlines":
+        #     if idx == 0:
+        #         state = None
+        #     state = outlines_exec(worker, logits[idx], token_id, state)
+        # elif backend == "lmformatenforcer":
+        #     lmformatenforcer_exec(worker, logits[idx], prompt_token_ids + token_ids[:idx])
 
-            start = time.perf_counter()
-            try:
-                if backend == "xgrammar":
-                    worker = xgrammar_build(schema, xgrammar_grammar_compiler)
-                    bitmask = xgr.allocate_token_bitmask(1, xgrammar_tokenizer_info.vocab_size)
-                # elif backend == "outlines":
-                #     worker = outlines_build(schema, outlines_tokenizer)
-                elif backend == "lmformatenforcer":
-                    worker = lmformatenforcer_build(schema, lmformatenforcer_tokenizer)
-            except Exception as e:
-                if iter >= 0:
-                    fail_cnt += 1
-                # raise e
-                continue
+    torch.cuda.synchronize()
+    exec_time = time.perf_counter() - start
 
-            build_time += time.perf_counter() - start
-
-            # use different logits for each mask generation process
-            # to avoid caching effects between different tokens
-            logits = [torch.randn(vocab_size) for _ in range(len(token_ids))]
-
-            torch.cuda.synchronize()
-            start = time.perf_counter()
-            fail_flag = False
-            for idx, token_id in enumerate(token_ids):
-                # Logits processing
-                try:
-                    if backend == "xgrammar":
-                        xgrammar_exec(worker, logits[idx], bitmask, token_id)
-                    # elif backend == "outlines":
-                    #     if idx == 0:
-                    #         state = None
-                    #     state = outlines_exec(worker, logits[idx], token_id, state)
-                    elif backend == "lmformatenforcer":
-                        lmformatenforcer_exec(
-                            worker, logits[idx], prompt_token_ids + token_ids[:idx]
-                        )
-                except Exception as e:
-                    if iter >= 0:
-                        fail_cnt += 1
-                    fail_flag = True
-                    # raise e
-                    break
-
-            if fail_flag:
-                continue
-
-            torch.cuda.synchronize()
-            exec_time += time.perf_counter() - start
-
-            if iter >= 0:
-                total_data_points += 1
-                total_tokens += len(token_ids)
-
-    print(f"Backend: {backend}")
-    print(f"Grammar preprocessing time (ms): {build_time/total_data_points * 1e3:.4f}")
-    print(f"Mask generation time (us/token): {exec_time/total_tokens * 1e6:.4f}")
+    print(f"Mask generation time (ms): {exec_time / len(input_ids) * 1e3:.4f}")
