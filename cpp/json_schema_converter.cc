@@ -910,10 +910,10 @@ std::string JSONSchemaConverter::VisitInteger(
     }
     range_regex = GenerateRangeRegex(start, end);
   }
-  if (!range_regex.empty()) {
-    std::string converted_regex = RegexToEBNF(range_regex, false);
-    return converted_regex;  // not " " for numbers
-  }
+  // if (!range_regex.empty()) {
+  //   std::string converted_regex = RegexToEBNF(range_regex, false);
+  //   return converted_regex;  // not " " for numbers
+  // }
   return "(\"0\" | \"-\"? [1-9] [0-9]*)";
 }
 
