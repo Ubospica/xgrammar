@@ -25,8 +25,41 @@ import xgrammar as xgr
 wrong_data_indices = [1]
 
 
+xml_grammar = """
+document ::= (COMMENT | SEA_WS)* element (COMMENT | SEA_WS)*
+
+content ::= (TEXT | element | reference | COMMENT)*
+
+element ::= '<' Name (SEA_WS? attribute)* ('>' content '<' '/' Name '>' | '/>')
+
+reference ::= '&' Name '' | '&#' [0-9]+ '' | '&#x' [a-fA-F0-9]+ ''
+
+attribute ::= Name SEA_WS? '=' SEA_WS? STRING
+
+COMMENT ::= '<!--' ( [^-] | '-' [^-] | '--' [^-] )* '-->'
+
+SEA_WS ::= [ \t\r\n]+
+
+TEXT ::= [^<&]+
+
+Name ::= [_:a-zA-Z] [_:a-zA-Z\-.0-9]*
+"""
+
+input_str = """
+<RestaurantReservation>
+  <reservationID>AH-158394</reservationID>
+  <guestName>Alexander Hamilton</guestName>
+  <reservationTime>2023-04-15T19:30:00Z</reservationTime>
+  <specialRequests count="2">
+    <request>Table by the window</request>
+    <request>Surprise dessert for a special occasion</request>
+  </specialRequests>
+</RestaurantReservation>
+"""
+
+
 def xgrammar_build(schema: str, grammar_compiler: xgr.GrammarCompiler):
-    compiled_grammar = grammar_compiler.compile_builtin_json_grammar()
+    compiled_grammar = grammar_compiler.compile_grammar(xml_grammar)
     # print(compiled_grammar.grammar)
     matcher = xgr.GrammarMatcher(compiled_grammar)
     return matcher
