@@ -25,24 +25,19 @@ import xgrammar as xgr
 wrong_data_indices = [1]
 
 
-xml_grammar = """
-root ::= (COMMENT | SEA_WS)* element (COMMENT | SEA_WS)*
+xml_grammar = """root ::= element
 
-content ::= (TEXT | element | reference | COMMENT)*
+content ::= "" | [^<&] content | element content | reference content | COMMENT content
 
-element ::= "<" Name (SEA_WS? attribute)* (">" content "<" "/" Name ">" | "/>")
+element ::= "<" Name ([ \\t\\r\\n] [ \\t\\r\\n]* attribute)* (">" content "<" "/" Name ">" | "/>")
 
 reference ::= "&" Name ";" | "&#" [0-9]+ ";" | "&#x" [a-fA-F0-9]+ ";"
 
-attribute ::= Name SEA_WS? "=" SEA_WS? STRING
+attribute ::= Name [ \\t\\r\\n]* "=" [ \\t\\r\\n]* STRING
 
-COMMENT ::= "<!--" ( [^-] | "-" [^-] | "--" [^-] )* "-->"
+COMMENT ::= "<!--" ( [^-] | "-" [^-] | "--" [^>] )* "-->"
 
-SEA_WS ::= [ \\t\\r\\n]+
-
-TEXT ::= [^<&]+
-
-Name ::= [_:a-zA-Z] [_:a-zA-Z\\-.0-9]*
+Name ::= [_:a-zA-Z] [_:a-zA-Z\\-.0-9]* (=[ \\t\\r\\n;>=/])
 
 STRING ::= "\\"" [^<"]* "\\"" | "\\'" [^<"]* "\\'"
 """
@@ -55,13 +50,12 @@ input_str = """<RestaurantReservation>
     <request>Table by the window</request>
     <request>Surprise dessert for a special occasion</request>
   </specialRequests>
-</RestaurantReservation>
-"""
+</RestaurantReservation>"""
 
 
 def xgrammar_build(grammar_str: str, grammar_compiler: xgr.GrammarCompiler):
     compiled_grammar = grammar_compiler.compile_grammar(grammar_str)
-    # print(compiled_grammar.grammar)
+    print(compiled_grammar.grammar)
     matcher = xgr.GrammarMatcher(compiled_grammar)
     return matcher
 
@@ -69,7 +63,7 @@ def xgrammar_build(grammar_str: str, grammar_compiler: xgr.GrammarCompiler):
 def xgrammar_exec(matcher: xgr.GrammarMatcher, bitmask: torch.Tensor, token_id: int):
     # Logits processing
     matcher.fill_next_token_bitmask(bitmask)
-    assert matcher.accept_token(token_id)
+    assert matcher.accept_token(token_id, debug_print=False)
     return
 
 
@@ -121,43 +115,36 @@ if __name__ == "__main__":
 
     hf_tokenizer = AutoTokenizer.from_pretrained(hf_model_path)
     xgrammar_tokenizer_info = xgr.TokenizerInfo.from_huggingface(hf_tokenizer)
-    xgrammar_grammar_compiler = xgr.GrammarCompiler(xgrammar_tokenizer_info)
+    xgrammar_grammar_compiler = xgr.GrammarCompiler(xgrammar_tokenizer_info, max_threads=1)
     # outlines_tokenizer = TransformerTokenizer(hf_tokenizer)
     lmformatenforcer_tokenizer = build_token_enforcer_tokenizer_data(hf_tokenizer)
 
     vocab_size = len(hf_tokenizer)
-
-    build_time = 0
-    exec_time = 0
-    total_tokens = 0
-    fail_cnt = 0
-
-    start = time.perf_counter()
-    if backend == "xgrammar":
-        worker = xgrammar_build(xml_grammar, xgrammar_grammar_compiler)
-    # elif backend == "outlines":
-    #     worker = outlines_build(schema, outlines_tokenizer)
-    # elif backend == "lmformatenforcer":
-    #     worker = lmformatenforcer_build(schema, lmformatenforcer_tokenizer)
-
-    build_time = time.perf_counter() - start
-
-    print(f"Grammar preprocessing time (ms): {build_time * 1e3:.4f}")
-
-    input_ids = hf_tokenizer.encode(input_str, add_special_tokens=False)
-    bitmask = xgr.allocate_token_bitmask(1, xgrammar_tokenizer_info.vocab_size)
-    start = time.perf_counter()
-    for idx, token_id in enumerate(input_ids):
+    for iter in range(3):
+        start = time.perf_counter()
         if backend == "xgrammar":
-            xgrammar_exec(worker, bitmask, token_id)
+            worker = xgrammar_build(xml_grammar, xgrammar_grammar_compiler)
         # elif backend == "outlines":
-        #     if idx == 0:
-        #         state = None
-        #     state = outlines_exec(worker, logits[idx], token_id, state)
+        #     worker = outlines_build(schema, outlines_tokenizer)
         # elif backend == "lmformatenforcer":
-        #     lmformatenforcer_exec(worker, logits[idx], prompt_token_ids + token_ids[:idx])
+        #     worker = lmformatenforcer_build(schema, lmformatenforcer_tokenizer)
 
-    torch.cuda.synchronize()
-    exec_time = time.perf_counter() - start
+        build_time = time.perf_counter() - start
 
-    print(f"Mask generation time (ms): {exec_time / len(input_ids) * 1e3:.4f}")
+        print(f"Grammar preprocessing time (ms): {build_time * 1e3:.4f}")
+
+        input_ids = hf_tokenizer.encode(input_str, add_special_tokens=False)
+        bitmask = xgr.allocate_token_bitmask(1, xgrammar_tokenizer_info.vocab_size)
+        start = time.perf_counter()
+        for idx, token_id in enumerate(input_ids):
+            if backend == "xgrammar":
+                xgrammar_exec(worker, bitmask, token_id)
+            # elif backend == "outlines":
+            #     if idx == 0:
+            #         state = None
+            #     state = outlines_exec(worker, logits[idx], token_id, state)
+            # elif backend == "lmformatenforcer":
+            #     lmformatenforcer_exec(worker, logits[idx], prompt_token_ids + token_ids[:idx])
+        exec_time = time.perf_counter() - start
+
+        print(f"Mask generation time (ms): {exec_time / len(input_ids) * 1e3:.4f}")

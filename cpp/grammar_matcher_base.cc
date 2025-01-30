@@ -17,10 +17,6 @@
 
 namespace xgrammar {
 
-constexpr int32_t kUnexpandedRuleStartSequenceId = 128000;
-
-constexpr int32_t kDispatchedTagDispatchElementId = -1;
-
 /*! \brief Check the codepoint is contained in the character class. */
 bool GrammarMatcherBase::CheckIfAccepted(const StackElement& stack_element, uint8_t char_value)
     const {
@@ -160,8 +156,12 @@ void GrammarMatcherBase::ExpandEquivalentStackElements(
     const StackElement& cur_stack_element,
     std::vector<int32_t>* new_stack_tops,
     int32_t cur_stack_element_id,
-    bool consider_parent
+    bool consider_parent,
+    int recursive_depth
 ) {
+  // std::cout << "recursive_depth: " << recursive_depth
+  //           << ", cur_stack_element: " << persistent_stack_.PrintStackElement(cur_stack_element)
+  //           << std::endl;
   auto f_add_current_stack_element = [&]() {
     if (cur_stack_element_id != -1) {
       return cur_stack_element_id;
@@ -194,7 +194,10 @@ void GrammarMatcherBase::ExpandEquivalentStackElements(
         }
         auto new_stack_element =
             StackElement(cur_rule_id, sequence_id, 0, cur_stack_element.parent_id);
-        ExpandEquivalentStackElements(new_stack_element, new_stack_tops, -1, false);
+        // std::cout << "recursive case 1" << std::endl;
+        ExpandEquivalentStackElements(
+            new_stack_element, new_stack_tops, -1, false, recursive_depth + 1
+        );
       }
       return;
     }
@@ -209,6 +212,8 @@ void GrammarMatcherBase::ExpandEquivalentStackElements(
   }
 
   // Step 2. The stack element points to the end of a rule.
+  // std::cout << "cur_sequence.size(): " << cur_sequence.size()
+  //           << ", cur_stack_element.element_id: " << cur_stack_element.element_id << std::endl;
   if (cur_sequence.size() == cur_stack_element.element_id) {
     if (cur_stack_element.parent_id == StackElement::kNoParent) {
       // Case 2.1. The stack element points to the end of the grammar (meaning the matching
@@ -225,7 +230,10 @@ void GrammarMatcherBase::ExpandEquivalentStackElements(
       }
       XGRAMMAR_DCHECK(new_stack_element.element_in_string == 0);
       XGRAMMAR_DCHECK(new_stack_element.left_utf8_bytes == 0);
-      ExpandEquivalentStackElements(new_stack_element, new_stack_tops, -1, consider_parent);
+      // std::cout << "recursive case 2" << std::endl;
+      ExpandEquivalentStackElements(
+          new_stack_element, new_stack_tops, -1, consider_parent, recursive_depth + 1
+      );
     }
     // Case 2.3. When consider_parent is false, we do nothing and return.
     return;
@@ -236,11 +244,13 @@ void GrammarMatcherBase::ExpandEquivalentStackElements(
 
   // Step 3. Iterate into sub rules
   if (current_element.type == RuleExprType::kRuleRef) {
+    // std::cout << "recursive case 3" << std::endl;
     ExpandEquivalentStackElements(
         StackElement(current_element[0], kUnexpandedRuleStartSequenceId, 0, stack_element_id),
         new_stack_tops,
         -1,
-        false
+        false,
+        recursive_depth + 1
     );
   } else {
     XGRAMMAR_DCHECK(
@@ -260,7 +270,10 @@ void GrammarMatcherBase::ExpandEquivalentStackElements(
       (current_element.type == RuleExprType::kRuleRef &&
        exist_in_vector(grammar_->allow_empty_rule_ids, current_element[0]))) {
     auto next_stack_element = MoveToNextPosition(cur_stack_element);
-    ExpandEquivalentStackElements(next_stack_element, new_stack_tops, -1, consider_parent);
+    // std::cout << "recursive case 4" << std::endl;
+    ExpandEquivalentStackElements(
+        next_stack_element, new_stack_tops, -1, consider_parent, recursive_depth + 1
+    );
   }
 }
 
@@ -272,10 +285,15 @@ bool GrammarMatcherBase::AcceptChar(uint8_t char_value, bool debug_print) {
   const auto& prev_stack_tops = stack_tops_history_.GetLatest();
 
   tmp_new_stack_tops_.clear();
+  int cnt = 0;
   for (auto prev_top : prev_stack_tops) {
     auto cur_stack_element = persistent_stack_[prev_top];
 
     auto accepted = CheckIfAccepted(cur_stack_element, char_value);
+    if (debug_print) {
+      std::cout << "stack num: " << cnt << ", accepted: " << accepted << std::endl;
+    }
+    ++cnt;
     if (!accepted) {
       continue;
     }

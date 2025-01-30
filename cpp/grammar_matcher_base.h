@@ -106,7 +106,8 @@ class GrammarMatcherBase {
       const StackElement& cur_stack_element,
       std::vector<int32_t>* new_stack_tops,
       int32_t cur_stack_element_id = -1,
-      bool consider_parent = true
+      bool consider_parent = true,
+      int recursive_depth = 0
   );
 
   // The matched grammar.

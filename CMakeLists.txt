@@ -61,6 +61,10 @@ list(FILTER XGRAMMAR_SOURCES_PATH EXCLUDE REGEX "${PROJECT_SOURCE_DIR}/cpp/pybin
 add_library(xgrammar STATIC ${XGRAMMAR_SOURCES_PATH})
 target_include_directories(xgrammar PUBLIC ${XGRAMMAR_INCLUDE_PATH})
 
+# link to cpptrace
+add_subdirectory(${PROJECT_SOURCE_DIR}/3rdparty/cpptrace)
+target_link_libraries(xgrammar PUBLIC cpptrace::cpptrace)
+
 if(XGRAMMAR_BUILD_PYTHON_BINDINGS)
   add_subdirectory(${PROJECT_SOURCE_DIR}/cpp/pybind)
 endif()

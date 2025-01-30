@@ -359,7 +359,7 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
   if (debug_print) {
     XGRAMMAR_LOG(INFO) << "Accepting token id " << token_id << ", string: \""
                        << PrintAsEscapedUTF8(tokenizer_info_.GetDecodedVocab()[token_id])
-                       << "\", state state:\n"
+                       << "\", stack state:\n"
                        << PrintStackState();
   }
 
@@ -495,6 +495,9 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
   // because in function calling cases, only the part within the tag is constrained
   bool have_tag_dispatch = false;
 
+  int max_uncertain_tokens = 0;
+  // std::cout << "num_stack_tops: " << latest_stack_tops.size() << std::endl;
+
   for (auto top : latest_stack_tops) {
     auto cur_stack_element = persistent_stack_[top];
     auto cur_sequence = grammar_->GetRuleExpr(cur_stack_element.sequence_id);
@@ -514,7 +517,12 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
         << persistent_stack_.PrintStackElement(cur_stack_element);
 
     const auto& adaptive_token_mask = adaptive_token_mask_it->second;
-
+    // std::cout << "stack: " << persistent_stack_.PrintStackByTopId(top) << std::endl;
+    // std::cout << "#uncertain: " << adaptive_token_mask.uncertain_indices.size() << std::endl;
+    // std::cout << adaptive_token_mask.Print(tokenizer_info_) << std::endl;
+    max_uncertain_tokens = std::max(
+        max_uncertain_tokens, static_cast<int>(adaptive_token_mask.uncertain_indices.size())
+    );
     // For each stack, we will check every uncertain token and put them into the accepted or
     // rejected list.
 
@@ -609,6 +617,7 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
     XGRAMMAR_LOG(INFO) << "Ended: " << can_reach_end
                        << ", filled bitmask: " << PrintBitmask(bitmask_data_ptr, tokenizer_info_);
   }
+  // std::cout << "max_uncertain_tokens: " << max_uncertain_tokens << std::endl;
   return !IsTokenBitmaskAllTrue(bitmask_data_ptr);
 }
 
