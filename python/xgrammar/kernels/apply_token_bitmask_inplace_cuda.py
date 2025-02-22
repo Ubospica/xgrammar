@@ -18,6 +18,11 @@ from typing import List, Optional, Union
 import torch
 import torch.utils.cpp_extension
 
+from ..support import logging
+
+logging.enable_logging()
+logger = logging.getLogger(__name__)
+
 
 def _remove_torch_nvcc_flags():
     REMOVE_NVCC_FLAGS = [
@@ -34,6 +39,12 @@ def _remove_torch_nvcc_flags():
 
 
 def _load_torch_ops():
+    logger.info("Compiling or loading XGrammar CUDA kernels...")
+    logger.info(
+        "If this process stucks, it may be due to previously incomplete compile results. "
+        "Please delete the cache dir that could be at "
+        "~/.cache/torch_extensions/py{version}_cu{version}/xgrammar."
+    )
     src = __file__.replace(".py", ".cu")
     cflags = ["-O3", "-Wno-switch-bool"]
     cuda_cflags = [
@@ -52,6 +63,7 @@ def _load_torch_ops():
         is_python_module=False,
         is_standalone=False,
     )
+    logger.info("XGrammar CUDA kernels loaded successfully.")
 
 
 _remove_torch_nvcc_flags()

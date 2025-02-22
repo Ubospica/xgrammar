@@ -179,7 +179,10 @@ class GrammarMatcher(XGRObject):
         max_rollback_tokens: int = 0,
     ) -> None:
         if not isinstance(compiled_grammar, CompiledGrammar):
-            raise ValueError("The grammar should be compiled before passing it to GrammarMatcher.")
+            raise ValueError(
+                "The grammar should be compiled before passing it to GrammarMatcher."
+                + "Please use `compiled_grammar = grammar.compile()` to compile the grammar."
+            )
 
         if isinstance(override_stop_tokens, int):
             override_stop_tokens = [override_stop_tokens]
