@@ -51,21 +51,23 @@ class IndentManager {
   }
 
   /*!
-   * \brief Get the next separator in the current level. When first called in the current
-   * level, the starting separator will be returned. When called again, the middle separator will be
-   * returned. When called with `is_end=True`, the ending separator will be returned.
-   * \param is_end Get the separator for the end of the current level.
+   * \brief Get the next start separator in the current level. The next separator is escaped and
+   * quoted.
    * \example
    * \code
    * IndentManager indent_manager(2, ", ");
    * indent_manager.StartIndent();
-   * indent_manager.GetSep(); // get the start separator: "\"\n  \""
-   * indent_manager.GetSep(); // get the middle separator: "\",\n  \""
-   * indent_manager.GetSep(true); // get the end separator: "\"\n\""
+   * indent_manager.StartSeparator(); // get the start separator: "\"\n  \""
+   * indent_manager.MiddleSeparator(); // get the middle separator: "\",\n  \""
+   * indent_manager.EndSeparator(); // get the end separator: "\"\n\""
    * indent_manager.EndIndent();
    * \endcode
    */
-  std::string NextSeparator(bool is_end = false);
+  std::string StartSeparator();
+
+  std::string MiddleSeparator();
+
+  std::string EndSeparator();
 
  private:
   bool any_whitespace_;
@@ -77,33 +79,34 @@ class IndentManager {
   friend class JSONSchemaConverter;
 };
 
-std::string IndentManager::NextSeparator(bool is_end) {
+std::string IndentManager::StartSeparator() {
   if (any_whitespace_) {
-    if (is_first_.back() || is_end) {
-      is_first_.back() = false;
-      return "[ \\n\\t]*";
-    } else {
-      return "[ \\n\\t]* \"" + separator_ + "\" [ \\n\\t]*";
-    }
+    return "[ \\n\\t]*";
   }
-
-  std::string res = "";
-  if (!is_first_.back() && !is_end) {
-    res += separator_;
+  if (!enable_newline_) {
+    return "\"\"";
   }
-  is_first_.back() = false;
+  return "\"\\n" + std::string(total_indent_, ' ') + "\"";
+}
 
-  if (enable_newline_) {
-    res += "\\n";
+std::string IndentManager::MiddleSeparator() {
+  if (any_whitespace_) {
+    return "[ \\n\\t]* \"" + separator_ + "\" [ \\n\\t]*";
   }
-
-  if (!is_end) {
-    res += std::string(total_indent_, ' ');
-  } else {
-    res += std::string(total_indent_ - indent_, ' ');
+  if (!enable_newline_) {
+    return "\"" + separator_ + "\"";
   }
+  return "\"" + separator_ + "\\n" + std::string(total_indent_, ' ') + "\"";
+}
 
-  return "\"" + res + "\"";
+std::string IndentManager::EndSeparator() {
+  if (any_whitespace_) {
+    return "[ \\n\\t]*";
+  }
+  if (!enable_newline_) {
+    return "\"\"";
+  }
+  return "\"" + separator_ + "\\n" + std::string(total_indent_ - indent_, ' ') + "\"";
 }
 
 /*!
@@ -182,9 +185,6 @@ class JSONSchemaConverter {
   std::string CreateRuleFromSchema(
       const picojson::value& schema, const std::string& rule_name_hint
   );
-
-  /*! \brief Get the next separator in the current level from the indent manager. */
-  std::string NextSeparator(bool is_end = false);
 
   /*! \brief Warn if any keyword is existing in the schema but not supported. */
   static void WarnUnsupportedKeywords(
@@ -480,10 +480,6 @@ void JSONSchemaConverter::AddHelperRules() {
 void JSONSchemaConverter::CreateBasicRule(const picojson::value& schema, const std::string& name) {
   std::string rule_name = CreateRuleFromSchema(schema, name);
   basic_rules_cache_[GetSchemaCacheIndex(schema)] = rule_name;
-}
-
-std::string JSONSchemaConverter::NextSeparator(bool is_end) {
-  return indentManager_->NextSeparator(is_end);
 }
 
 void JSONSchemaConverter::WarnUnsupportedKeywords(
@@ -1887,6 +1883,10 @@ std::string JSONSchemaConverter::VisitArray(
           "maxItems",
       }
   );
+
+  std::string start_sep = indentManager_->StartSeparator();
+  std::string middle_sep = indentManager_->MiddleSeparator();
+  std::string end_sep = indentManager_->EndSeparator();
 
   std::string result = "\"[\"";
 
