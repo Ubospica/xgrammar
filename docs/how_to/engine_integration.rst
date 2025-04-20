@@ -278,7 +278,7 @@ In the following content, we will demonstrate the specific implementation of app
     full_vocab_size = config.vocab_size
     tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=full_vocab_size)
 
-Than we compile the grammar from structural tags to support structured function calling. Here we take tool-calling format `<function=function_name>json_parameters</function>` for example, which is preferred by Llama3 models.
+Than we compile the grammar from structural tags to support structured function calling. Here we take tool-calling format <function=function_name>json_parameters</function> for example, which is preferred by Llama3 models.
 
 .. code:: python
 
@@ -315,12 +315,11 @@ Than we compile the grammar from structural tags to support structured function 
       for tool in tools
     ]
     triggers = ["<function="]
+    stag: xgr.Grammar = xgr.StructuralTag(tags=tags, triggers=triggers, tool_choice="auto")
 
-    # compile from structural tag
+    # compile from Structural Tag
     compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
-    compiled_grammar = compiler.compile_structural_tag(
-      tags=tags, triggers=triggers, tool_choice="auto"
-    )
+    compiled_grammar = compiler.compile_structural_tag(stag)
 
 We still simulate an auto-regressive generation of batched inference. Note that when the trigger is not encountered, the mask will likely be all-1 and not have to be used (``fill_next_token_bitmask`` returns False, meaning no token is masked), and when a trigger is encountered, the mask should be enforced (``fill_next_token_bitmask`` will return True, meaning some token is masked) to the output logits. This method optimizes performance by avoiding unnecessary masking when no trigger is encountered.
 
