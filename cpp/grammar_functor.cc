@@ -308,7 +308,8 @@ class StructureNormalizerImpl : public GrammarMutator {
   using GrammarMutator::GrammarMutator;
 
   Grammar Apply(const Grammar& grammar) final {
-    return StructureNormalizerSub().Apply(SingleElementExprEliminator().Apply(grammar));
+    auto grammar_new = SingleElementExprEliminator().Apply(grammar);
+    return StructureNormalizerSub().Apply(grammar_new);
   }
 };
 
@@ -466,7 +467,7 @@ class UsedRulesAnalyzer : public GrammarVisitor<std::vector<int32_t>> {
   }
 
   void VisitTagDispatch(const RuleExpr& rule_expr) {
-    for (int i = 0; i < rule_expr.size(); i += 2) {
+    for (int i = 0; i < rule_expr.size() - 2; i += 2) {
       visit_queue_.push(rule_expr[i + 1]);
     }
   }
@@ -503,12 +504,20 @@ class DeadCodeEliminatorImpl : public GrammarMutator {
 
   int32_t VisitTagDispatch(const RuleExpr& rule_expr) final {
     std::vector<std::pair<int32_t, int32_t>> tag_dispatch_list;
-    for (int i = 0; i < rule_expr.size(); i += 2) {
+    for (int i = 0; i < rule_expr.size() - 2; i += 2) {
       XGRAMMAR_DCHECK(rule_id_map_.count(rule_expr[i + 1]) > 0);
       auto new_rule_id = rule_id_map_[rule_expr[i + 1]];
       tag_dispatch_list.push_back({VisitExpr(rule_expr[i]), new_rule_id});
     }
-    return builder_.AddTagDispatch(tag_dispatch_list);
+    auto exit_triggers_expr = base_grammar_->GetRuleExpr(rule_expr[rule_expr.size() - 2]);
+    XGRAMMAR_DCHECK(exit_triggers_expr.type == RuleExprType::kChoices);
+    std::vector<int32_t> exit_triggers;
+    for (int i = 0; i < exit_triggers_expr.size(); ++i) {
+      exit_triggers.push_back(VisitExpr(exit_triggers_expr[i]));
+    }
+    int32_t exit_triggers_id = builder_.AddChoices(exit_triggers);
+    bool loop_after_dispatch = static_cast<bool>(rule_expr[rule_expr.size() - 1]);
+    return builder_.AddTagDispatch(tag_dispatch_list, exit_triggers_id, loop_after_dispatch);
   }
 
   int32_t VisitRuleRef(const RuleExpr& rule_expr) final {
@@ -771,7 +780,7 @@ class RuleRefGraphFinder : public GrammarVisitor<std::vector<std::vector<int32_t
   }
 
   void VisitTagDispatch(const RuleExpr& rule_expr) {
-    for (int i = 1; i < rule_expr.size(); i += 2) {
+    for (int i = 1; i < rule_expr.size() - 2; i += 2) {
       rule_visit_graph_[rule_expr[i]].push_back(cur_rule_id_);
     }
   }
@@ -949,8 +958,11 @@ class StructuralTagGrammarCreatorImpl : public SubGrammarCombiner {
     for (const auto& [trigger_id, rule_id] : trigger_rule_pairs) {
       tag_dispatch_data.emplace_back(trigger_id, rule_id);
     }
-
-    builder_.UpdateRuleBody(root_rule_id, builder_.AddTagDispatch(tag_dispatch_data));
+    auto exit_triggers_id = builder_.AddChoices({builder_.AddEmptyStr()});
+    bool loop_after_dispatch = true;
+    auto tag_dispatch_id =
+        builder_.AddTagDispatch(tag_dispatch_data, exit_triggers_id, loop_after_dispatch);
+    builder_.UpdateRuleBody(root_rule_id, tag_dispatch_id);
     return builder_.Get(root_rule_id);
   }
 

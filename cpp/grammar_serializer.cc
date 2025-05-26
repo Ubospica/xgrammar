@@ -120,13 +120,22 @@ std::string GrammarPrinter::PrintChoices(const RuleExpr& rule_expr) {
 
 std::string GrammarPrinter::PrintTagDispatch(const RuleExpr& rule_expr) {
   std::string result = "TagDispatch(";
-  for (int i = 0; i < rule_expr.data_len; i += 2) {
+  XGRAMMAR_DCHECK(rule_expr.data_len >= 2);  // At least one exit_triggers, one loop_after_dispatch
+  for (int i = 0; i < rule_expr.data_len - 2; i += 2) {
     result +=
-        "(" + PrintRuleExpr(rule_expr[i]) + ", " + grammar_->GetRule(rule_expr[i + 1]).name + ")";
-    if (i + 2 != rule_expr.data_len) {
+        "(" + PrintRuleExpr(rule_expr[i]) + ", " + grammar_->GetRule(rule_expr[i + 1]).name + "), ";
+  }
+  result += "exit_triggers=(";
+  auto exit_triggers_expr = grammar_->GetRuleExpr(rule_expr[rule_expr.data_len - 2]);
+  XGRAMMAR_DCHECK(exit_triggers_expr.type == RuleExprType::kChoices);
+  for (int i = 0; i < exit_triggers_expr.data_len; ++i) {
+    result += PrintRuleExpr(exit_triggers_expr[i]);
+    if (i + 1 != exit_triggers_expr.data_len) {
       result += ", ";
     }
   }
+  result += "), loop_after_dispatch=";
+  result += static_cast<bool>(rule_expr[rule_expr.data_len - 1]) ? "true" : "false";
   result += ")";
   return result;
 }
