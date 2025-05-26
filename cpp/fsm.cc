@@ -54,11 +54,9 @@ void CompactFSM::GetEpsilonClosure(
   return;
 }
 
-FSMEdge::FSMEdge(const short& _min, const short& _max, const int& target)
-    : min(_min), max(_max), target(target) {
-  if (IsCharRange() && min > max) {
-    XGRAMMAR_DCHECK(false) << "Invalid FSMEdge: min > max. min=" << min << ", max=" << max;
-  }
+FSMEdge::FSMEdge(short min, short max, int target) : min(min), max(max), target(target) {
+  XGRAMMAR_DCHECK(!IsCharRange() || min <= max)
+      << "Invalid FSMEdge: min > max. min=" << min << ", max=" << max;
 }
 
 bool FSMEdge::IsEpsilon() const { return min == -1 && max == -1; }

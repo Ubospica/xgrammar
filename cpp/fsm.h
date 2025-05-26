@@ -1,5 +1,5 @@
 /*!
- *  Copyright (c) 2023 by Contributors
+ *  Copyright (c) 2025 by Contributors
  * \file xgrammar/fsm.h
  */
 #ifndef XGRAMMAR_FSM_H_
@@ -31,7 +31,7 @@ struct FSMEdge {
 
   int target;
 
-  FSMEdge(const short& _min, const short& _max, const int& target);
+  FSMEdge(short min, short max, int target);
 
   /*!
     \brief Check if the edge is an epsilon transition.
@@ -71,7 +71,7 @@ class FSM {
   ) const;
 
  public:
-  using Edge = FSMEdge;
+  FSM() = default;
 
   /*!
     \brief Transform a FSM to a compact FSM.
@@ -101,36 +101,42 @@ class FSM {
   */
   FSM Copy() const;
 
-  std::vector<std::vector<Edge>> edges;
-
-  FSM() = default;
+  std::vector<std::vector<FSMEdge>> edges;
 
   friend class FSMWithStartEnd;
 };
 
 class FSMWithStartEnd {
  public:
+  /*! \brief The underlying finite state machine. */
+  FSM fsm;
+  /*! \brief The start state of the FSM. */
+  int start;
+  /*! \brief The set of accepting/end states. */
+  std::unordered_set<int> ends;
+  /*! \brief Whether this FSM is a deterministic finite automaton. */
   bool is_dfa = false;
 
-  FSM fsm;
+  /*!
+    \brief Construct a FSM from a regex string.
+    \details The regex string should only be the format like "abx" or [a-c0-9].
+    \details Any symbols like "a|b" or "a*b" are not supported.
+    \param regex The regex string.
+  */
+  FSMWithStartEnd(const std::string& regex);
 
-  int start;
-
-  std::unordered_set<int> ends;
+  /*! \brief Constructs an FSM with the specified number of nodes. */
+  FSMWithStartEnd(int num_nodes = 0, bool is_dfa = false) : is_dfa(is_dfa) {
+    for (int i = 0; i < num_nodes; ++i) {
+      fsm.edges.emplace_back();
+    }
+  }
 
   /*!
     \brief Rebuild the FSM with the new state ids.
     \param old_to_new The mapping from old state ids to new state ids.
   */
   void RebuildFSM(std::unordered_map<int, int>& old_to_new, const int& new_node_cnt);
-
-  /*!
-  \brief Construct a FSM from a regex string.
-  \details The regex string should only be the format like "abx" or [a-c0-9].
-  \details Any symbols like "a|b" or "a*b" are not supported.
-  \param regex The regex string.
-*/
-  FSMWithStartEnd(const std::string& regex);
 
   /*!
     \brief Assume the FSM accepts rule1, then the FSM will accept rule1*.
@@ -210,13 +216,6 @@ class FSMWithStartEnd {
     \return True if the FSM accepts the string, false otherwise.
   */
   bool Check(const std::string& str) const;
-
-  /*! \brief Constructs an FSM with the specified number of nodes. */
-  FSMWithStartEnd(int num_nodes = 0, bool is_dfa = false) : is_dfa(is_dfa) {
-    for (int i = 0; i < num_nodes; ++i) {
-      fsm.edges.emplace_back();
-    }
-  }
 
   inline static constexpr int NO_TRANSITION = -1;
 
@@ -354,10 +353,7 @@ class CompactFSM {
   */
   FSM ToFSM();
 
-  // The internal states are also public
-  using Edge = FSMEdge;
-
-  CSRArray<Edge> edges;
+  CSRArray<FSMEdge> edges;
 
   friend class CompactFSMWithStartEnd;
 };
@@ -371,8 +367,6 @@ class CompactFSMWithStartEnd {
   int start;
 
   std::unordered_set<int> ends;
-
-  using Edge = FSMEdge;
 
   /*!
     \brief Print the FSM.
@@ -406,7 +400,7 @@ class CompactFSMWithStartEnd {
           edges.begin(),
           edges.end(),
           character,
-          [](const Edge& edge, int16_t character) { return edge.min <= character; }
+          [](const FSMEdge& edge, int16_t character) { return edge.min <= character; }
       );
       if (it != edges.end() && it->min <= character) {
         return it->target;
@@ -555,8 +549,6 @@ std::vector<std::pair<int, int>> HandleEscapes(const std::string& regex, int sta
 FSMWithStartEnd BuildTrie(
     const std::vector<std::string>& patterns, std::vector<int32_t>* end_nodes = nullptr
 );
-
-std::ostream& operator<<(std::ostream& os, const FSMWithStartEnd& fsm);
 
 }  // namespace xgrammar
 
