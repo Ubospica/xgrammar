@@ -117,14 +117,6 @@ class FSMWithStartEnd {
   /*! \brief Whether this FSM is a deterministic finite automaton. */
   bool is_dfa = false;
 
-  /*!
-    \brief Construct a FSM from a regex string.
-    \details The regex string should only be the format like "abx" or [a-c0-9].
-    \details Any symbols like "a|b" or "a*b" are not supported.
-    \param regex The regex string.
-  */
-  FSMWithStartEnd(const std::string& regex);
-
   /*! \brief Constructs an FSM with the specified number of nodes. */
   FSMWithStartEnd(int num_nodes = 0, bool is_dfa = false) : is_dfa(is_dfa) {
     for (int i = 0; i < num_nodes; ++i) {
@@ -133,10 +125,20 @@ class FSMWithStartEnd {
   }
 
   /*!
+    \brief Construct a FSM from a regex string.
+    \details The regex string should only be the format like "abx" or [a-c0-9].
+    \details Any symbols like "a|b" or "a*b" are not supported.
+    \param regex The regex string.
+  */
+  FSMWithStartEnd(const std::string& regex);
+
+  /*!
     \brief Rebuild the FSM with the new state ids.
     \param old_to_new The mapping from old state ids to new state ids.
   */
   void RebuildFSM(std::unordered_map<int, int>& old_to_new, const int& new_node_cnt);
+
+  /****************** FSM Operations ******************/
 
   /*!
     \brief Assume the FSM accepts rule1, then the FSM will accept rule1*.
@@ -175,18 +177,6 @@ class FSMWithStartEnd {
   FSMWithStartEnd MinimizeDFA() const;
 
   /*!
-    \brief Return a copy of the FSM.
-    \return The copy of the FSM.
-  */
-  FSMWithStartEnd Copy() const;
-
-  /*!
-    \brief Print the FSM.
-    \return The string representation of the FSM.
-  */
-  std::string Print() const;
-
-  /*!
     \brief Intersect the FSMs.
     \param lhs The left FSM.
     \param rhs The right FSM.
@@ -211,11 +201,23 @@ class FSMWithStartEnd {
   static FSMWithStartEnd Concatenate(const std::vector<FSMWithStartEnd>& fsms);
 
   /*!
+    \brief Return a copy of the FSM.
+    \return The copy of the FSM.
+  */
+  FSMWithStartEnd Copy() const;
+
+  /*!
+    \brief Print the FSM.
+    \return The string representation of the FSM.
+  */
+  std::string Print() const;
+
+  /*!
     \brief Check if the FSM accepts the string.
     \param str The input string.
     \return True if the FSM accepts the string, false otherwise.
   */
-  bool Check(const std::string& str) const;
+  bool CheckAccepted(const std::string& str) const;
 
   inline static constexpr int NO_TRANSITION = -1;
 
@@ -379,7 +381,7 @@ class CompactFSMWithStartEnd {
     \param str The input string.
     \return True if the FSM accepts the string, false otherwise.
   */
-  bool Check(const std::string& str) const;
+  bool CheckAccepted(const std::string& str) const;
 
   inline static constexpr int NO_TRANSITION = -1;
 

@@ -51,7 +51,6 @@ void CompactFSM::GetEpsilonClosure(
       }
     }
   }
-  return;
 }
 
 FSMEdge::FSMEdge(short min, short max, int target) : min(min), max(max), target(target) {
@@ -97,7 +96,6 @@ void FSM::GetEpsilonClosure(std::unordered_set<int>* state_set, std::unordered_s
       }
     }
   }
-  return;
 }
 
 FSM FSM::Copy() const {
@@ -261,7 +259,6 @@ void FSM::Advance(
   for (const auto& state : result_closure) {
     result->push_back(state);
   }
-  return;
 }
 
 FSMWithStartEnd FSMWithStartEnd::Copy() const {
@@ -400,7 +397,6 @@ void CompactFSM::Advance(
   for (const auto& state : result_closure) {
     result->push_back(state);
   }
-  return;
 }
 
 FSMWithStartEnd FSMWithStartEnd::ToDFA() const {
@@ -610,10 +606,8 @@ FSMWithStartEnd::FSMWithStartEnd(const std::string& regex) {
       i++;
     }
     ends.insert(edges.size() - 1);
-    return;
-  }
-  // Handle the character class.
-  if (regex[0] == '[' && regex[regex.size() - 1] == ']') {
+  } else if (regex[0] == '[' && regex[regex.size() - 1] == ']') {
+    // Handle the character class.
     edges.push_back(std::vector<FSMEdge>());
     edges.push_back(std::vector<FSMEdge>());
     ends.insert(1);
@@ -713,10 +707,10 @@ FSMWithStartEnd::FSMWithStartEnd(const std::string& regex) {
         edges[0].emplace_back(last, 0xFF, 1);
       }
     }
-    return;
+  } else {
+    // TODO: The support for rules.
+    XGRAMMAR_LOG(WARNING) << "rule is not supported yet.";
   }
-  // TODO: The support for rules.
-  XGRAMMAR_LOG(WARNING) << "rule is not supported yet.";
 }
 
 FSMWithStartEnd FSMWithStartEnd::MinimizeDFA() const {
@@ -1119,7 +1113,7 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
   return Result<FSMWithStartEnd>::Ok(result);
 }
 
-bool FSMWithStartEnd::Check(const std::string& str) const {
+bool FSMWithStartEnd::CheckAccepted(const std::string& str) const {
   std::unordered_set<int> start_states_set;
   start_states_set.insert(start);
   fsm.GetEpsilonClosure(&start_states_set);
@@ -1141,7 +1135,7 @@ bool FSMWithStartEnd::Check(const std::string& str) const {
   return false;
 }
 
-bool CompactFSMWithStartEnd::Check(const std::string& str) const {
+bool CompactFSMWithStartEnd::CheckAccepted(const std::string& str) const {
   std::unordered_set<int> start_states_set;
   start_states_set.insert(start);
   fsm.GetEpsilonClosure(&start_states_set);
@@ -1317,7 +1311,6 @@ void FSMWithStartEnd::SimplifyEpsilon() {
     }
   }
   RebuildFSM(new_to_old, cnt);
-  return;
 }
 
 void FSMWithStartEnd::SimplifyTransition() {
@@ -1443,7 +1436,6 @@ void FSMWithStartEnd::SimplifyTransition() {
     }
     changed = change_case1 || change_case2;
   }
-  return;
 }
 
 void FSMWithStartEnd::RebuildFSM(
@@ -1485,7 +1477,6 @@ void FSMWithStartEnd::RebuildFSM(
     }
   }
   fsm.edges = new_edges;
-  return;
 }
 
 Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Leaf& node) const {
@@ -1894,7 +1885,6 @@ void FSMWithStartEnd::GetPossibleRules(const int& state, std::unordered_set<int>
       rules->insert(edge.GetRefRuleId());
     }
   }
-  return;
 }
 
 void CompactFSMWithStartEnd::GetPossibleRules(const int& state, std::unordered_set<int>* rules)
@@ -1905,7 +1895,6 @@ void CompactFSMWithStartEnd::GetPossibleRules(const int& state, std::unordered_s
       rules->insert(edge.GetRefRuleId());
     }
   }
-  return;
 }
 
 std::ostream& operator<<(std::ostream& os, const FSMWithStartEnd& fsm) {
