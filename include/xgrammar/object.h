@@ -37,14 +37,6 @@ struct NullObj {};
  private:                                                                      \
   std::shared_ptr<Impl> pimpl_
 
-/*!
- * \brief Define a copy method for the class.
- * \details The class must be a PIMPL class and the Impl class must have a copy constructor.
- */
-#define XGRAMMAR_DEFINE_COPY_METHOD(TypeName) \
- public:                                      \
-  TypeName Copy() const { return TypeName(std::make_shared<Impl>(*pimpl_)); }
-
 }  // namespace xgrammar
 
 #endif  // XGRAMMAR_OBJECT_H_

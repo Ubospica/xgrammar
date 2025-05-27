@@ -39,20 +39,71 @@ int FSMEdge::GetRefRuleId() const {
   return max;
 }
 
-/****************** FSM ******************/
+/****************** FSM::Impl ******************/
 
-CompactFSM FSM::ToCompact() {
+class FSM::Impl {
+ public:
+  Impl(int num_states = 0) : edges_(num_states) {}
+
+  int NumStates() const { return edges_.size(); }
+
+  CompactFSM ToCompact();
+
+  int GetNextState(int from, int16_t character) const;
+
+  void Advance(
+      const std::vector<int>& from,
+      int value,
+      std::vector<int>* result,
+      bool is_closure = false,
+      bool is_rule = false
+  ) const;
+
+  void GetPossibleRules(const int& state_num, std::unordered_set<int>* rules) const;
+
+  int AddState() {
+    edges_.emplace_back();
+    return edges_.size() - 1;
+  }
+
+  void AddEdge(int from, int to, int16_t min_ch, int16_t max_ch) {
+    XGRAMMAR_DCHECK(
+        from < static_cast<int>(edges_.size()) && to <= static_cast<int>(edges_.size())
+    );
+    edges_[from].push_back({min_ch, max_ch, to});
+  }
+
+ private:
+  /*!
+   * \brief Get the epsilon closure of a set of states and store the result in the set.
+   * \param state_set The current states.
+   */
+  void GetEpsilonClosure(std::unordered_set<int>* state_set) const;
+
+  std::vector<std::vector<FSMEdge>> edges_;
+};
+
+CompactFSM FSM::Impl::ToCompact() {
   CompactFSM result;
-  for (int i = 0; i < static_cast<int>(edges.size()); ++i) {
-    std::sort(edges[i].begin(), edges[i].end(), [](const FSMEdge& a, const FSMEdge& b) {
+  for (int i = 0; i < static_cast<int>(edges_.size()); ++i) {
+    std::sort(edges_[i].begin(), edges_[i].end(), [](const FSMEdge& a, const FSMEdge& b) {
       return a.min != b.min ? a.min < b.min : a.max < b.max;
     });
-    result.edges.Insert(edges[i]);
+    result.edges.Insert(edges_[i]);
   }
   return result;
 }
 
-void FSM::Advance(
+int FSM::Impl::GetNextState(int from, int16_t character) const {
+  for (const auto& edge : edges_[from]) {
+    if (edge.min <= character && edge.max >= character) {
+      return edge.target;
+    }
+  }
+  return FSM::kNoNextState;
+}
+
+void FSM::Impl::Advance(
     const std::vector<int>& from,
     int value,
     std::vector<int>* result,
@@ -61,8 +112,7 @@ void FSM::Advance(
 ) const {
   result->clear();
   std::unordered_set<int> start_closure;
-  std::unordered_set<int> advanced_states;
-  std::unordered_set<int> advanced_states_closure;
+  std::unordered_set<int> result_closure;
 
   for (const auto& state : from) {
     start_closure.insert(state);
@@ -71,43 +121,32 @@ void FSM::Advance(
     GetEpsilonClosure(&start_closure);
   }
   for (const auto& state : start_closure) {
-    const auto& edge_list = edges[state];
+    const auto& edge_list = edges_[state];
     for (const auto& edge : edge_list) {
       if (edge.IsEpsilon()) {
         continue;
       }
       if (is_rule && edge.IsRuleRef()) {
         if (edge.GetRefRuleId() == value) {
-          advanced_states.insert(edge.target);
+          result_closure.insert(edge.target);
         }
         continue;
       }
       if (!is_rule && edge.IsCharRange()) {
         if (value >= edge.min && value <= edge.max) {
-          advanced_states.insert(edge.target);
+          result_closure.insert(edge.target);
         }
         continue;
       }
     }
   }
-  // ??
-  for (const auto& state : advanced_states) {
-    if (advanced_states_closure.find(state) != advanced_states_closure.end()) {
-      continue;
-    }
-    std::unordered_set<int> closure;
-    closure.insert(state);
-    GetEpsilonClosure(&closure);
-    advanced_states_closure.insert(closure.begin(), closure.end());
-  }
-  result->insert(result->end(), advanced_states_closure.begin(), advanced_states_closure.end());
+  // Get the epsilon closure of the result.
+  GetEpsilonClosure(&result_closure);
+
+  result->insert(result->end(), result_closure.begin(), result_closure.end());
 }
 
-void FSM::GetEpsilonClosure(std::unordered_set<int>* state_set, std::unordered_set<int>* result)
-    const {
-  if (result == nullptr) {
-    result = state_set;
-  }
+void FSM::Impl::GetEpsilonClosure(std::unordered_set<int>* state_set) const {
   std::queue<int> queue;
   for (const auto& state : *state_set) {
     queue.push(state);
@@ -115,27 +154,56 @@ void FSM::GetEpsilonClosure(std::unordered_set<int>* state_set, std::unordered_s
   while (!queue.empty()) {
     int current = queue.front();
     queue.pop();
-    for (const auto& edge : edges[current]) {
+    for (const auto& edge : edges_[current]) {
       if (!edge.IsEpsilon()) {
         continue;
       }
-      if (result->find(edge.target) != result->end()) {
+      if (state_set->find(edge.target) != state_set->end()) {
         continue;
       }
-      result->insert(edge.target);
+      state_set->insert(edge.target);
       queue.push(edge.target);
     }
   }
 }
 
-FSM FSM::Copy() const {
-  FSM copy;
-  copy.edges.resize(edges.size());
-  for (size_t i = 0; i < edges.size(); ++i) {
-    copy.edges[i] = edges[i];
+void FSM::Impl::GetPossibleRules(const int& state, std::unordered_set<int>* rules) const {
+  for (const auto& edge : edges_[state]) {
+    if (edge.IsRuleRef()) {
+      rules->insert(edge.GetRefRuleId());
+    }
   }
-  return copy;
 }
+
+/****************** FSM ******************/
+
+FSM::FSM(int num_states) : pimpl_(std::make_unique<Impl>(num_states)) {}
+
+int FSM::NumStates() const { return pimpl_->NumStates(); }
+
+CompactFSM FSM::ToCompact() { return pimpl_->ToCompact(); }
+
+int FSM::GetNextState(int from, int16_t character) const {
+  return pimpl_->GetNextState(from, character);
+}
+
+void FSM::Advance(
+    const std::vector<int>& from, int value, std::vector<int>* result, bool is_closure, bool is_rule
+) const {
+  pimpl_->Advance(from, value, result, is_closure, is_rule);
+}
+
+void FSM::GetPossibleRules(const int& state, std::unordered_set<int>* rules) const {
+  pimpl_->GetPossibleRules(state, rules);
+}
+
+int FSM::AddState() { return pimpl_->AddState(); }
+
+void FSM::AddEdge(int from, int to, int16_t min_ch, int16_t max_ch) {
+  pimpl_->AddEdge(from, to, min_ch, max_ch);
+}
+
+FSM FSM::Copy() const { return FSM(std::make_shared<Impl>(*pimpl_)); }
 
 /****************** FSMWithStartEnd ******************/
 
@@ -243,6 +311,47 @@ FSMWithStartEnd FSMWithStartEnd::Not() const {
     }
   }
   return result;
+}
+
+FSMWithStartEnd FSMWithStartEnd::RebuildWithMapping(
+    std::unordered_map<int, int>& state_mapping, int new_num_states
+) {
+  start = old_to_new[start];
+  decltype(ends) new_ends;
+  for (const auto& end : ends) {
+    new_ends.insert(old_to_new[end]);
+  }
+  ends = new_ends;
+  decltype(fsm.edges) new_edges;
+  struct Compare {
+    bool operator()(const FSMEdge& lhs, const FSMEdge& rhs) const {
+      if (lhs.min != rhs.min) {
+        return lhs.min < rhs.min;
+      }
+      if (lhs.max != rhs.max) {
+        return lhs.max < rhs.max;
+      }
+      return lhs.target < rhs.target;
+    }
+  };
+  std::vector<std::set<FSMEdge, Compare>> new_edges_set;
+  new_edges_set.resize(new_state_cnt);
+  new_edges.resize(new_state_cnt);
+  for (size_t i = 0; i < fsm.edges.size(); i++) {
+    const auto& edges = fsm.edges[i];
+    for (const auto& edge : edges) {
+      if (edge.IsEpsilon() && old_to_new[i] == old_to_new[edge.target]) {
+        continue;
+      }
+      new_edges_set[old_to_new[i]].insert({edge.min, edge.max, old_to_new[edge.target]});
+    }
+  }
+  for (size_t i = 0; i < new_edges_set.size(); i++) {
+    for (const auto& edge : new_edges_set[i]) {
+      new_edges[i].emplace_back(edge.min, edge.max, edge.target);
+    }
+  }
+  fsm.edges = new_edges;
 }
 
 FSMWithStartEnd FSMWithStartEnd::Copy() const {
@@ -1330,7 +1439,7 @@ void FSMWithStartEnd::SimplifyEpsilon() {
       cnt++;
     }
   }
-  RebuildFSM(new_to_old, cnt);
+  RebuildWithMapping(new_to_old, cnt);
 }
 
 void FSMWithStartEnd::SimplifyEquivalentStates() {
@@ -1390,7 +1499,7 @@ void FSMWithStartEnd::SimplifyEquivalentStates() {
           cnt++;
         }
       }
-      RebuildFSM(old_to_new, cnt);
+      RebuildWithMapping(old_to_new, cnt);
     }
     union_find_set.Clear();
     // Case 2: Like ba | ca | da, then they can be merged into (b | c | d)a.
@@ -1452,51 +1561,10 @@ void FSMWithStartEnd::SimplifyEquivalentStates() {
           cnt++;
         }
       }
-      RebuildFSM(old_to_new, cnt);
+      RebuildWithMapping(old_to_new, cnt);
     }
     changed = change_case1 || change_case2;
   }
-}
-
-void FSMWithStartEnd::RebuildFSM(
-    std::unordered_map<int, int>& old_to_new, const int& new_state_cnt
-) {
-  start = old_to_new[start];
-  decltype(ends) new_ends;
-  for (const auto& end : ends) {
-    new_ends.insert(old_to_new[end]);
-  }
-  ends = new_ends;
-  decltype(fsm.edges) new_edges;
-  struct Compare {
-    bool operator()(const FSMEdge& lhs, const FSMEdge& rhs) const {
-      if (lhs.min != rhs.min) {
-        return lhs.min < rhs.min;
-      }
-      if (lhs.max != rhs.max) {
-        return lhs.max < rhs.max;
-      }
-      return lhs.target < rhs.target;
-    }
-  };
-  std::vector<std::set<FSMEdge, Compare>> new_edges_set;
-  new_edges_set.resize(new_state_cnt);
-  new_edges.resize(new_state_cnt);
-  for (size_t i = 0; i < fsm.edges.size(); i++) {
-    const auto& edges = fsm.edges[i];
-    for (const auto& edge : edges) {
-      if (edge.IsEpsilon() && old_to_new[i] == old_to_new[edge.target]) {
-        continue;
-      }
-      new_edges_set[old_to_new[i]].insert({edge.min, edge.max, old_to_new[edge.target]});
-    }
-  }
-  for (size_t i = 0; i < new_edges_set.size(); i++) {
-    for (const auto& edge : new_edges_set[i]) {
-      new_edges[i].emplace_back(edge.min, edge.max, edge.target);
-    }
-  }
-  fsm.edges = new_edges;
 }
 
 Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Leaf& state) const {
@@ -1896,15 +1964,6 @@ Result<std::pair<int, int>> CheckRepeat(const std::string& regex, size_t& start)
     }
   }
   return Result<std::pair<int, int>>::Ok(std::make_pair(lower_bound, upper_bound));
-}
-
-void FSMWithStartEnd::GetPossibleRules(const int& state, std::unordered_set<int>* rules) const {
-  rules->clear();
-  for (const auto& edge : fsm.edges[state]) {
-    if (edge.IsRuleRef()) {
-      rules->insert(edge.GetRefRuleId());
-    }
-  }
 }
 
 void CompactFSMWithStartEnd::GetPossibleRules(const int& state, std::unordered_set<int>* rules)

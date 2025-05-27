@@ -5,6 +5,8 @@
 #ifndef XGRAMMAR_FSM_H_
 #define XGRAMMAR_FSM_H_
 
+#include <xgrammar/object.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -63,9 +65,9 @@ class CompactFSM;
 
 class FSM {
  public:
-  FSM(int num_states = 0) : edges(num_states) {}
+  FSM(int num_states = 0);
 
-  int NumStates() const { return edges.size(); }
+  int NumStates() const;
 
   /*!
     \brief Transform a FSM to a compact FSM.
@@ -82,14 +84,7 @@ class FSM {
    * \param character The input character.
    * \return The target state if a valid transition exists, kNoNextState otherwise.
    */
-  int GetNextState(int from, int16_t character) const {
-    for (const auto& edge : edges[from]) {
-      if (edge.min <= character && edge.max >= character) {
-        return edge.target;
-      }
-    }
-    return kNoNextState;
-  }
+  int GetNextState(int from, int16_t character) const;
 
   /*!
     \brief Advance the FSM to the next state.
@@ -119,10 +114,7 @@ class FSM {
     \brief Adds a new state to the FSM.
     \return The index of the newly added state.
   */
-  int AddState() {
-    edges.emplace_back();
-    return edges.size() - 1;
-  }
+  int AddState();
 
   /*!
    * \brief Adds a transition edge between states with a character range.
@@ -131,40 +123,28 @@ class FSM {
    * \param min_ch The minimum character in the range (inclusive).
    * \param max_ch The maximum character in the range (inclusive).
    */
-  void AddEdge(int from, int to, int16_t min_ch, int16_t max_ch) {
-    XGRAMMAR_DCHECK(from < static_cast<int>(edges.size()) && to <= static_cast<int>(edges.size()));
-    edges[from].push_back({min_ch, max_ch, to});
-  }
+  void AddEdge(int from, int to, int16_t min_ch, int16_t max_ch);
 
   /*!
     \brief Return a copy of the FSM.
   */
   FSM Copy() const;
 
-  /*!
-    \brief Rebuild the FSM with the new state ids.
-    \param old_to_new The mapping from old state ids to new state ids.
-  */
-  FSM RebuildWithMapping(std::unordered_map<int, int>& state_mapping, int new_num_states);
-
- private:
-  /*!
-    \brief Get the epsilon closure of a set of states.
-    \param state_set The current states.
-    \param result The epsilon closure of the state. If nullptr,
-           then the result will be stored in state_set.
-  */
-  void GetEpsilonClosure(
-      std::unordered_set<int>* state_set, std::unordered_set<int>* result = nullptr
-  ) const;
-
-  std::vector<std::vector<FSMEdge>> edges;
+  XGRAMMAR_DEFINE_PIMPL_METHODS(FSM);
 };
 
 class FSMWithStartEnd {
  public:
   /*! \brief Constructs an FSM with the specified number of states. */
-  FSMWithStartEnd(int num_states = 0, bool is_dfa = false) : fsm(num_states), is_dfa(is_dfa) {}
+  FSMWithStartEnd(int num_states = 0, bool is_dfa = false) : fsm_(num_states), is_dfa_(is_dfa) {}
+
+  FSMWithStartEnd(
+      const FSM& fsm, int start, const std::unordered_set<int>& ends, bool is_dfa = false
+  )
+      : fsm_(fsm), start_(start), ends_(ends), is_dfa_(is_dfa) {}
+
+  /*! \brief Constructs an FSM with the specified number of states. */
+  // FSMWithStartEnd(int ) : fsm(num_states), is_dfa(is_dfa) {}
 
   /*!
    * \brief Construct a FSM from a regex string.
@@ -177,10 +157,12 @@ class FSMWithStartEnd {
 
   /****************** Member Accessors and Mutators ******************/
 
-  /*! \brief Returns the start state of the FSM. */
-  int StartState() const { return start; }
+  FSM GetFSM() const { return fsm_; }
 
-  const std::unordered_set<int>& EndStates() const { return ends; }
+  /*! \brief Returns the start state of the FSM. */
+  int StartState() const { return start_; }
+
+  const std::unordered_set<int>& EndStates() const { return ends_; }
 
   /*!
    * \brief Checks if a given state is an end/accepting state.
@@ -188,7 +170,7 @@ class FSMWithStartEnd {
    * \return True if the state is an end state, false otherwise.
    */
   bool IsEndState(int state) const {
-    return std::any_of(ends.begin(), ends.end(), [state](int end_state) {
+    return std::any_of(ends_.begin(), ends_.end(), [state](int end_state) {
       return end_state == state;
     });
   }
@@ -309,17 +291,25 @@ class FSMWithStartEnd {
    */
   void SimplifyEquivalentStates();
 
+  /*!
+    \brief Rebuild the FSM with the new state ids.
+    \param old_to_new The mapping from old state ids to new state ids.
+  */
+  FSMWithStartEnd RebuildWithMapping(
+      std::unordered_map<int, int>& state_mapping, int new_num_states
+  );
+
   friend std::ostream& operator<<(std::ostream& os, const FSMWithStartEnd& fsm);
 
  private:
   /*! \brief The underlying finite state machine. */
-  FSM fsm;
+  FSM fsm_;
   /*! \brief The start state of the FSM. */
-  int start;
+  int start_;
   /*! \brief The set of accepting/end states. */
-  std::unordered_set<int> ends;
+  std::unordered_set<int> ends_;
   /*! \brief Whether this FSM is a deterministic finite automaton. */
-  bool is_dfa = false;
+  bool is_dfa_ = false;
 };
 
 class CompactFSM {
