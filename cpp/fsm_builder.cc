@@ -24,7 +24,7 @@ class RegexIR {
 
   struct Repeat;
 
-  static constexpr int REPEATNOUPPERBOUND = -1;
+  static constexpr int kRepeatNoUpperBound = -1;
 
   using State = std::variant<Leaf, Symbol, Union, Bracket, Repeat>;
 
@@ -216,7 +216,7 @@ Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Repeat& state) const {
     }
   }
   // Handling {n,}
-  if (state.upper_bound == RegexIR::REPEATNOUPPERBOUND) {
+  if (state.upper_bound == RegexIR::kRepeatNoUpperBound) {
     for (int i = 2; i < state.lower_bound; i++) {
       result = FSMWithStartEnd::Concat(std::vector<FSMWithStartEnd>{result, child.Unwrap()});
     }
