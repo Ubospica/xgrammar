@@ -948,7 +948,7 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
       }
       previous_states[edge.target].insert(i);
       if (edge.IsEpsilon()) {
-        if (edges.size() != 1) {
+        if (edges.size() != 1 || edge.target == GetStart()) {
           has_epsilon.insert(i);
         } else {
           // a -- epsilon --> b, and a doesn't have other outward edges.
@@ -968,7 +968,7 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
         continue;
       }
       // Have other inward states.
-      if (previous_states[edge.target].size() != 1) {
+      if (previous_states[edge.target].size() != 1 || edge.target == GetStart()) {
         continue;
       }
       bool has_other_edge = false;
