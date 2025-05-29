@@ -43,6 +43,7 @@ struct FSMEdge {
   /*!
    * \brief Compare the edges. Used to sort the edges in the FSM.
    */
+  // TODO(yixin): consider combining the fields to a single int64_t for better efficiency
   friend bool operator==(const FSMEdge& lhs, const FSMEdge& rhs) {
     return lhs.min == rhs.min && lhs.max == rhs.max && lhs.target == rhs.target;
   }
@@ -79,9 +80,11 @@ struct FSMEdge {
 
 }  // namespace xgrammar
 
-// Define the hash function for FSMEdge
 namespace std {
 
+/*!
+ * \brief Hash function for FSMEdge.
+ */
 template <>
 struct hash<xgrammar::FSMEdge> {
   size_t operator()(const xgrammar::FSMEdge& edge) const {
@@ -107,6 +110,10 @@ class FSM {
 
   /****************** FSM Accessors and Mutators ******************/
 
+  /*!
+   * \brief Get the number of states in the FSM.
+   * \return The number of states in the FSM.
+   */
   int NumStates() const;
 
   /*!
