@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
-#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -367,6 +366,7 @@ class FSMWithStartEndBase {
   /*! \brief Returns the start state of the FSM. */
   int GetStart() const { return start_; }
 
+  /*! \brief Returns the end states of the FSM. */
   const std::unordered_set<int>& GetEnds() const { return ends_; }
 
   /*!
@@ -397,6 +397,12 @@ class FSMWithStartEndBase {
     XGRAMMAR_DCHECK(state < NumStates());
     ends_.insert(state);
   }
+
+  /*!
+   * \brief Sets the end states of the FSM.
+   * \param ends The new end states.
+   */
+  void SetEndStates(const std::unordered_set<int>& ends) { ends_ = ends; }
 
   /*! \brief Returns the total number of states in the FSM. */
   int NumStates() const { return fsm_.NumStates(); }

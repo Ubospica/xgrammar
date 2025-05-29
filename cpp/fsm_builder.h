@@ -14,6 +14,9 @@
 
 namespace xgrammar {
 
+/*!
+ * \brief A builder that converts a regex string to a FSM.
+ */
 class RegexFSMBuilder {
  public:
   RegexFSMBuilder() = default;
@@ -26,6 +29,9 @@ class RegexFSMBuilder {
   Result<FSMWithStartEnd> Build(const std::string& regex);
 };
 
+/*!
+ * \brief A builder that converts a list of patterns to a trie-based FSM.
+ */
 class TrieFSMBuilder {
  public:
   TrieFSMBuilder() = default;
