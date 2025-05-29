@@ -22,15 +22,17 @@
 namespace xgrammar {
 
 struct FSMEdge {
-  /*
-    The min and max are used to represent the range of characters.
-    When min == -1 and max == -1, it means the edge is an epsilon transition.
-    When min == -1 and max >= 0, then max represents the rule id.
-    When min >= 0 and max >= 0, then it represents a range of characters.
-    target is the target state id.
-  */
+  /*!
+   * \brief The min and max are used to represent the range of characters.
+   * \details When min == -1 and max == -1, it means the edge is an epsilon transition.
+   * When min == -1 and max >= 0, then max represents the rule id.
+   * When min >= 0 and max >= 0, then it represents a range of characters.
+   */
   short min, max;
 
+  /*!
+   * \brief The target state id of the edge.
+   */
   int target;
 
   FSMEdge(short min, short max, int target) : min(min), max(max), target(target) {
@@ -39,39 +41,39 @@ struct FSMEdge {
   }
 
   /*!
-    \brief Compare the edges. Used to sort the edges in the FSM.
-  */
+   * \brief Compare the edges. Used to sort the edges in the FSM.
+   */
   friend bool operator==(const FSMEdge& lhs, const FSMEdge& rhs) {
     return lhs.min == rhs.min && lhs.max == rhs.max && lhs.target == rhs.target;
   }
 
   /*!
-    \brief Compare the edges. Used to sort the edges in the FSM.
-  */
+   * \brief Compare the edges. Used to sort the edges in the FSM.
+   */
   friend bool operator<(const FSMEdge& lhs, const FSMEdge& rhs) {
     return std::make_tuple(lhs.target, lhs.min, lhs.max) <
            std::make_tuple(rhs.target, rhs.min, rhs.max);
   }
 
   /*!
-    \brief Check if the edge is an epsilon transition.
-  */
+   * \brief Check if the edge is an epsilon transition.
+   */
   bool IsEpsilon() const;
 
   /*!
-    \brief Check if the edge is a rule reference.
-  */
+   * \brief Check if the edge is a rule reference.
+   */
   bool IsRuleRef() const;
 
   /*!
-    \brief Get the rule id of the edge.
-    \return The rule id of the edge. -1 if the edge is not a rule reference.
-  */
+   * \brief Get the rule id of the edge.
+   * \return The rule id of the edge. -1 if the edge is not a rule reference.
+   */
   int GetRefRuleId() const;
 
   /*!
-    \brief Check if the edge is a character range.
-  */
+   * \brief Check if the edge is a character range.
+   */
   bool IsCharRange() const;
 };
 
@@ -108,9 +110,9 @@ class FSM {
   int NumStates() const;
 
   /*!
-    \brief Adds a new state to the FSM.
-    \return The index of the newly added state.
-  */
+   * \brief Adds a new state to the FSM.
+   * \return The index of the newly added state.
+   */
   int AddState();
 
   /*!
@@ -123,10 +125,10 @@ class FSM {
   void AddEdge(int from, int to, int16_t min_ch, int16_t max_ch);
 
   /*!
-    \brief Add an epsilon transition between two states.
-    \param from The source state.
-    \param to The target state.
-  */
+   * \brief Add an epsilon transition between two states.
+   * \param from The source state.
+   * \param to The target state.
+   */
   void AddEpsilonEdge(int from, int to);
 
   /*!
@@ -138,6 +140,8 @@ class FSM {
   void AddFSM(const FSM& fsm, std::unordered_map<int, int>* state_mapping = nullptr);
 
   const std::vector<std::vector<FSMEdge>>& GetEdges() const;
+
+  const std::vector<FSMEdge>& GetEdges(int state) const;
 
   std::string PrintEdges() const;
 
@@ -160,14 +164,14 @@ class FSM {
   int GetNextState(int from, int16_t character) const;
 
   /*!
-    \brief Advance the FSM to the next state.
-    \param from The current states.
-    \param value The input value.
-    \param result The next states, which can be seen as the result of the
-    transition. The result is not cleared at the beginning.
-    \param is_closure Whether from is an epsilon closure.
-    \param is_rule Whether the input value is a rule id.
-  */
+   * \brief Advance the FSM to the next state.
+   * \param from The current states.
+   * \param value The input value.
+   * \param result The next states, which can be seen as the result of the
+   * transition. The result is not cleared at the beginning.
+   * \param is_closure Whether from is an epsilon closure.
+   * \param is_rule Whether the input value is a rule id.
+   */
   void Advance(
       const std::vector<int>& from,
       int value,
@@ -177,10 +181,10 @@ class FSM {
   ) const;
 
   /*!
-    \brief Get all the possible rule numbers for a given state.
-    \param state_num The state number.
-    \param rules The set of possible rule numbers.
-  */
+   * \brief Get all the possible rule numbers for a given state.
+   * \param state_num The state number.
+   * \param rules The set of possible rule numbers.
+   */
   void GetPossibleRules(const int& state_num, std::unordered_set<int>* rules) const;
 
   /*!
@@ -189,14 +193,21 @@ class FSM {
    */
   void GetEpsilonClosure(std::unordered_set<int>* state_set) const;
 
+  /*!
+   * \brief Get the reachable states from a set of states.
+   * \param from The current states.
+   * \param result The reachable states.
+   */
+  void GetReachableStates(const std::vector<int>& from, std::unordered_set<int>* result) const;
+
   /****************** FSM Construction Algorithms ******************/
 
   FSM RebuildWithMapping(std::unordered_map<int, int>& state_mapping, int new_num_states);
 
   /*!
-    \brief Transform a FSM to a compact FSM.
-    \return The compact FSM.
-  */
+   * \brief Transform a FSM to a compact FSM.
+   * \return The compact FSM.
+   */
   CompactFSM ToCompact();
 
   XGRAMMAR_DEFINE_PIMPL_METHODS(FSM);
@@ -212,15 +223,6 @@ class FSMWithStartEnd {
       const FSM& fsm, int start, const std::unordered_set<int>& ends, bool is_dfa = false
   )
       : fsm_(fsm), start_(start), ends_(ends), is_dfa_(is_dfa) {}
-
-  /*!
-   * \brief Construct a FSM from a regex string.
-   * \details The regex string should only be the format like "abx" or [a-c0-9].
-   * \details Any symbols like "a|b" or "a*b" are not supported.
-   * \param regex The regex string.
-   * \return The FSM with start and end states.
-   */
-  static FSMWithStartEnd BuildFSMFromRegex(const std::string& regex);
 
   /****************** Member Accessors and Mutators ******************/
 
@@ -264,24 +266,24 @@ class FSMWithStartEnd {
   int NumStates() const { return fsm_.NumStates(); }
 
   /*!
-    \brief Access the methods of the underlying FSM.
-  */
+   * \brief Access the methods of the underlying FSM.
+   */
   FSM* operator->() { return &fsm_; }
 
   /*!
-    \brief Access the methods of the underlying FSM.
-  */
+   * \brief Access the methods of the underlying FSM.
+   */
   const FSM* operator->() const { return &fsm_; }
 
   /*!
-    \brief Return a copy of the FSMWithStartEnd.
-  */
+   * \brief Return a copy of the FSMWithStartEnd.
+   */
   FSMWithStartEnd Copy() const;
 
   /*!
-    \brief Print the FSM.
-    \return The string representation of the FSMWithStartEnd.
-  */
+   * \brief Print the FSM.
+   * \return The string representation of the FSMWithStartEnd.
+   */
   std::string Print() const;
 
   friend std::ostream& operator<<(std::ostream& os, const FSMWithStartEnd& fsm);
@@ -289,75 +291,67 @@ class FSMWithStartEnd {
   /****************** FSM Traversal Algorithms ******************/
 
   /*!
-    \brief Check if the FSM accepts the string.
-    \param str The input string.
-    \return True if the FSM accepts the string, false otherwise.
-  */
+   * \brief Check if the FSM accepts the string.
+   * \param str The input string.
+   * \return True if the FSM accepts the string, false otherwise.
+   */
   bool AcceptsString(const std::string& str) const;
 
-  void GetReachableStates(std::unordered_set<int>* states) const;
+  /*!
+   * \brief Get the reachable states from the start state.
+   * \param result The reachable states.
+   */
+  void GetReachableStates(std::unordered_set<int>* result) const;
 
   /****************** FSM Construction Algorithms ******************/
 
   /*!
-    \brief Return a new FSM representing FSM*
-    \return The FSM that accepts FSM*.
-  */
+   * \brief Return a new FSM representing FSM*
+   * \return The FSM that accepts FSM*.
+   */
   FSMWithStartEnd Star() const;
 
   /*!
-    \brief Return a new FSM representing rule1+.
-    \return The FSM that accepts rule1+.
-  */
+   * \brief Return a new FSM representing rule1+.
+   * \return The FSM that accepts rule1+.
+   */
   FSMWithStartEnd Plus() const;
 
   /*!
-    \brief Return a new FSM representing rule1?.
-    \return The FSM that accepts rule1?.
-  */
+   * \brief Return a new FSM representing rule1?.
+   * \return The FSM that accepts rule1?.
+   */
   FSMWithStartEnd Optional() const;
 
   /*!
-    \brief Return a new FSM representing the complement of the language.
-    \return The complement FSM.
-  */
+   * \brief Return a new FSM representing the complement of the language.
+   * \return The complement FSM.
+   */
   FSMWithStartEnd Not() const;
 
   /*!
-    \brief Intersect the FSMs.
-    \param lhs The left FSM.
-    \param rhs The right FSM.
-    \return The intersection of the FSMs.
-  */
+   * \brief Intersect the FSMs.
+   * \param lhs The left FSM.
+   * \param rhs The right FSM.
+   * \return The intersection of the FSMs.
+   */
   static Result<FSMWithStartEnd> Intersect(
       const FSMWithStartEnd& lhs, const FSMWithStartEnd& rhs, const int& num_of_states_limited = 1e6
   );
 
   /*!
-    \brief Union the FSMs.
-    \param fsms The FSMs to be unioned.
-    \return The union of the FSMs.
-  */
+   * \brief Union the FSMs.
+   * \param fsms The FSMs to be unioned.
+   * \return The union of the FSMs.
+   */
   static FSMWithStartEnd Union(const std::vector<FSMWithStartEnd>& fsms);
 
   /*!
-    \brief Concatenate the FSMs.
-    \param fsms The FSMs to be concatenated, which should be in order.
-    \return The concatenation of the FSMs.
-  */
+   * \brief Concatenate the FSMs.
+   * \param fsms The FSMs to be concatenated, which should be in order.
+   * \return The concatenation of the FSMs.
+   */
   static FSMWithStartEnd Concat(const std::vector<FSMWithStartEnd>& fsms);
-
-  /*!
-    \brief Transform the FSM to a DFA.
-    \return The DFA.
-  */
-  FSMWithStartEnd ToDFA() const;
-
-  /*!
-    \brief Minimize the DFA.
-    \return The minimized DFA.
-  */
-  FSMWithStartEnd MinimizeDFA() const;
 
   /*!
    * \brief Check if the FSM is a DFA.
@@ -366,9 +360,9 @@ class FSMWithStartEnd {
   bool IsDFA();
 
   /*!
-    \brief Check if the FSM is a leaf FSM.
-    \return True if the FSM is a leaf FSM, false otherwise.
-  */
+   * \brief Check if the FSM is a leaf FSM.
+   * \return True if the FSM is a leaf FSM, false otherwise.
+   */
   bool IsLeaf() const;
 
   /*!
@@ -387,9 +381,22 @@ class FSMWithStartEnd {
   void SimplifyEquivalentStates();
 
   /*!
-    \brief Rebuild the FSM with the new state ids.
-    \param old_to_new The mapping from old state ids to new state ids.
-  */
+   * \brief Transform the FSM to a DFA.
+   * \return The DFA.
+   */
+  FSMWithStartEnd ToDFA() const;
+
+  /*!
+   * \brief Minimize the DFA.
+   * \return The minimized DFA.
+   */
+  FSMWithStartEnd MinimizeDFA() const;
+
+  /*!
+   * \brief Rebuild the FSM with the new state ids.
+   * \param state_mapping The mapping from old state ids to new state ids.
+   * \param new_num_states The new number of states.
+   */
   FSMWithStartEnd RebuildWithMapping(
       std::unordered_map<int, int>& state_mapping, int new_num_states
   );
@@ -408,24 +415,24 @@ class FSMWithStartEnd {
 class CompactFSM {
  public:
   /*!
-    \brief Get the epsilon closure of a state.
-    \param state_set The current states.
-    \param result The epsilon closure of the state. If nullptr,
-           then the result will be stored in state_set.
-  */
+   * \brief Get the epsilon closure of a state.
+   * \param state_set The current states.
+   * \param result The epsilon closure of the state. If nullptr,
+   * then the result will be stored in state_set.
+   */
   void GetEpsilonClosure(
       std::unordered_set<int>* state_set, std::unordered_set<int>* result = nullptr
   ) const;
 
   /*!
-   \brief Advance the FSM to the next state.
-   \param from The current states.
-   \param value The input value.
-   \param result The next states, which can be seen as the result of the
-   transition.
-   \param is_closure Whether from is an epsilon closure.
-   \param is_rule Whether the input value is a rule id.
-  */
+   * \brief Advance the FSM to the next state.
+   * \param from The current states.
+   * \param value The input value.
+   * \param result The next states, which can be seen as the result of the
+   * transition.
+   * \param is_closure Whether from is an epsilon closure.
+   * \param is_rule Whether the input value is a rule id.
+   */
   void Advance(
       const std::vector<int>& from,
       int value,
@@ -435,9 +442,9 @@ class CompactFSM {
   ) const;
 
   /*!
-    \brief Transform the compact FSM to a FSM.
-    \return The FSM.
-  */
+   * \brief Transform the compact FSM to a FSM.
+   * \return The FSM.
+   */
   FSM ToFSM();
 
   CSRArray<FSMEdge> edges;
@@ -456,16 +463,16 @@ class CompactFSMWithStartEnd {
   std::unordered_set<int> ends;
 
   /*!
-    \brief Print the FSM.
-    \return The string representation of the FSM.
-  */
+   * \brief Print the FSM.
+   * \return The string representation of the FSM.
+   */
   std::string Print() const;
 
   /*!
-    \brief Check if the FSM accepts the string.
-    \param str The input string.
-    \return True if the FSM accepts the string, false otherwise.
-  */
+   * \brief Check if the FSM accepts the string.
+   * \param str The input string.
+   * \return True if the FSM accepts the string, false otherwise.
+   */
   bool AcceptsString(const std::string& str) const;
 
   inline static constexpr int NO_TRANSITION = -1;
@@ -520,108 +527,12 @@ class CompactFSMWithStartEnd {
   }
 
   /*!
-    \brief Get all the possible rule numbers for a given state.
-    \param state_num The state number.
-    \param rules The set of possible rule numbers.s
-  */
+   * \brief Get all the possible rule numbers for a given state.
+   * \param state_num The state number.
+   * \param rules The set of possible rule numbers.
+   */
   void GetPossibleRules(const int& state_num, std::unordered_set<int>* rules) const;
 };
-
-/*!
-  \brief Converts a regex string to a FSM. The parsing range is [start, end).
-  \param regex The regex string.
-  \return The FSM with start and end states.
-*/
-Result<FSMWithStartEnd> RegexToFSM(const std::string& regex);
-
-class RegexIR {
- public:
-  struct Leaf;
-
-  struct Symbol;
-
-  struct Union;
-
-  struct Bracket;
-
-  struct Repeat;
-
-  static constexpr int REPEATNOUPPERBOUND = -1;
-
-  using State = std::variant<Leaf, Symbol, Union, Bracket, Repeat>;
-
-  // This struct is used to store the string in regex, or
-  // the character class in regex.
-  struct Leaf {
-    std::string regex;
-  };
-
-  // This struct is used to store the symbol in regex, i.e.
-  // +, *, ?
-  enum class RegexSymbol {
-    star,
-    plus,
-    optional,
-  };
-
-  struct Bracket {
-    std::vector<State> states;
-  };
-
-  struct Symbol {
-    RegexSymbol symbol;
-    std::vector<State> state;
-  };
-
-  // This struct is used to represent a union symbol.
-  struct Union {
-    std::vector<State> states;
-  };
-
-  struct Repeat {
-    std::vector<State> states;
-    int lower_bound = 0;
-    int upper_bound = 0;
-  };
-
-  struct LookAhead {
-    bool is_positive;
-    std::vector<State> states;
-  };
-
-  // This struct is used to represent a bracket in regex.
-  std::vector<State> states;
-
-  /*!
-    \brief Constructs a NFA from the regex IR.
-  */
-  Result<FSMWithStartEnd> Build() const;
-
-  /*!
-    \brief the visit function for the variant.
-  */
-  Result<FSMWithStartEnd> visit(const Leaf& state) const;
-
-  Result<FSMWithStartEnd> visit(const Symbol& state) const;
-
-  Result<FSMWithStartEnd> visit(const Union& state) const;
-
-  Result<FSMWithStartEnd> visit(const Bracket& state) const;
-
-  Result<FSMWithStartEnd> visit(const Repeat& state) const;
-
-  Result<FSMWithStartEnd> visit(const LookAhead& state) const;
-};
-
-/*!
-  \brief Build a FSM from a list of patterns.
-  \param patterns The patterns to be built.
-  \param end_states The end states of the FSM.
-  \return The FSM with start and end states.
-*/
-FSMWithStartEnd BuildTrie(
-    const std::vector<std::string>& patterns, std::vector<int32_t>* end_states = nullptr
-);
 
 }  // namespace xgrammar
 
