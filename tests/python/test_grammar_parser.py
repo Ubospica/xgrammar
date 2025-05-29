@@ -224,11 +224,31 @@ def test_unicode_escape():
 
 def test_tag_dispatch():
     """Test TagDispatch functionality."""
+    before = """root ::= TagDispatch(
+    ("tag1", rule1),
+    ("tag2", rule2),
+    exit_triggers = ("", "abc", "def"),
+    loop_after_dispatch = false
+)
+rule1 ::= "a"
+rule2 ::= "b"
+"""
+    expected = """root ::= ((TagDispatch(("tag1", rule1), ("tag2", rule2), exit_triggers=("", "abc", "def"), loop_after_dispatch=false)))
+rule1 ::= (("a"))
+rule2 ::= (("b"))
+"""
+    grammar = _ebnf_to_grammar_no_normalization(before)
+    after = str(grammar)
+    assert after == expected
+
+
+def test_tag_dispatch_default_parameters():
+    """Test TagDispatch functionality."""
     before = """root ::= TagDispatch(("tag1", rule1), ("tag2", rule2))
 rule1 ::= "a"
 rule2 ::= "b"
 """
-    expected = """root ::= ((TagDispatch(("tag1", rule1), ("tag2", rule2))))
+    expected = """root ::= ((TagDispatch(("tag1", rule1), ("tag2", rule2), exit_triggers=(""), loop_after_dispatch=true)))
 rule1 ::= (("a"))
 rule2 ::= (("b"))
 """
@@ -501,7 +521,7 @@ rule3 ::= "" | "d" rule3
 rule4 ::= "" | "e" rule4 "f"
 rule5 ::= "" | "g" rule5 "h"
 """
-    expected = r"""root ::= TagDispatch(("tag1", rule1), ("tag2", rule2), ("tag3", rule3), ("tag4", rule4), ("tag5", rule5))
+    expected = r"""root ::= TagDispatch(("tag1", rule1), ("tag2", rule2), ("tag3", rule3), ("tag4", rule4), ("tag5", rule5), exit_triggers=(""), loop_after_dispatch=true)
 rule1 ::= (("b"))
 rule2 ::= (("c"))
 rule3 ::= ("" | ("d" rule3))
@@ -522,7 +542,7 @@ rule1 ::= "a"
 rule2 ::= "b"
 rule3 ::= "c"
 """
-    expected = """root ::= TagDispatch(("tag1", rule1), ("tag2", rule2), ("tag3", rule3))
+    expected = """root ::= TagDispatch(("tag1", rule1), ("tag2", rule2), ("tag3", rule3), exit_triggers=(""), loop_after_dispatch=true)
 rule1 ::= (("a"))
 rule2 ::= (("b"))
 rule3 ::= (("c"))
@@ -538,13 +558,13 @@ rule1 ::= ("a" TagDispatch(("tag1", rule2), ("tag2", rule3)) | "zzz")
 rule2 ::= TagDispatch(("tag1", rule2), ("tag2", rule3)) | TagDispatch(("tag3", rule2), ("tag4", rule3))
 rule3 ::= "c"
 """
-    expected = """root ::= TagDispatch(("tag1", rule1), ("tag2", rule2), ("tag3", rule3))
+    expected = """root ::= TagDispatch(("tag1", rule1), ("tag2", rule2), ("tag3", rule3), exit_triggers=(""), loop_after_dispatch=true)
 rule1 ::= (("a" rule1_1) | ("zzz"))
 rule2 ::= ((rule2_1) | (rule2_2))
 rule3 ::= (("c"))
-rule1_1 ::= TagDispatch(("tag1", rule2), ("tag2", rule3))
-rule2_1 ::= TagDispatch(("tag1", rule2), ("tag2", rule3))
-rule2_2 ::= TagDispatch(("tag3", rule2), ("tag4", rule3))
+rule1_1 ::= TagDispatch(("tag1", rule2), ("tag2", rule3), exit_triggers=(""), loop_after_dispatch=true)
+rule2_1 ::= TagDispatch(("tag1", rule2), ("tag2", rule3), exit_triggers=(""), loop_after_dispatch=true)
+rule2_2 ::= TagDispatch(("tag3", rule2), ("tag4", rule3), exit_triggers=(""), loop_after_dispatch=true)
 """
     grammar = xgr.Grammar.from_ebnf(before)
     after = str(grammar)
@@ -784,7 +804,7 @@ d_1 ::= ("" | ("d"))
 
 def test_e2e_tag_dispatch_roundtrip():
     """Checks the printed result can be parsed, and the parsing-printing process is idempotent."""
-    before = r"""root ::= TagDispatch(("tag1", rule1), ("tag2", rule2), ("tag3", rule3))
+    before = r"""root ::= TagDispatch(("tag1", rule1), ("tag2", rule2), ("tag3", rule3), exit_triggers=(""), loop_after_dispatch=false)
 rule1 ::= (("a"))
 rule2 ::= (("b"))
 rule3 ::= (("c"))
