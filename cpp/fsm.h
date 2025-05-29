@@ -138,7 +138,7 @@ class FSM {
 
   const std::vector<std::vector<FSMEdge>>& GetEdges() const;
 
-  const std::vector<FSMEdge>& GetEdges(int state) const;
+  const std::vector<FSMEdge> GetEdges(int state) const;
 
   std::string PrintEdges() const;
 
