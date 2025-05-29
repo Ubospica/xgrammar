@@ -701,7 +701,7 @@ FSMWithStartEnd FSMWithStartEnd::Concat(const std::vector<FSMWithStartEnd>& fsms
   std::unordered_map<int, int> state_mapping;
   std::vector<int> previous_ends;
 
-  for (int i = 0; i < fsms.size(); ++i) {
+  for (size_t i = 0; i < fsms.size(); ++i) {
     fsm.AddFSM(fsms[i].GetFSM(), &state_mapping);
     if (i == 0) {
       start = state_mapping[fsms[i].GetStart()];
@@ -742,14 +742,14 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
   std::set<int> interval_ends;
   std::vector<std::pair<int, int>> intervals;
   // This part is to build the equivalent alphabet.
-  for (const auto& edges : lhs.fsm.edges) {
+  for (const auto& edges : lhs->GetEdges()) {
     for (const auto& edge : edges) {
       if (edge.IsRuleRef()) {
         rules_lhs.insert(edge.GetRefRuleId());
       }
     }
   }
-  for (const auto& edges : rhs.fsm.edges) {
+  for (const auto& edges : rhs->GetEdges()) {
     for (const auto& edge : edges) {
       if (edge.IsRuleRef()) {
         if (rules_lhs.find(edge.GetRefRuleId()) != rules_lhs.end()) {
@@ -758,7 +758,7 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
       }
     }
   }
-  for (const auto& edges : lhs_dfa.fsm.edges) {
+  for (const auto& edges : lhs_dfa->GetEdges()) {
     for (const auto& edge : edges) {
       if (edge.IsCharRange()) {
         interval_ends.insert(edge.min);
@@ -766,7 +766,7 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
       }
     }
   }
-  for (const auto& edges : rhs_dfa.fsm.edges) {
+  for (const auto& edges : rhs_dfa->GetEdges()) {
     for (const auto& edge : edges) {
       if (edge.IsCharRange()) {
         interval_ends.insert(edge.min);
@@ -780,15 +780,14 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
       intervals.emplace_back(*it, *next_it - 1);
     }
   }
-  FSMWithStartEnd result;
-  result.is_dfa = true;
-  result.start = 0;
+  FSM result_fsm(0);
+  FSMWithStartEnd result(result_fsm, 0, {}, true);
   std::unordered_map<std::pair<int, int>, int> state_map;
   std::unordered_set<std::pair<int, int>> visited;
   std::queue<std::pair<int, int>> queue;
-  queue.push({lhs.start, rhs.start});
-  result.fsm.edges.push_back(std::vector<FSMEdge>());
-  state_map[{lhs.start, rhs.start}] = 0;
+  queue.push({lhs.GetStart(), rhs.GetStart()});
+  result->AddState();
+  state_map[{lhs.GetStart(), rhs.GetStart()}] = 0;
   while (!queue.empty()) {
     if (int(state_map.size()) > num_of_states_limited) {
       return Result<FSMWithStartEnd>::Err(
@@ -804,14 +803,14 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
     int lhs_state = state.first;
     int rhs_state = state.second;
     for (const auto& interval : intervals) {
-      for (const auto& lhs_edge : lhs_dfa.fsm.edges[lhs_state]) {
+      for (const auto& lhs_edge : lhs_dfa->GetEdges(lhs_state)) {
         if (!lhs_edge.IsCharRange()) {
           continue;
         }
         if (lhs_edge.min > interval.first || lhs_edge.max < interval.second) {
           continue;
         }
-        for (const auto& rhs_edge : rhs_dfa.fsm.edges[rhs_state]) {
+        for (const auto& rhs_edge : rhs_dfa->GetEdges(rhs_state)) {
           if (!rhs_edge.IsCharRange()) {
             continue;
           }
@@ -822,24 +821,27 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
           if (state_map.find(next_state) == state_map.end()) {
             state_map[next_state] = state_map.size();
             queue.push(next_state);
-            result.fsm.edges.push_back(std::vector<FSMEdge>());
+            result->AddState();
           }
-          result.fsm.edges[state_map[{lhs_state, rhs_state}]].emplace_back(
-              interval.first, interval.second, state_map[next_state]
+          result->AddEdge(
+              state_map[{lhs_state, rhs_state}],
+              state_map[next_state],
+              interval.first,
+              interval.second
           );
           break;
         }
       }
     }
     for (const auto& rule : rules) {
-      for (const auto& lhs_edge : lhs_dfa.fsm.edges[lhs_state]) {
+      for (const auto& lhs_edge : lhs_dfa->GetEdges(lhs_state)) {
         if (!lhs_edge.IsRuleRef()) {
           continue;
         }
         if (lhs_edge.GetRefRuleId() != rule) {
           continue;
         }
-        for (const auto& rhs_edge : rhs_dfa.fsm.edges[rhs_state]) {
+        for (const auto& rhs_edge : rhs_dfa->GetEdges(rhs_state)) {
           if (!rhs_edge.IsRuleRef()) {
             continue;
           }
@@ -850,20 +852,17 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
           if (state_map.find(next_state) == state_map.end()) {
             state_map[next_state] = state_map.size();
             queue.push(next_state);
-            result.fsm.edges.push_back(std::vector<FSMEdge>());
+            result->AddState();
           }
-          result.fsm.edges[state_map[{lhs_state, rhs_state}]].emplace_back(
-              -1, rule, state_map[next_state]
-          );
+          result->AddRuleEdge(state_map[{lhs_state, rhs_state}], state_map[next_state], rule);
           break;
         }
       }
     }
   }
   for (const auto& state : visited) {
-    if (lhs.ends.find(state.first) != lhs.ends.end() &&
-        rhs.ends.find(state.second) != rhs.ends.end()) {
-      result.ends.insert(state_map[state]);
+    if (lhs.IsEndState(state.first) && rhs.IsEndState(state.second)) {
+      result.AddEndState(state_map[state]);
     }
   }
   return Result<FSMWithStartEnd>::Ok(result);
@@ -882,15 +881,14 @@ FSMWithStartEnd FSMWithStartEnd::RebuildWithMapping(
   return FSMWithStartEnd(new_fsm, new_start, new_ends);
 }
 
-// TODO(linzhang)
 bool FSMWithStartEnd::IsDFA() {
-  if (is_dfa) {
+  if (is_dfa_) {
     return true;
   }
 
   std::set<int> interval_ends;
   std::unordered_set<int> rules;
-  for (const auto& edges : fsm.edges) {
+  for (const auto& edges : fsm_->GetEdges()) {
     for (const auto& edge : edges) {
       if (edge.IsEpsilon()) {
         return false;
@@ -914,7 +912,7 @@ bool FSMWithStartEnd::IsDFA() {
       intervals.emplace(*it, *next_it - 1);
     }
   }
-  for (const auto& edges : fsm.edges) {
+  for (const auto& edges : fsm_->GetEdges()) {
     for (const auto& rule : rules) {
       bool find = false;
       for (const auto& edge : edges) {
@@ -943,14 +941,14 @@ bool FSMWithStartEnd::IsDFA() {
       }
     }
   }
-  is_dfa = true;
+  is_dfa_ = true;
   return true;
 }
 
 // TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
-  if (IsDFA()) {
-    return;
+  if (is_dfa_) {
+    return *this;
   }
   UnionFindSet<int> union_find_set;
   std::unordered_map<int, std::unordered_set<int>> previous_states;
@@ -958,8 +956,8 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
 
   // Initialize the previous states, and find all the states that have
   // epsilon edges.
-  for (size_t i = 0; i < fsm.edges.size(); i++) {
-    const auto& edges = fsm.edges[i];
+  for (int i = 0; i < NumStates(); i++) {
+    const auto& edges = fsm_->GetEdges(i);
     for (const auto& edge : edges) {
       if (previous_states.find(edge.target) == previous_states.end()) {
         previous_states[edge.target] = std::unordered_set<int>();
@@ -980,7 +978,7 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
 
   // a --> epsilon --> b, and b doesn't have other inward edges.
   for (const auto& state : has_epsilon) {
-    const auto& edges = fsm.edges[state];
+    const auto& edges = fsm_->GetEdges(state);
     for (const auto& edge : edges) {
       if (!edge.IsEpsilon()) {
         continue;
@@ -1011,8 +1009,9 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
   // Merge the states.
   auto eq_classes = union_find_set.GetAllSets();
   if (eq_classes.empty()) {
-    return;
+    return *this;
   }
+
   std::unordered_map<int, int> new_to_old;
   for (size_t i = 0; i < eq_classes.size(); i++) {
     for (const auto& state : eq_classes[i]) {
@@ -1020,25 +1019,27 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
     }
   }
   int cnt = eq_classes.size();
-  for (size_t i = 0; i < fsm.edges.size(); i++) {
+  for (int i = 0; i < NumStates(); i++) {
     if (new_to_old.find(i) == new_to_old.end()) {
       new_to_old[i] = cnt;
       cnt++;
     }
   }
-  RebuildWithMapping(new_to_old, cnt);
+  FSMWithStartEnd result = Copy();
+  return result.RebuildWithMapping(new_to_old, cnt);
 }
 
 // TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::MergeEquivalentSuccessors() const {
   bool changed = true;
+  FSMWithStartEnd result = *this;
   UnionFindSet<int> union_find_set;
   while (changed) {
     union_find_set.Clear();
     std::unordered_map<int, std::unordered_set<int>> previous_states;
     // Initialize the previous states.
-    for (size_t i = 0; i < fsm.edges.size(); i++) {
-      const auto& edges = fsm.edges[i];
+    for (int i = 0; i < result->NumStates(); i++) {
+      const auto& edges = result->GetEdges(i);
       for (const auto& edge : edges) {
         if (previous_states.find(edge.target) == previous_states.end()) {
           previous_states[edge.target] = std::unordered_set<int>();
@@ -1049,7 +1050,7 @@ FSMWithStartEnd FSMWithStartEnd::MergeEquivalentSuccessors() const {
     // Case 1: Like ab | ac | ad, then they can be merged into a(b | c | d).
     changed = false;
     bool change_case1 = false;
-    for (const auto& edges : fsm.edges) {
+    for (const auto& edges : result->GetEdges()) {
       for (size_t i = 0; i < edges.size(); i++) {
         for (size_t j = i + 1; j < edges.size(); j++) {
           if (IsEndState(edges[i].target) != IsEndState(edges[j].target)) {
@@ -1081,23 +1082,23 @@ FSMWithStartEnd FSMWithStartEnd::MergeEquivalentSuccessors() const {
         }
       }
       int cnt = eq_classes.size();
-      for (size_t i = 0; i < fsm.edges.size(); i++) {
+      for (int i = 0; i < result->NumStates(); i++) {
         if (old_to_new.find(i) == old_to_new.end()) {
           old_to_new[i] = cnt;
           cnt++;
         }
       }
-      RebuildWithMapping(old_to_new, cnt);
+      result = result.RebuildWithMapping(old_to_new, cnt);
     }
     union_find_set.Clear();
     // Case 2: Like ba | ca | da, then they can be merged into (b | c | d)a.
     bool change_case2 = false;
-    for (size_t i = 0; i < fsm.edges.size(); i++) {
-      for (size_t j = i + 1; j < fsm.edges.size(); j++) {
+    for (int i = 0; i < result->NumStates(); i++) {
+      for (int j = i + 1; j < result->NumStates(); j++) {
         bool equivalent = true;
-        for (const auto& edge_i : fsm.edges[i]) {
+        for (const auto& edge_i : result->GetEdges(i)) {
           bool same = false;
-          for (const auto& edge_j : fsm.edges[j]) {
+          for (const auto& edge_j : result->GetEdges(j)) {
             if (edge_i.min == edge_j.min && edge_i.max == edge_j.max &&
                 edge_i.target == edge_j.target) {
               same = true;
@@ -1112,9 +1113,9 @@ FSMWithStartEnd FSMWithStartEnd::MergeEquivalentSuccessors() const {
         if (!equivalent) {
           continue;
         }
-        for (const auto& edge_j : fsm.edges[j]) {
+        for (const auto& edge_j : result->GetEdges(j)) {
           bool same = false;
-          for (const auto& edge_i : fsm.edges[i]) {
+          for (const auto& edge_i : result->GetEdges(i)) {
             if (edge_i.min == edge_j.min && edge_i.max == edge_j.max &&
                 edge_i.target == edge_j.target) {
               same = true;
@@ -1143,16 +1144,17 @@ FSMWithStartEnd FSMWithStartEnd::MergeEquivalentSuccessors() const {
         }
       }
       int cnt = eq_classes.size();
-      for (size_t i = 0; i < fsm.edges.size(); i++) {
+      for (int i = 0; i < result->NumStates(); i++) {
         if (old_to_new.find(i) == old_to_new.end()) {
           old_to_new[i] = cnt;
           cnt++;
         }
       }
-      RebuildWithMapping(old_to_new, cnt);
+      result = result.RebuildWithMapping(old_to_new, cnt);
     }
     changed = change_case1 || change_case2;
   }
+  return result;
 }
 
 // TODO(linzhang)
