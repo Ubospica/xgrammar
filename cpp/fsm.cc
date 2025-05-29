@@ -1494,4 +1494,8 @@ std::ostream& operator<<(std::ostream& os, const CompactFSMWithStartEnd& fsm) {
   return os;
 }
 
+std::size_t MemorySize(const CompactFSMWithStartEnd& self) {
+  return MemorySize(self.fsm_) + MemorySize(self.ends_);
+}
+
 }  // namespace xgrammar

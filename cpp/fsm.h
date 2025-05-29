@@ -1,22 +1,6 @@
 /*!
  *  Copyright (c) 2025 by Contributors
  * \file xgrammar/fsm.h
- * \details This file defines four classes: FSM, CompactFSM, FSMWithStartEnd, and
- * CompactFSMWithStartEnd.
- * - FSM is a class that represents a finite state machine, could be a DFA or an NFA.
- * - CompactFSM is the compact from of FSM. It uses CSRArray to store the edges, ensuring memory
- * contiguity. It sorts the edges in order of min and max, so traversal can be faster.
- * - FSMWithStartEnd stores a pointer to a FSM, a start state, and a set of end states. Multiple
- * FSMWithStartEnd can share the same FSM. It also provides a set of methods to construct FSMs.
- * - CompactFSMWithStartEnd stores a pointer to a CompactFSM, a start state, and a set of end
- * states. Multiple CompactFSMWithStartEnd can share the same CompactFSM.
- *
- * FSM and FSMWithStartEnd are mutable, while CompactFSM and CompactFSMWithStartEnd are immutable.
- * If you need to modify a CompactFSM, you need to convert it to a FSM first, update it, and
- * convert it back to a CompactFSM.
- *
- * FSM & CompactFSM, FSMWithStartEnd & CompactFSMWithStartEnd share the same set of visitor methods.
- *
  * \note For functions accepting a pointer to a container as result, the container will be cleared
  * before the result is stored.
  */
@@ -39,6 +23,9 @@
 
 namespace xgrammar {
 
+/*!
+ * \brief The edge of a FSM.
+ */
 struct FSMEdge {
   /*!
    * \brief The min and max are used to represent the range of characters.
@@ -119,12 +106,26 @@ namespace xgrammar {
 
 class CompactFSM;
 
+/*!
+ * \brief FSM is a class that represents a finite state machine, could be a DFA or an NFA.
+ * \details It's mutable, which means you can add edges and states to it.
+ */
 class FSM {
  public:
+  /*!
+   * \brief Construct an FSM with a given number of states.
+   * \param num_states The number of states in the FSM.
+   */
   FSM(int num_states = 0);
 
+  /*!
+   * \brief Construct an FSM with a given set of edges.
+   */
   FSM(const std::vector<std::vector<FSMEdge>>& edges);
 
+  /*!
+   * \brief Construct an FSM with a given set of edges.
+   */
   FSM(std::vector<std::vector<FSMEdge>>&& edges);
 
   /****************** FSM Visitors ******************/
@@ -158,8 +159,7 @@ class FSM {
    * \brief Advance the FSM to the next state.
    * \param from The current states.
    * \param value The input value.
-   * \param result The next states, which can be seen as the result of the
-   * transition. The result is not cleared at the beginning.
+   * \param result The possible next states. The result is cleared at the beginning.
    * \param value_is_rule Whether the input value is a rule id.
    * \param from_is_closure Whether from is an epsilon closure.
    */
@@ -174,20 +174,21 @@ class FSM {
   /*!
    * \brief Get all the possible rule numbers for a given state.
    * \param state_num The state number.
-   * \param rules The set of possible rule numbers.
+   * \param rules The set of possible rule numbers. The result is cleared at the beginning.
    */
   void GetPossibleRules(const int& state_num, std::unordered_set<int>* rules) const;
 
   /*!
-   * \brief Get the epsilon closure of a set of states and store the result in the set.
-   * \param state_set The current states.
+   * \brief Get the epsilon closure of a set of states, i.e. those can be reached by epsilon
+   * transitions.
+   * \param state_set The states in the epsilon closure. The result is not cleared.
    */
   void GetEpsilonClosure(std::unordered_set<int>* state_set) const;
 
   /*!
    * \brief Get the reachable states from a set of states.
    * \param from The current states.
-   * \param result The reachable states.
+   * \param result The reachable states. The result is cleared at the beginning.
    */
   void GetReachableStates(const std::vector<int>& from, std::unordered_set<int>* result) const;
 
@@ -219,7 +220,7 @@ class FSM {
    * \brief Add a whole FSM to the current FSM.
    * \param fsm The FSM to be added.
    * \param state_mapping The mapping from the state ids of the added FSM to the new ids in the
-   * current FSM.
+   * current FSM. The result is cleared at the beginning.
    */
   void AddFSM(const FSM& fsm, std::unordered_map<int, int>* state_mapping = nullptr);
 
@@ -247,6 +248,16 @@ class FSM {
   XGRAMMAR_DEFINE_PIMPL_METHODS(FSM);
 };
 
+/*!
+ * \brief CompactFSM is the compact from of FSM.
+ * \details It uses CSRArray to store the edges, ensuring memory contiguity. It sorts all outgoing
+ * edges from a node according to their min and max values, so traversal can be faster.
+ *
+ * CompactFSM is immutable. If you need to modify a CompactFSM, you need to convert it to a FSM
+ * first, and convert it back after modification.
+ *
+ * It share the same set of visitor methods with FSM.
+ */
 class CompactFSM {
  public:
   CompactFSM(const CSRArray<FSMEdge>& edges);
@@ -286,8 +297,7 @@ class CompactFSM {
    * \brief Advance the FSM to the next state.
    * \param from The current states.
    * \param value The input value.
-   * \param result The next states, which can be seen as the result of the
-   * transition. The result is not cleared at the beginning.
+   * \param result The possible next states. The result is cleared at the beginning.
    * \param value_is_rule Whether the input value is a rule id.
    * \param from_is_closure Whether from is an epsilon closure.
    */
@@ -302,20 +312,21 @@ class CompactFSM {
   /*!
    * \brief Get all the possible rule numbers for a given state.
    * \param state_num The state number.
-   * \param rules The set of possible rule numbers.
+   * \param rules The set of possible rule numbers. The result is cleared at the beginning.
    */
   void GetPossibleRules(const int& state_num, std::unordered_set<int>* rules) const;
 
   /*!
-   * \brief Get the epsilon closure of a set of states and store the result in the set.
-   * \param state_set The current states.
+   * \brief Get the epsilon closure of a set of states, i.e. those can be reached by epsilon
+   * transitions.
+   * \param state_set The states in the epsilon closure. The result is not cleared.
    */
   void GetEpsilonClosure(std::unordered_set<int>* state_set) const;
 
   /*!
    * \brief Get the reachable states from a set of states.
    * \param from The current states.
-   * \param result The reachable states.
+   * \param result The reachable states. The result is cleared at the beginning.
    */
   void GetReachableStates(const std::vector<int>& from, std::unordered_set<int>* result) const;
 
@@ -330,6 +341,10 @@ class CompactFSM {
   XGRAMMAR_DEFINE_PIMPL_METHODS(CompactFSM);
 };
 
+/*!
+ * \brief The base class for FSMWithStartEnd and CompactFSMWithStartEnd. It defines the
+ * common constructor and visitor methods.
+ */
 template <typename FSMType>
 class FSMWithStartEndBase {
   static_assert(
@@ -407,7 +422,7 @@ class FSMWithStartEndBase {
 
   /*!
    * \brief Get the reachable states from the start state.
-   * \param result The reachable states.
+   * \param result The reachable states. The result is cleared at the beginning.
    */
   void GetReachableStates(std::unordered_set<int>* result) const;
 
@@ -428,6 +443,11 @@ class FSMWithStartEndBase {
   bool is_dfa_ = false;
 };
 
+/*!
+ * \brief FSMWithStartEnd represents a FSM with start and end states.
+ * \details It stores a pointer to a FSM, a start state, and a set of end states. Multiple
+ * FSMWithStartEnd can share the same FSM. It also provides a set of methods to construct FSMs.
+ */
 class FSMWithStartEnd : public FSMWithStartEndBase<FSM> {
  public:
   using FSMWithStartEndBase<FSM>::FSMWithStartEndBase;
@@ -538,6 +558,12 @@ class FSMWithStartEnd : public FSMWithStartEndBase<FSM> {
   );
 };
 
+/*!
+ * \brief A class that represents a compact-form FSM with a start state and a set of end states.
+ * \details CompactFSMWithStartEnd stores a pointer to a CompactFSM, a start state, and a set of end
+ * states. Multiple CompactFSMWithStartEnd can share the same CompactFSM. It share the same set of
+ * visitor methods with FSMWithStartEnd.
+ */
 class CompactFSMWithStartEnd : public FSMWithStartEndBase<CompactFSM> {
  public:
   using FSMWithStartEndBase<CompactFSM>::FSMWithStartEndBase;
@@ -550,9 +576,12 @@ class CompactFSMWithStartEnd : public FSMWithStartEndBase<CompactFSM> {
 
   friend std::ostream& operator<<(std::ostream& os, const CompactFSMWithStartEnd& fsm);
 
-  friend std::size_t MemorySize(const CompactFSMWithStartEnd& self) {
-    return MemorySize(self.fsm_) + MemorySize(self.ends_);
-  }
+  /*!
+   * \brief Get the memory size of the CompactFSMWithStartEnd.
+   * \param self The CompactFSMWithStartEnd.
+   * \return The memory size of the CompactFSMWithStartEnd.
+   */
+  friend std::size_t MemorySize(const CompactFSMWithStartEnd& self);
 };
 
 }  // namespace xgrammar
