@@ -1,6 +1,24 @@
 /*!
  *  Copyright (c) 2025 by Contributors
  * \file xgrammar/fsm.h
+ * \details This file defines four classes: FSM, CompactFSM, FSMWithStartEnd, and
+ * CompactFSMWithStartEnd.
+ * - FSM is a class that represents a finite state machine, could be a DFA or an NFA.
+ * - CompactFSM is the compact from of FSM. It uses CSRArray to store the edges, ensuring memory
+ * contiguity. It sorts the edges in order of min and max, so traversal can be faster.
+ * - FSMWithStartEnd stores a pointer to a FSM, a start state, and a set of end states. Multiple
+ * FSMWithStartEnd can share the same FSM. It also provides a set of methods to construct FSMs.
+ * - CompactFSMWithStartEnd stores a pointer to a CompactFSM, a start state, and a set of end
+ * states. Multiple CompactFSMWithStartEnd can share the same CompactFSM.
+ *
+ * FSM and FSMWithStartEnd are mutable, while CompactFSM and CompactFSMWithStartEnd are immutable.
+ * If you need to modify a CompactFSM, you need to convert it to a FSM first, update it, and
+ * convert it back to a CompactFSM.
+ *
+ * FSM & CompactFSM, FSMWithStartEnd & CompactFSMWithStartEnd share the same set of visitor methods.
+ *
+ * \note For functions accepting a pointer to a container as result, the container will be cleared
+ * before the result is stored.
  */
 #ifndef XGRAMMAR_FSM_H_
 #define XGRAMMAR_FSM_H_

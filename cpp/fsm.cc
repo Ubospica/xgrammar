@@ -93,7 +93,7 @@ std::string FSMImplBase<ContainerType, RowType>::PrintEdges() const {
       if (edge.min == -1 && edge.max == -1) {
         result += "eps->" + std::to_string(edge.target);
       } else if (edge.min == -1 && edge.max >= 0) {
-        result += "Rule(" + std::to_string(edge.max) + ")->" + std::to_string(edge.target);
+        result += "rule(" + std::to_string(edge.max) + ")->" + std::to_string(edge.target);
       } else if (edge.min == edge.max) {
         std::string char_str = PrintAsEscapedUTF8(static_cast<TCodepoint>(edge.min));
         result += "(" + char_str + ")->" + std::to_string(edge.target);
@@ -139,6 +139,7 @@ template <typename ContainerType, typename RowType>
 void FSMImplBase<ContainerType, RowType>::GetPossibleRules(
     const int& state, std::unordered_set<int>* rules
 ) const {
+  rules->clear();
   for (const auto& edge : edges_[state]) {
     if (edge.IsRuleRef()) {
       rules->insert(edge.GetRefRuleId());

@@ -663,28 +663,31 @@ Result<FSMWithStartEnd> RegexFSMBuilder::Build(const std::string& regex) {
 FSMWithStartEnd TrieFSMBuilder::Build(
     const std::vector<std::string>& patterns, std::vector<int32_t>* end_states
 ) {
-  FSMWithStartEnd fsm(1);
-  fsm.SetStartState(0);
+  FSM fsm(1);
+  int start = 0;
+  std::unordered_set<int> ends;
+
   if (end_states) {
     end_states->clear();
   }
+
   for (const auto& pattern : patterns) {
     int current_state = 0;
     for (const auto& ch : pattern) {
       int16_t ch_int16 = static_cast<int16_t>(static_cast<uint8_t>(ch));
       int next_state = fsm.GetNextState(current_state, ch_int16);
-      if (next_state == FSMWithStartEnd::NO_TRANSITION) {
+      if (next_state == FSM::kNoNextState) {
         next_state = fsm.AddState();
         fsm.AddEdge(current_state, next_state, ch_int16, ch_int16);
       }
       current_state = next_state;
     }
-    fsm.AddEndState(current_node);
-    if (end_nodes) {
-      end_nodes->push_back(current_node);
+    ends.insert(current_state);
+    if (end_states) {
+      end_states->push_back(current_state);
     }
   }
-  return fsm;
+  return FSMWithStartEnd(fsm, start, ends, true);
 }
 
 }  // namespace xgrammar
