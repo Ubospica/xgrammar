@@ -5,3 +5,6 @@ PointerAlignment: Left
 AlignAfterOpenBracket: BlockIndent
 BinPackArguments: false
 BinPackParameters: false
+# TODO(yixin):
+# IndentWidth: 2
+# ContinuationIndentWidth: 2
