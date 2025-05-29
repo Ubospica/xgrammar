@@ -508,26 +508,6 @@ std::size_t MemorySize(const CompactFSM& self) { return MemorySize(*self.pimpl_)
 /****************** FSMWithStartEndBase ******************/
 
 template <typename FSMType>
-bool FSMWithStartEndBase<FSMType>::AcceptString(const std::string& str) const {
-  std::unordered_set<int> start_states{start_};
-  fsm_.GetEpsilonClosure(&start_states);
-  std::unordered_set<int> result_states;
-  for (const auto& character : str) {
-    result_states.clear();
-    fsm_.Advance(
-        start_states, static_cast<int>(static_cast<unsigned char>(character)), &result_states, false
-    );
-    if (result_states.empty()) {
-      return false;
-    }
-    start_states = result_states;
-  }
-  return std::any_of(start_states.begin(), start_states.end(), [&](int state) {
-    return ends_.find(state) != ends_.end();
-  });
-}
-
-template <typename FSMType>
 void FSMWithStartEndBase<FSMType>::GetReachableStates(std::unordered_set<int>* result) const {
   return fsm_.GetReachableStates({start_}, result);
 }
@@ -592,82 +572,81 @@ FSMWithStartEnd FSMWithStartEnd::Optional() const {
   return FSMWithStartEnd(fsm, start_, ends_);
 }
 
-// TODO(linzhang)
-// FSMWithStartEnd FSMWithStartEnd::Not() const {
-//   FSMWithStartEnd result = is_dfa_ ? Copy() : ToDFA();
-//   int state_cnt = result.NumStates();
+FSMWithStartEnd FSMWithStartEnd::Not() const {
+  FSMWithStartEnd result = is_dfa_ ? Copy() : ToDFA();
+  int state_cnt = result.NumStates();
 
-//   // Reverse all the final states.
-//   std::unordered_set<int> final_states;
-//   for (int i = 0; i < result->NumStates(); ++i) {
-//     if (!result.IsEndState(i)) {
-//       final_states.insert(i);
-//     }
-//   }
+  // Reverse all the final states.
+  std::unordered_set<int> final_states;
+  for (int i = 0; i < result->NumStates(); ++i) {
+    if (!result.IsEndState(i)) {
+      final_states.insert(i);
+    }
+  }
 
-//   // Add all the rules in the alphabet.
-//   std::unordered_set<int> rules;
-//   for (const auto& edges : result->GetEdges()) {
-//     for (const auto& edge : edges) {
-//       if (edge.IsRuleRef()) {
-//         rules.insert(edge.GetRefRuleId());
-//       }
-//     }
-//   }
+  // Add all the rules in the alphabet.
+  std::unordered_set<int> rules;
+  for (const auto& edges : result->GetEdges()) {
+    for (const auto& edge : edges) {
+      if (edge.IsRuleRef()) {
+        rules.insert(edge.GetRefRuleId());
+      }
+    }
+  }
 
-//   // Add a new state to avoid the blocking.
-//   result->AddState();
-//   for (auto rule : rules) {
-//     result->AddRuleEdge(result.NumStates() - 1, state_cnt, rule);
-//   }
-//   result->AddEdge(result.NumStates() - 1, state_cnt, -1, 0xFF);
-//   result.AddEndState(state_cnt);
+  // Add a new state to avoid the blocking.
+  result->AddState();
+  for (auto rule : rules) {
+    result->AddRuleEdge(result.NumStates() - 1, state_cnt, rule);
+  }
+  result->AddEdge(result.NumStates() - 1, state_cnt, -1, 0xFF);
+  result.AddEndState(state_cnt);
 
-//   for (int i = 0; i < result.NumStates(); i++) {
-//     const auto& state_edges = result->GetEdges(i);
-//     std::vector<bool> char_has_edges(0x100, false);
-//     std::unordered_set<int> rule_has_edges;
-//     for (const auto& edge : state_edges) {
-//       if (edge.IsCharRange()) {
-//         for (int i = edge.min; i <= edge.max; ++i) {
-//           char_has_edges[i] = true;
-//         }
-//       }
-//       if (edge.IsRuleRef()) {
-//         rule_has_edges.insert(edge.GetRefRuleId());
-//       }
-//     }
+  for (int i = 0; i < result.NumStates(); i++) {
+    const auto& state_edges = result->GetEdges(i);
+    std::vector<bool> char_has_edges(0x100, false);
+    std::unordered_set<int> rule_has_edges;
+    for (const auto& edge : state_edges) {
+      if (edge.IsCharRange()) {
+        for (int i = edge.min; i <= edge.max; ++i) {
+          char_has_edges[i] = true;
+        }
+      }
+      if (edge.IsRuleRef()) {
+        rule_has_edges.insert(edge.GetRefRuleId());
+      }
+    }
 
-//     // Add the left characters to the new state.
-//     int interval_start = -1;
-//     for (int j = 0; j < 0x100; ++j) {
-//       if (!char_has_edges[j]) {
-//         // The char doesn't have any edges. Thus, we can accept it in the
-//         // complement FSM.
-//         if (interval_start == -1) {
-//           interval_start = j;
-//         }
-//       } else {
-//         if (interval_start != -1) {
-//           // state_cnt is the state to accept all such characters.
-//           result->AddEdge(i, state_cnt, interval_start, j - 1);
-//           interval_start = -1;
-//         }
-//       }
-//     }
-//     if (interval_start != -1) {
-//       result->AddEdge(i, state_cnt, interval_start, 0xFF);
-//     }
+    // Add the left characters to the new state.
+    int interval_start = -1;
+    for (int j = 0; j < 0x100; ++j) {
+      if (!char_has_edges[j]) {
+        // The char doesn't have any edges. Thus, we can accept it in the
+        // complement FSM.
+        if (interval_start == -1) {
+          interval_start = j;
+        }
+      } else {
+        if (interval_start != -1) {
+          // state_cnt is the state to accept all such characters.
+          result->AddEdge(i, state_cnt, interval_start, j - 1);
+          interval_start = -1;
+        }
+      }
+    }
+    if (interval_start != -1) {
+      result->AddEdge(i, state_cnt, interval_start, 0xFF);
+    }
 
-//     // Add the left rules to the new state.
-//     for (auto rule : rules) {
-//       if (rule_has_edges.find(rule) == rule_has_edges.end()) {
-//         result->AddRuleEdge(result.NumStates() - 1, state_cnt, rule);
-//       }
-//     }
-//   }
-//   return result;
-// }
+    // Add the left rules to the new state.
+    for (auto rule : rules) {
+      if (rule_has_edges.find(rule) == rule_has_edges.end()) {
+        result->AddRuleEdge(result.NumStates() - 1, state_cnt, rule);
+      }
+    }
+  }
+  return result;
+}
 
 FSMWithStartEnd FSMWithStartEnd::Union(const std::vector<FSMWithStartEnd>& fsms) {
   // Put all the FSMs in parallel.
@@ -695,7 +674,7 @@ FSMWithStartEnd FSMWithStartEnd::Concat(const std::vector<FSMWithStartEnd>& fsms
   // Set the start state of the first FSM as the start state of the result.
   // Set the end states of the last FSM as the end states of the result.
   FSM fsm;
-  int start;
+  int start = 0;
   std::unordered_set<int> ends;
 
   std::unordered_map<int, int> state_mapping;
@@ -727,7 +706,6 @@ FSMWithStartEnd FSMWithStartEnd::Concat(const std::vector<FSMWithStartEnd>& fsms
   return FSMWithStartEnd(fsm, start, ends);
 }
 
-// TODO(linzhang)
 Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
     const FSMWithStartEnd& lhs, const FSMWithStartEnd& rhs, const int& num_of_states_limited
 ) {
@@ -945,7 +923,6 @@ bool FSMWithStartEnd::IsDFA() {
   return true;
 }
 
-// TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
   if (is_dfa_) {
     return *this;
@@ -1029,7 +1006,6 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
   return result.RebuildWithMapping(new_to_old, cnt);
 }
 
-// TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::MergeEquivalentSuccessors() const {
   bool changed = true;
   FSMWithStartEnd result = *this;
@@ -1157,7 +1133,6 @@ FSMWithStartEnd FSMWithStartEnd::MergeEquivalentSuccessors() const {
   return result;
 }
 
-// TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::MinimizeDFA() const {
   FSMWithStartEnd now_fsm(0, 0, {}, true);
 
@@ -1359,7 +1334,6 @@ FSMWithStartEnd FSMWithStartEnd::MinimizeDFA() const {
   return new_fsm;
 }
 
-// TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::ToDFA() const {
   FSMWithStartEnd dfa(0, start_, {}, true);
   std::vector<std::unordered_set<int>> closures;

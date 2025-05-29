@@ -433,7 +433,27 @@ class FSMWithStartEndBase {
    * \param str The input string.
    * \return True if the FSM accepts the string, false otherwise.
    */
-  bool AcceptString(const std::string& str) const;
+  bool AcceptString(const std::string& str) const {
+    std::unordered_set<int> start_states{start_};
+    fsm_.GetEpsilonClosure(&start_states);
+    std::unordered_set<int> result_states;
+    for (const auto& character : str) {
+      result_states.clear();
+      fsm_.Advance(
+          start_states,
+          static_cast<int>(static_cast<unsigned char>(character)),
+          &result_states,
+          false
+      );
+      if (result_states.empty()) {
+        return false;
+      }
+      start_states = result_states;
+    }
+    return std::any_of(start_states.begin(), start_states.end(), [&](int state) {
+      return ends_.find(state) != ends_.end();
+    });
+  }
 
   /*!
    * \brief Get the reachable states from the start state.

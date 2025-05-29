@@ -9,8 +9,10 @@
 #include "grammar_matcher_base.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include <vector>
 
+#include "fsm.h"
 #include "grammar_data_structure.h"
 #include "persistent_stack.h"
 #include "support/encoding.h"
@@ -89,29 +91,29 @@ StackElement GrammarMatcherBase::AdvanceStackElementWithChar(
       XGRAMMAR_LOG(FATAL) << "The grammar does not have a root tag dispatch rule; it is not built.";
       XGRAMMAR_UNREACHABLE();
     }
-    auto start_node = root_tag_dispatch_fsm->StartNode();
-    auto next_node = root_tag_dispatch_fsm->Transition(stack_element.element_id, char_value);
+    auto start_node = root_tag_dispatch_fsm->GetStart();
+    std::unordered_set<int> result;
+    root_tag_dispatch_fsm->GetFSM().Advance({stack_element.element_id}, char_value, &result);
     auto new_stack_element = stack_element;
-    if (next_node == CompactFSMWithStartEnd::NO_TRANSITION) {
+    if (result.empty()) {
       // Case 1. The new char cannot continue to be accepted by the tag dispatch fsm.
       // We try to accept the new char from the start node. If accepted, we go to the target node.
       // If it still cannot be accepted, we stay at the start node.
-      auto new_next_node = root_tag_dispatch_fsm->Transition(start_node, char_value);
-      new_stack_element.element_id =
-          new_next_node == CompactFSMWithStartEnd::NO_TRANSITION ? start_node : new_next_node;
-    } else if (!root_tag_dispatch_fsm->IsEndNode(next_node)) {
+      root_tag_dispatch_fsm->GetFSM().Advance({start_node}, char_value, &result);
+      new_stack_element.element_id = result.empty() ? start_node : *result.begin();
+    } else if (!root_tag_dispatch_fsm->IsEndState(*result.begin())) {
       // Case 2. The new char can continue to be accepted by the tag dispatch fsm.
       // We need to update the element id to the next node.
-      new_stack_element.element_id = next_node;
+      new_stack_element.element_id = *result.begin();
     } else {
       // Case 3. The new char can continue to be accepted by the tag dispatch fsm.
       // We need to dispatch the tag dispatch fsm to the end node.
       // We need to create a new stack element to represent the dispatched tag dispatch.
       new_stack_element.element_id = kDispatchedTagDispatchElementId;
       auto new_stack_element_id = persistent_stack_.NewNode(new_stack_element);
-      XGRAMMAR_DCHECK(grammar_->tag_dispatch_end_node_to_rule_id.count(next_node))
+      XGRAMMAR_DCHECK(grammar_->tag_dispatch_end_node_to_rule_id.count(*result.begin()))
           << "The end node of the tag dispatch fsm does not correspond to any rule id";
-      auto refered_rule_id = grammar_->tag_dispatch_end_node_to_rule_id.at(next_node);
+      auto refered_rule_id = grammar_->tag_dispatch_end_node_to_rule_id.at(*result.begin());
       new_stack_element =
           StackElement(refered_rule_id, kUnexpandedRuleStartSequenceId, 0, new_stack_element_id);
     }
@@ -186,7 +188,7 @@ void GrammarMatcherBase::ExpandEquivalentStackElements(
       auto new_stack_element = StackElement(
           cur_rule_id,
           cur_rule_body_id,
-          grammar_->root_tag_dispatch_fsm->StartNode(),
+          grammar_->root_tag_dispatch_fsm->GetStart(),
           cur_stack_element.parent_id
       );
       new_stack_tops->push_back(persistent_stack_.NewNode(new_stack_element));
@@ -228,7 +230,7 @@ void GrammarMatcherBase::ExpandEquivalentStackElements(
       auto new_stack_element = persistent_stack_[cur_stack_element.parent_id];
       auto parent_sequence = grammar_->GetRuleExpr(new_stack_element.sequence_id);
       if (parent_sequence.type == RuleExprType::kTagDispatch) {
-        new_stack_element.element_id = grammar_->root_tag_dispatch_fsm->StartNode();
+        new_stack_element.element_id = grammar_->root_tag_dispatch_fsm->GetStart();
       } else {
         new_stack_element.element_id += 1;
       }

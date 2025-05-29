@@ -125,6 +125,65 @@ class RegexIR {
   friend class RegexFSMBuilder;
 };
 
+Result<std::pair<int, int>> RegexIR::CheckRepeat(const std::string& regex, int& start) {
+  if (regex[start] != '{') {
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+  }
+  int lower_bound = 0;
+  int upper_bound = RegexIR::kRepeatNoUpperBound;
+  start++;
+  std::string num_str;
+  XGRAMMAR_DCHECK(regex[start] == '{');
+  start++;
+  while (static_cast<size_t>(start) < regex.size() && regex[start] == ' ') {
+    start++;
+  }
+  while (static_cast<size_t>(start) < regex.size() && std::isdigit(regex[start])) {
+    num_str += regex[start];
+    start++;
+  }
+  if (num_str.empty()) {
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+  }
+  lower_bound = std::stoi(num_str);
+  while (static_cast<size_t>(start) < regex.size() && regex[start] == ' ') {
+    start++;
+  }
+  // The format is {n}
+  if (regex[start] == '}') {
+    upper_bound = lower_bound;
+    return Result<std::pair<int, int>>::Ok(std::make_pair(lower_bound, upper_bound));
+  }
+  if (regex[start] != ',') {
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+  }
+  XGRAMMAR_DCHECK(regex[start] == ',');
+  while (static_cast<size_t>(start) < regex.size() && regex[start] == ' ') {
+    start++;
+  }
+  // The format is {n,}
+  if (regex[start] == '}') {
+    return Result<std::pair<int, int>>::Ok(std::make_pair(lower_bound, upper_bound));
+  }
+  num_str.clear();
+  while (static_cast<size_t>(start) < regex.size() && std::isdigit(regex[start])) {
+    num_str += regex[start];
+    start++;
+  }
+  if (num_str.empty()) {
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+  }
+  upper_bound = std::stoi(num_str);
+  while (static_cast<size_t>(start) < regex.size() && regex[start] == ' ') {
+    start++;
+  }
+  if (regex[start] != '}') {
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+  }
+  XGRAMMAR_DCHECK(regex[start] == '}');
+  return Result<std::pair<int, int>>::Ok(std::make_pair(lower_bound, upper_bound));
+}
+
 Result<FSMWithStartEnd> RegexIR::Build() const {
   if (states.empty()) {
     FSM empty_fsm(1);
