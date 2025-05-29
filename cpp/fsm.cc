@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <list>
 #include <queue>
 #include <set>
@@ -90,7 +91,6 @@ std::string FSMImplBase<ContainerType, RowType>::PrintEdges() const {
     result += std::to_string(i) + ": [";
     const auto& edges = edges_[i];
     for (int j = 0; j < static_cast<int>(edges.size()); ++j) {
-      std::cout << "Printing edge: " << i << " -> " << j << std::endl;
       const auto& edge = edges[j];
       if (edge.min == -1 && edge.max == -1) {
         result += "eps->" + std::to_string(edge.target);
@@ -269,7 +269,7 @@ void FSM::Impl::AddFSM(const FSM& fsm, std::unordered_map<int, int>* state_mappi
     }
   }
 
-  edges_.reserve(edges_.size() + fsm.NumStates());
+  edges_.resize(edges_.size() + fsm.NumStates());
 
   for (int i = 0; i < fsm.NumStates(); ++i) {
     for (const auto& edge : fsm.GetEdges()[i]) {
@@ -578,7 +578,6 @@ FSMWithStartEnd FSMWithStartEnd::Optional() const {
 FSMWithStartEnd FSMWithStartEnd::Not() const {
   FSMWithStartEnd result = is_dfa_ ? Copy() : ToDFA();
   int state_cnt = result.NumStates();
-
   // Reverse all the final states.
   std::unordered_set<int> final_states;
   for (int i = 0; i < result->NumStates(); ++i) {
@@ -599,11 +598,12 @@ FSMWithStartEnd FSMWithStartEnd::Not() const {
 
   // Add a new state to avoid the blocking.
   result->AddState();
+  final_states.insert(result.NumStates() - 1);
   for (auto rule : rules) {
-    result->AddRuleEdge(result.NumStates() - 1, state_cnt, rule);
+    result->AddRuleEdge(result.NumStates() - 1, result.NumStates() - 1, rule);
   }
-  result->AddEdge(result.NumStates() - 1, state_cnt, -1, 0xFF);
-  result.AddEndState(state_cnt);
+  result->AddEdge(result.NumStates() - 1, result.NumStates() - 1, 0, 0xFF);
+  result.AddEndState(result.NumStates() - 1);
 
   for (int i = 0; i < result.NumStates(); i++) {
     const auto& state_edges = result->GetEdges(i);
@@ -648,6 +648,7 @@ FSMWithStartEnd FSMWithStartEnd::Not() const {
       }
     }
   }
+  result.SetEndStates(final_states);
   return result;
 }
 
@@ -676,6 +677,9 @@ FSMWithStartEnd FSMWithStartEnd::Concat(const std::vector<FSMWithStartEnd>& fsms
   // For each FSM, link the end states to the start state of the next FSM.
   // Set the start state of the first FSM as the start state of the result.
   // Set the end states of the last FSM as the end states of the result.
+  if (fsms.size() == 1) {
+    return fsms[0];
+  }
   FSM fsm;
   int start = 0;
   std::unordered_set<int> ends;
@@ -705,7 +709,7 @@ FSMWithStartEnd FSMWithStartEnd::Concat(const std::vector<FSMWithStartEnd>& fsms
       }
     }
   }
-
+  FSMWithStartEnd fsm_with_start_end(fsm, start, ends);
   return FSMWithStartEnd(fsm, start, ends);
 }
 

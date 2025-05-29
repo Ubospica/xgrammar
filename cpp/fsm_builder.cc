@@ -127,11 +127,10 @@ class RegexIR {
 
 Result<std::pair<int, int>> RegexIR::CheckRepeat(const std::string& regex, int& start) {
   if (regex[start] != '{') {
-    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format1"));
   }
   int lower_bound = 0;
   int upper_bound = RegexIR::kRepeatNoUpperBound;
-  start++;
   std::string num_str;
   XGRAMMAR_DCHECK(regex[start] == '{');
   start++;
@@ -143,7 +142,7 @@ Result<std::pair<int, int>> RegexIR::CheckRepeat(const std::string& regex, int& 
     start++;
   }
   if (num_str.empty()) {
-    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format2"));
   }
   lower_bound = std::stoi(num_str);
   while (static_cast<size_t>(start) < regex.size() && regex[start] == ' ') {
@@ -155,9 +154,10 @@ Result<std::pair<int, int>> RegexIR::CheckRepeat(const std::string& regex, int& 
     return Result<std::pair<int, int>>::Ok(std::make_pair(lower_bound, upper_bound));
   }
   if (regex[start] != ',') {
-    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format3"));
   }
   XGRAMMAR_DCHECK(regex[start] == ',');
+  start++;
   while (static_cast<size_t>(start) < regex.size() && regex[start] == ' ') {
     start++;
   }
@@ -171,14 +171,14 @@ Result<std::pair<int, int>> RegexIR::CheckRepeat(const std::string& regex, int& 
     start++;
   }
   if (num_str.empty()) {
-    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format4"));
   }
   upper_bound = std::stoi(num_str);
   while (static_cast<size_t>(start) < regex.size() && regex[start] == ' ') {
     start++;
   }
   if (regex[start] != '}') {
-    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format"));
+    return Result<std::pair<int, int>>::Err(std::make_shared<Error>("Invalid repeat format5"));
   }
   XGRAMMAR_DCHECK(regex[start] == '}');
   return Result<std::pair<int, int>>::Ok(std::make_pair(lower_bound, upper_bound));

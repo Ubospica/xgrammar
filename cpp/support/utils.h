@@ -103,7 +103,7 @@ class Result {
   /*! \brief Get the success value, or terminate if this is an error */
   T&& Unwrap() && {
     if (!IsOk()) {
-      XGRAMMAR_LOG(FATAL) << "Called Unwrap() on an Err value";
+      XGRAMMAR_LOG(FATAL) << "Called Unwrap() on an Err value" << UnwrapErr()->what();
       XGRAMMAR_UNREACHABLE();
     }
     return std::move(*value_);

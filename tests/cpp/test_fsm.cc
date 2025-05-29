@@ -214,7 +214,7 @@ TEST(XGrammarFSMTest, FunctionTest) {
   test_str = "abcd";
   EXPECT_TRUE(fsm_wse.AcceptString(test_str));
   std::cout << "--------- Function Test5 -----------" << std::endl;
-  fsm_wse = builder.Build("[\\d]{1,  5}").Unwrap();
+  fsm_wse = builder.Build("[\\d]{1,5}").Unwrap();
   std::string test_strs[2] = {"123", "12345"};
   for (const auto& str : test_strs) {
     EXPECT_TRUE(fsm_wse.AcceptString(str));
