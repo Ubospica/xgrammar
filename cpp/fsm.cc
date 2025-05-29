@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <list>
 #include <queue>
@@ -278,7 +279,7 @@ void FSM::Impl::AddFSM(const FSM& fsm, std::unordered_map<int, int>* state_mappi
 
 FSM FSM::Impl::RebuildWithMapping(std::unordered_map<int, int>& state_mapping, int new_num_states) {
   std::vector<std::set<FSMEdge>> new_edges_set(new_num_states);
-  for (int i = 0; i < edges_.size(); ++i) {
+  for (int i = 0; static_cast<size_t>(i) < edges_.size(); ++i) {
     for (const auto& edge : edges_[i]) {
       new_edges_set[state_mapping[i]].insert(FSMEdge(edge.min, edge.max, state_mapping[edge.target])
       );
@@ -315,6 +316,11 @@ int FSM::AddState() { return pimpl_->AddState(); }
 
 void FSM::AddEdge(int from, int to, int16_t min_ch, int16_t max_ch) {
   pimpl_->AddEdge(from, to, min_ch, max_ch);
+}
+
+void FSM::AddRuleEdge(int from, int to, int16_t rule_id) {
+  // Rule edges are represented as a special case of character range edges.
+  pimpl_->AddEdge(from, to, -1, rule_id);
 }
 
 void FSM::AddEpsilonEdge(int from, int to) { pimpl_->AddEpsilonEdge(from, to); }
@@ -587,89 +593,81 @@ FSMWithStartEnd FSMWithStartEnd::Optional() const {
 }
 
 // TODO(linzhang)
-FSMWithStartEnd FSMWithStartEnd::Not() const {
-  FSMWithStartEnd result;
+// FSMWithStartEnd FSMWithStartEnd::Not() const {
+//   FSMWithStartEnd result = is_dfa_ ? Copy() : ToDFA();
+//   int state_cnt = result.NumStates();
 
-  // Build the DFA.
-  if (!is_dfa) {
-    result = ToDFA();
-  } else {
-    result = Copy();
-  }
-  int state_cnt = result.fsm.edges.size();
+//   // Reverse all the final states.
+//   std::unordered_set<int> final_states;
+//   for (int i = 0; i < result->NumStates(); ++i) {
+//     if (!result.IsEndState(i)) {
+//       final_states.insert(i);
+//     }
+//   }
 
-  // Reverse all the final states.
-  std::unordered_set<int> final_states;
-  for (int i = 0; i < state_cnt; ++i) {
-    if (result.ends.find(i) == result.ends.end()) {
-      final_states.insert(i);
-    }
-  }
-  result.ends = final_states;
+//   // Add all the rules in the alphabet.
+//   std::unordered_set<int> rules;
+//   for (const auto& edges : result->GetEdges()) {
+//     for (const auto& edge : edges) {
+//       if (edge.IsRuleRef()) {
+//         rules.insert(edge.GetRefRuleId());
+//       }
+//     }
+//   }
 
-  // Add all the rules in the alphabet.
-  std::unordered_set<int> rules;
-  for (const auto& edges : result.fsm.edges) {
-    for (const auto& edge : edges) {
-      if (edge.IsRuleRef()) {
-        rules.insert(edge.GetRefRuleId());
-      }
-    }
-  }
+//   // Add a new state to avoid the blocking.
+//   result->AddState();
+//   for (auto rule : rules) {
+//     result->AddRuleEdge(result.NumStates() - 1, state_cnt, rule);
+//   }
+//   result->AddEdge(result.NumStates() - 1, state_cnt, -1, 0xFF);
+//   result.AddEndState(state_cnt);
 
-  // Add a new state to avoid the blocking.
-  result.fsm.edges.push_back(std::vector<FSMEdge>());
-  for (auto rule : rules) {
-    result.fsm.edges.back().emplace_back(-1, rule, state_cnt);
-  }
-  result.fsm.edges.back().emplace_back(0, 0x00FF, state_cnt);
-  result.ends.insert(state_cnt);
+//   for (int i = 0; i < result.NumStates(); i++) {
+//     const auto& state_edges = result->GetEdges(i);
+//     std::vector<bool> char_has_edges(0x100, false);
+//     std::unordered_set<int> rule_has_edges;
+//     for (const auto& edge : state_edges) {
+//       if (edge.IsCharRange()) {
+//         for (int i = edge.min; i <= edge.max; ++i) {
+//           char_has_edges[i] = true;
+//         }
+//       }
+//       if (edge.IsRuleRef()) {
+//         rule_has_edges.insert(edge.GetRefRuleId());
+//       }
+//     }
 
-  for (size_t i = 0; i < fsm.edges.size(); i++) {
-    const auto& state_edges = fsm.edges[i];
-    std::vector<bool> char_has_edges(0x100, false);
-    std::unordered_set<int> rule_has_edges;
-    for (const auto& edge : state_edges) {
-      if (edge.IsCharRange()) {
-        for (int i = edge.min; i <= edge.max; ++i) {
-          char_has_edges[i] = true;
-        }
-      }
-      if (edge.IsRuleRef()) {
-        rule_has_edges.insert(edge.GetRefRuleId());
-      }
-    }
+//     // Add the left characters to the new state.
+//     int interval_start = -1;
+//     for (int j = 0; j < 0x100; ++j) {
+//       if (!char_has_edges[j]) {
+//         // The char doesn't have any edges. Thus, we can accept it in the
+//         // complement FSM.
+//         if (interval_start == -1) {
+//           interval_start = j;
+//         }
+//       } else {
+//         if (interval_start != -1) {
+//           // state_cnt is the state to accept all such characters.
+//           result->AddEdge(i, state_cnt, interval_start, j - 1);
+//           interval_start = -1;
+//         }
+//       }
+//     }
+//     if (interval_start != -1) {
+//       result->AddEdge(i, state_cnt, interval_start, 0xFF);
+//     }
 
-    // Add the left characters to the new state.
-    int interval_start = -1;
-    for (int j = 0; j < 0x100; ++j) {
-      if (!char_has_edges[j]) {
-        // The char doesn't have any edges. Thus, we can accept it in the
-        // complement FSM.
-        if (interval_start == -1) {
-          interval_start = j;
-        }
-      } else {
-        if (interval_start != -1) {
-          // state_cnt is the state to accept all such characters.
-          result.fsm.edges[i].emplace_back(interval_start, i - 1, state_cnt);
-          interval_start = -1;
-        }
-      }
-    }
-    if (interval_start != -1) {
-      result.fsm.edges[i].emplace_back(interval_start, 0xFF, state_cnt);
-    }
-
-    // Add the left rules to the new state.
-    for (auto rule : rules) {
-      if (rule_has_edges.find(rule) == rule_has_edges.end()) {
-        result.fsm.edges.back().emplace_back(-1, rule, state_cnt);
-      }
-    }
-  }
-  return result;
-}
+//     // Add the left rules to the new state.
+//     for (auto rule : rules) {
+//       if (rule_has_edges.find(rule) == rule_has_edges.end()) {
+//         result->AddRuleEdge(result.NumStates() - 1, state_cnt, rule);
+//       }
+//     }
+//   }
+//   return result;
+// }
 
 FSMWithStartEnd FSMWithStartEnd::Union(const std::vector<FSMWithStartEnd>& fsms) {
   // Put all the FSMs in parallel.

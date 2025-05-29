@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -214,6 +215,14 @@ class FSM {
    * \param to The target state.
    */
   void AddEpsilonEdge(int from, int to);
+
+  /*!
+   * \brief Add a rule reference edge between states.
+   * \param from The source state.
+   * \param to The target state.
+   * \param rule_id The rule id to reference.
+   */
+  void AddRuleEdge(int from, int to, int16_t rule_id);
 
   /*!
    * \brief Add a whole FSM to the current FSM.
