@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <iostream>
 
 #include "fsm.h"
 #include "fsm_builder.h"
@@ -71,10 +72,11 @@ TEST(XGrammarFSMTest, BasicBuildTest) {
   std::cout << "--------- Basic Build Test6 -----------" << std::endl;
   fsm_wse = builder.Build("(())()()").Unwrap();
   test_str = "";
-  EXPECT_FALSE(fsm_wse.AcceptString(test_str));
+  EXPECT_TRUE(fsm_wse.AcceptString(test_str));
   std::cout << "--------- Basic Build Test7 -----------" << std::endl;
   fsm_wse = builder.Build("[abcdabcdxyzxyz]").Unwrap();
   test_str = "a";
+  std::cout << fsm_wse << std::endl;
   EXPECT_TRUE(fsm_wse.AcceptString(test_str));
   EXPECT_FALSE(fsm_wse.AcceptString("e"));
   std::cout << fsm_wse << std::endl;

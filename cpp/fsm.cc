@@ -89,7 +89,8 @@ std::string FSMImplBase<ContainerType, RowType>::PrintEdges() const {
   for (int i = 0; i < int(NumStates()); ++i) {
     result += std::to_string(i) + ": [";
     const auto& edges = edges_[i];
-    for (int j = 0; j < static_cast<int>(edges_.size()); ++j) {
+    for (int j = 0; j < static_cast<int>(edges.size()); ++j) {
+      std::cout << "Printing edge: " << i << " -> " << j << std::endl;
       const auto& edge = edges[j];
       if (edge.min == -1 && edge.max == -1) {
         result += "eps->" + std::to_string(edge.target);
@@ -533,6 +534,8 @@ std::string FSMWithStartEnd::Print() const {
   result += "FSM(num_states=" + std::to_string(NumStates()) + ", start=" + std::to_string(start_) +
             ", end=[";
   for (const auto& end : ends_) {
+    XGRAMMAR_CHECK(end >= 0 && end < NumStates())
+        << "End state " << end << " is out of bounds for FSM with " << NumStates() << " states.";
     result += std::to_string(end) + ", ";
   }
   result += "], edges=" + fsm_.PrintEdges() + ")";

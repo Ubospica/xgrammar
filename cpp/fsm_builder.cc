@@ -198,7 +198,12 @@ Result<FSMWithStartEnd> RegexIR::Build() const {
     }
     fsm_list.push_back(visited.Unwrap());
   }
-  return Result<FSMWithStartEnd>::Ok(FSMWithStartEnd::Concat(fsm_list));
+  if (fsm_list.size() > 1) {
+    return Result<FSMWithStartEnd>::Ok(FSMWithStartEnd::Concat(fsm_list));
+  } else {
+    // If there is only one FSM, return it directly.
+    return Result<FSMWithStartEnd>::Ok(fsm_list[0]);
+  }
 }
 
 Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Leaf& state) const {
@@ -420,7 +425,7 @@ FSMWithStartEnd RegexIR::BuildLeafFSMFromRegex(const std::string& regex) {
     }
     bool has_edge[0x100];
     memset(has_edge, 0, sizeof(has_edge));
-    FSM new_fsm(1);
+    FSM new_fsm(2);
     for (const auto& edge : result->GetEdges(0)) {
       for (int i = edge.min; i <= edge.max; i++) {
         has_edge[i] = true;
