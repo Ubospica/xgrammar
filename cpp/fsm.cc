@@ -291,14 +291,12 @@ FSM FSM::Impl::RebuildWithMapping(std::unordered_map<int, int>& state_mapping, i
 }
 
 CompactFSM FSM::Impl::ToCompact() {
-  CompactFSM result;
+  CSRArray<FSMEdge> edges;
   for (int i = 0; i < static_cast<int>(edges_.size()); ++i) {
-    std::sort(edges_[i].begin(), edges_[i].end(), [](const FSMEdge& a, const FSMEdge& b) {
-      return a.min != b.min ? a.min < b.min : a.max < b.max;
-    });
-    result.edges.Insert(edges_[i]);
+    std::sort(edges_[i].begin(), edges_[i].end());
+    edges.Insert(edges_[i]);
   }
-  return result;
+  return CompactFSM(edges);
 }
 
 /****************** FSM ******************/
@@ -503,7 +501,7 @@ std::size_t MemorySize(const CompactFSM& self) { return MemorySize(*self.pimpl_)
 /****************** FSMWithStartEndBase ******************/
 
 template <typename FSMType>
-bool FSMWithStartEndBase<FSMType>::AcceptsString(const std::string& str) const {
+bool FSMWithStartEndBase<FSMType>::AcceptString(const std::string& str) const {
   std::unordered_set<int> start_states{start_};
   fsm_.GetEpsilonClosure(&start_states);
   std::unordered_set<int> result_states;
@@ -512,6 +510,9 @@ bool FSMWithStartEndBase<FSMType>::AcceptsString(const std::string& str) const {
     fsm_.Advance(
         start_states, static_cast<int>(static_cast<unsigned char>(character)), &result_states, false
     );
+    if (result_states.empty()) {
+      return false;
+    }
     start_states = result_states;
   }
   return std::any_of(start_states.begin(), start_states.end(), [&](int state) {
@@ -584,6 +585,7 @@ FSMWithStartEnd FSMWithStartEnd::Optional() const {
   return FSMWithStartEnd(fsm, start_, ends_);
 }
 
+// TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::Not() const {
   FSMWithStartEnd result;
 
@@ -726,6 +728,7 @@ FSMWithStartEnd FSMWithStartEnd::Concat(const std::vector<FSMWithStartEnd>& fsms
   return FSMWithStartEnd(fsm, start, ends);
 }
 
+// TODO(linzhang)
 Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
     const FSMWithStartEnd& lhs, const FSMWithStartEnd& rhs, const int& num_of_states_limited
 ) {
@@ -880,6 +883,7 @@ FSMWithStartEnd FSMWithStartEnd::RebuildWithMapping(
   return FSMWithStartEnd(new_fsm, new_start, new_ends);
 }
 
+// TODO(linzhang)
 bool FSMWithStartEnd::IsDFA() {
   if (is_dfa) {
     return true;
@@ -944,7 +948,8 @@ bool FSMWithStartEnd::IsDFA() {
   return true;
 }
 
-void FSMWithStartEnd::SimplifyEpsilon() {
+// TODO(linzhang)
+FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon() const {
   if (IsDFA()) {
     return;
   }
@@ -1025,7 +1030,8 @@ void FSMWithStartEnd::SimplifyEpsilon() {
   RebuildWithMapping(new_to_old, cnt);
 }
 
-void FSMWithStartEnd::SimplifyEquivalentStates() {
+// TODO(linzhang)
+FSMWithStartEnd FSMWithStartEnd::MergeEquivalentSuccessors() const {
   bool changed = true;
   UnionFindSet<int> union_find_set;
   while (changed) {
@@ -1150,6 +1156,7 @@ void FSMWithStartEnd::SimplifyEquivalentStates() {
   }
 }
 
+// TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::MinimizeDFA() const {
   FSMWithStartEnd now_fsm;
 
@@ -1353,6 +1360,7 @@ FSMWithStartEnd FSMWithStartEnd::MinimizeDFA() const {
   return new_fsm;
 }
 
+// TODO(linzhang)
 FSMWithStartEnd FSMWithStartEnd::ToDFA() const {
   FSMWithStartEnd dfa;
   dfa.is_dfa = true;
