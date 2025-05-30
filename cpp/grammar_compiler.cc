@@ -467,7 +467,7 @@ void GrammarCompiler::Impl::BuildTagDispatchFSM(
 ) {
   std::vector<std::string> tags;
   std::vector<int32_t> rule_ids;
-  for (int i = 0; i < root_rule_expr.size(); i += 2) {
+  for (int i = 0; i < root_rule_expr.size() - 2; i += 2) {
     auto byte_string_expr = grammar->GetRuleExpr(root_rule_expr[i]);
     std::string tag;
     for (int j = 0; j < byte_string_expr.size(); ++j) {
