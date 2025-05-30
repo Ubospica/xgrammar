@@ -117,7 +117,7 @@ rule2 ::= "dg"
         assert accepted_tokens == expected_accepted_tokens[i]
 
 
-expected_grammar_test_structural_tag = r"""root ::= TagDispatch(("<function=f", trigger_rule_0), ("<function=g", trigger_rule_1))
+expected_grammar_test_structural_tag = r"""root ::= TagDispatch(("<function=f", trigger_rule_0), ("<function=g", trigger_rule_1), exit_triggers=(""), loop_after_dispatch=true)
 trigger_rule_0 ::= (("1>" root_1 "</function>") | ("2>" root_2 "</function>"))
 basic_escape ::= (([\"\\/bfnrt]) | ("u" [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9])) (=(basic_string_sub))
 basic_string_sub ::= (("\"") | ([^\"\\\r\n] basic_string_sub) | ("\\" basic_escape basic_string_sub)) (=([ \n\t]* [,}\]:]))
@@ -264,6 +264,13 @@ def test_structural_tag_mask_gen():
         need_apply = matcher.fill_next_token_bitmask(token_bitmask)
         time_end = time.monotonic_ns()
         print(f"Time to fill_next_token_bitmask: {(time_end - time_start) / 1e3} us")
+        # print("need_apply", need_apply)
+        # print("i", i)
+        # print("dont_apply_mask_indices", dont_apply_mask_indices)
+        # print(
+        #     "get_masked_tokens_from_bitmask",
+        #     _get_masked_tokens_from_bitmask(token_bitmask, tokenizer_info.vocab_size),
+        # )
         assert need_apply == (i not in dont_apply_mask_indices)
 
         # 2. Verify token bitmask correctness
@@ -290,6 +297,9 @@ def test_structural_tag_mask_gen():
     rejected_token_ids = _get_masked_tokens_from_bitmask(token_bitmask, tokenizer_info.vocab_size)
     assert tokenizer.eos_token_id not in rejected_token_ids
 
+
+test_structural_tag_mask_gen()
+exit()
 
 if __name__ == "__main__":
     pytest.main(sys.argv)

@@ -91,7 +91,7 @@ class CSRArray {
   /****************** Accessors ******************/
 
   /*! \brief Get the number of rows in the CSRArray. */
-  int32_t Size() const { return static_cast<int32_t>(indptr_.size()) - 1; }
+  int32_t size() const { return static_cast<int32_t>(indptr_.size()) - 1; }
 
   friend std::size_t MemorySize(const CSRArray<DataType>& arr) {
     return MemorySize(arr.data_) + MemorySize(arr.indptr_);
@@ -165,7 +165,7 @@ class CSRArray {
 
   friend std::ostream& operator<<(std::ostream& os, const CSRArray& csr_array) {
     os << "CSRArray([";
-    for (auto i = 0; i < csr_array.Size(); ++i) {
+    for (auto i = 0; i < csr_array.size(); ++i) {
       if (i > 0) {
         os << ", ";
       }
@@ -184,7 +184,7 @@ class CSRArray {
 
 template <typename DataType>
 inline typename CSRArray<DataType>::Row CSRArray<DataType>::operator[](int32_t i) const {
-  XGRAMMAR_DCHECK(i >= 0 && i < Size()) << "CSRArray index " << i << " is out of bound";
+  XGRAMMAR_DCHECK(i >= 0 && i < size()) << "CSRArray index " << i << " is out of bound";
   int32_t start = indptr_[i];
   int32_t end = indptr_[i + 1];
   return {data_.data() + start, end - start};

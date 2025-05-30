@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -62,25 +63,25 @@ struct FSMEdge {
   }
 
   /*!
+   * \brief Check if the edge is a character range.
+   */
+  bool IsCharRange() const { return min >= 0 && max >= 0; }
+
+  /*!
    * \brief Check if the edge is an epsilon transition.
    */
-  bool IsEpsilon() const;
+  bool IsEpsilon() const { return min == -1 && max == -1; }
 
   /*!
    * \brief Check if the edge is a rule reference.
    */
-  bool IsRuleRef() const;
+  bool IsRuleRef() const { return min == -1 && max >= 0; }
 
   /*!
    * \brief Get the rule id of the edge.
    * \return The rule id of the edge. -1 if the edge is not a rule reference.
    */
-  int GetRefRuleId() const;
-
-  /*!
-   * \brief Check if the edge is a character range.
-   */
-  bool IsCharRange() const;
+  int GetRefRuleId() const { return IsRuleRef() ? max : -1; }
 };
 
 }  // namespace xgrammar
@@ -216,6 +217,14 @@ class FSM {
   void AddEpsilonEdge(int from, int to);
 
   /*!
+   * \brief Add a rule reference edge between states.
+   * \param from The source state.
+   * \param to The target state.
+   * \param rule_id The rule id to reference.
+   */
+  void AddRuleEdge(int from, int to, int16_t rule_id);
+
+  /*!
    * \brief Add a whole FSM to the current FSM.
    * \param fsm The FSM to be added.
    * \param state_mapping The mapping from the state ids of the added FSM to the new ids in the
@@ -273,7 +282,7 @@ class CompactFSM {
 
   const CSRArray<FSMEdge>& GetEdges() const;
 
-  const CSRArray<FSMEdge>::Row GetEdges(int state) const;
+  CSRArray<FSMEdge>::Row GetEdges(int state) const;
 
   std::string PrintEdges() const;
 
@@ -449,6 +458,8 @@ class FSMWithStartEndBase {
   bool is_dfa_ = false;
 };
 
+class CompactFSMWithStartEnd;
+
 /*!
  * \brief FSMWithStartEnd represents a FSM with start and end states.
  * \details It stores a pointer to a FSM, a start state, and a set of end states. Multiple
@@ -562,6 +573,12 @@ class FSMWithStartEnd : public FSMWithStartEndBase<FSM> {
   FSMWithStartEnd RebuildWithMapping(
       std::unordered_map<int, int>& state_mapping, int new_num_states
   );
+
+  /*!
+   * \brief Transform the FSMWithStartEnd to a CompactFSMWithStartEnd.
+   * \return The CompactFSMWithStartEnd.
+   */
+  CompactFSMWithStartEnd ToCompact();
 };
 
 /*!
@@ -588,7 +605,55 @@ class CompactFSMWithStartEnd : public FSMWithStartEndBase<CompactFSM> {
    * \return The memory size of the CompactFSMWithStartEnd.
    */
   friend std::size_t MemorySize(const CompactFSMWithStartEnd& self);
+
+  /*!
+   * \brief Transform the CompactFSMWithStartEnd to a FSMWithStartEnd.
+   * \return The FSMWithStartEnd.
+   */
+  FSMWithStartEnd ToFSM() const;
 };
+
+/****************** FSMWithStartEndBase Template Implementation ******************/
+
+template <typename FSMType>
+inline bool FSMWithStartEndBase<FSMType>::AcceptString(const std::string& str) const {
+  std::unordered_set<int> start_states{start_};
+  fsm_.GetEpsilonClosure(&start_states);
+  std::unordered_set<int> result_states;
+  for (const auto& character : str) {
+    result_states.clear();
+    fsm_.Advance(
+        start_states, static_cast<int>(static_cast<unsigned char>(character)), &result_states, false
+    );
+    if (result_states.empty()) {
+      return false;
+    }
+    start_states = result_states;
+  }
+  return std::any_of(start_states.begin(), start_states.end(), [&](int state) {
+    return ends_.find(state) != ends_.end();
+  });
+}
+
+template <typename FSMType>
+inline void FSMWithStartEndBase<FSMType>::GetReachableStates(std::unordered_set<int>* result
+) const {
+  return fsm_.GetReachableStates({start_}, result);
+}
+
+template <typename FSMType>
+inline bool FSMWithStartEndBase<FSMType>::IsLeaf() const {
+  std::unordered_set<int> reachable_states;
+  GetReachableStates(&reachable_states);
+  for (const auto& state : reachable_states) {
+    for (const auto& edge : fsm_.GetEdges(state)) {
+      if (edge.IsRuleRef()) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 }  // namespace xgrammar
 
