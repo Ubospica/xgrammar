@@ -980,7 +980,47 @@ int32_t EBNFParser::ParseTagDispatch() {
     tag_rule_pairs.push_back({tag_id, rule_id});
   }
 
-  return builder_.AddTagDispatch(tag_rule_pairs);
+  // Exit triggers
+  int32_t exit_triggers_id = -1;
+  if (auto it = args.named_arguments.find("exit_triggers"); it != args.named_arguments.end()) {
+    auto tuple_node = std::get_if<MacroIR::TupleNode>(it->second.get());
+    if (tuple_node == nullptr || tuple_node->elements.empty()) {
+      ReportParseError("Exit triggers must be a non-empty tuple", delta_element);
+    }
+
+    std::vector<int32_t> exit_triggers_str_expr_ids;
+    bool has_empty_exit_triggers = false;
+    for (const auto& element : tuple_node->elements) {
+      auto exit_triggers_node = std::get_if<MacroIR::StringNode>(element.get());
+      if (exit_triggers_node == nullptr) {
+        ReportParseError("Exit trigger must be a string literal", delta_element);
+      }
+      if (exit_triggers_node->value.empty()) {
+        has_empty_exit_triggers = true;
+      } else {
+        exit_triggers_str_expr_ids.push_back(builder_.AddByteString(exit_triggers_node->value));
+      }
+    }
+    if (has_empty_exit_triggers) {
+      exit_triggers_str_expr_ids.insert(exit_triggers_str_expr_ids.begin(), builder_.AddEmptyStr());
+    }
+    exit_triggers_id = builder_.AddChoices(exit_triggers_str_expr_ids);
+  } else {
+    exit_triggers_id = builder_.AddChoices({builder_.AddEmptyStr()});
+  }
+
+  // loop_after_dispatch
+  bool loop_after_dispatch = true;
+  if (auto it = args.named_arguments.find("loop_after_dispatch");
+      it != args.named_arguments.end()) {
+    auto bool_node = std::get_if<MacroIR::BooleanNode>(it->second.get());
+    if (bool_node == nullptr) {
+      ReportParseError("loop_after_dispatch must be a boolean literal", delta_element);
+    }
+    loop_after_dispatch = bool_node->value;
+  }
+
+  return builder_.AddTagDispatch(tag_rule_pairs, exit_triggers_id, loop_after_dispatch);
 }
 
 int32_t EBNFParser::ParseLookaheadAssertion() {
