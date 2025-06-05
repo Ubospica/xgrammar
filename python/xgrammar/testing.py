@@ -183,6 +183,27 @@ def _bool_mask_to_bitmask(bool_mask: torch.Tensor) -> torch.Tensor:
     return bitmask.to(torch.int32)
 
 
+def _get_matcher_from_grammar(grammar: Union[Grammar, str], **kwargs) -> GrammarMatcher:
+    """Create a GrammarMatcher from a grammar. The tokenizer info will be set to an empty
+    TokenizerInfo. The result matcher can only accept strings, and cannot accept tokens.
+
+    Parameters
+    ----------
+    grammar : Union[Grammar, str]
+        The grammar to create the matcher from. Can be either a Grammar object or a string
+        containing EBNF grammar.
+
+    Returns
+    -------
+    matcher : GrammarMatcher
+        The created grammar matcher.
+    """
+    tokenizer_info = TokenizerInfo([])
+    grammar_compiler = GrammarCompiler(tokenizer_info, cache_enabled=False)
+    compiled_grammar = grammar_compiler.compile_grammar(grammar)
+    return GrammarMatcher(compiled_grammar, terminate_without_stop_token=True, **kwargs)
+
+
 def _get_matcher_from_grammar_and_tokenizer_info(
     grammar: Union[Grammar, str], tokenizer_info: Optional[TokenizerInfo] = None, **kwargs
 ) -> GrammarMatcher:
