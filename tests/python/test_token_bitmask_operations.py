@@ -8,11 +8,7 @@ import pytest
 import torch
 
 import xgrammar as xgr
-from xgrammar.testing import (
-    _bool_mask_to_bitmask,
-    _get_masked_tokens_from_bitmask,
-    _is_single_token_bitmask,
-)
+from xgrammar.testing import _get_masked_tokens_from_bitmask, _is_single_token_bitmask
 
 _is_cuda_available = torch.cuda.is_available()
 _is_mps_available = torch.backends.mps.is_available()
@@ -37,7 +33,7 @@ token_mask_sizes = (1024, 32000, 32001, 32011)
 @pytest.mark.parametrize("index", (0, 1))
 def test_get_masked_tokens_from_bitmask(token_mask_size: int, index: int):
     bool_mask = torch.randint(0, 2, (2, token_mask_size), dtype=torch.bool)
-    bitmask = _bool_mask_to_bitmask(bool_mask)
+    bitmask = xgr.bool_tensor_to_bitmask(bool_mask)
     expected = torch.where(~bool_mask[index])[0].tolist()
     assert _get_masked_tokens_from_bitmask(bitmask, token_mask_size, index) == expected
 
@@ -49,13 +45,13 @@ def test_is_single_token_bitmask():
     token_id = 100
 
     bool_mask = torch.zeros(batch, vocab_size, dtype=torch.bool)
-    bitmask = _bool_mask_to_bitmask(bool_mask)
+    bitmask = xgr.bool_tensor_to_bitmask(bool_mask)
     assert _is_single_token_bitmask(bitmask, vocab_size, batch_index) == (False, -1)
     bool_mask[batch_index, token_id] = True
-    bitmask = _bool_mask_to_bitmask(bool_mask)
+    bitmask = xgr.bool_tensor_to_bitmask(bool_mask)
     assert _is_single_token_bitmask(bitmask, vocab_size, batch_index) == (True, token_id)
     bool_mask[batch_index, token_id + 1] = True
-    bitmask = _bool_mask_to_bitmask(bool_mask)
+    bitmask = xgr.bool_tensor_to_bitmask(bool_mask)
     assert _is_single_token_bitmask(bitmask, vocab_size, batch_index) == (False, -1)
 
 
@@ -188,7 +184,7 @@ def test_apply_token_bitmask_inplace_kernel_large(
             bool_mask.scatter_(1, masked_positions, False)
             assert (bool_mask.sum(dim=-1) + masked_cnt == vocab_size).all().item()
 
-    bitmask = _bool_mask_to_bitmask(bool_mask)
+    bitmask = xgr.bool_tensor_to_bitmask(bool_mask)
 
     batch_indices = torch.arange(0, batch_size, stride, dtype=torch.int32)
 
@@ -197,7 +193,7 @@ def test_apply_token_bitmask_inplace_kernel_large(
         logits_expected[batch_indices], ~bool_mask[batch_indices], float("-inf")
     )
 
-    bitmask = _bool_mask_to_bitmask(bool_mask)
+    bitmask = xgr.bool_tensor_to_bitmask(bool_mask)
     if impl in ["cuda", "triton", "torch_compile"]:
         logits_gpu = logits.to("cuda")
         bitmask_gpu = bitmask.to("cuda")
@@ -299,7 +295,7 @@ def test_apply_token_bitmask_inplace_indices(
 
     logits = torch.ones(logits_batch_size, vocab_size, dtype=torch.float32)
     bool_mask = torch.zeros(bitmask_batch_size, vocab_size, dtype=torch.bool)
-    bitmask = _bool_mask_to_bitmask(bool_mask)
+    bitmask = xgr.bool_tensor_to_bitmask(bool_mask)
 
     logits_expected = logits.clone()
     logits_expected[indices] = torch.masked_fill(
@@ -315,6 +311,134 @@ def test_apply_token_bitmask_inplace_indices(
         assert impl == "cpu"
         kernel(logits, bitmask, indices=indices)
         torch.testing.assert_close(logits, logits_expected)
+
+
+def test_bitmask_to_bool_tensor():
+    bitmask = torch.tensor([0b10101010101010101010101010101010, 0b101], dtype=torch.int64)
+    bitmask = bitmask.to(torch.int32)
+    bool_tensor = xgr.bitmask_to_bool_tensor(bitmask, 35)
+    assert bool_tensor.shape == (35,)
+    assert bool_tensor.dtype == torch.bool
+    assert bool_tensor.tolist() == [
+        # fmt: off
+        False, True, False, True, False, True, False, True,
+        False, True, False, True, False, True, False, True,
+        False, True, False, True, False, True, False, True,
+        False, True, False, True, False, True, False, True,
+        True, False, True
+        # fmt: on
+    ]
+    bitmask_recovered = xgr.bool_tensor_to_bitmask(bool_tensor)
+    assert bitmask_recovered.shape == (2,)
+    assert bitmask_recovered.dtype == torch.int32
+    assert torch.all(bitmask_recovered == bitmask)
+
+
+def test_bitmask_to_bool_tensor_single_batch():
+    bitmask = torch.tensor([[0b10101010101010101010101010101010, 0b101]], dtype=torch.int64)
+    bitmask = bitmask.to(torch.int32)
+    bool_tensor = xgr.bitmask_to_bool_tensor(bitmask, 35)
+    assert bool_tensor.shape == (1, 35)
+    assert bool_tensor.dtype == torch.bool
+    assert bool_tensor.tolist() == [
+        [
+            # fmt: off
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            True, False, True
+            # fmt: on
+        ]
+    ]
+    bitmask_recovered = xgr.bool_tensor_to_bitmask(bool_tensor)
+    assert bitmask_recovered.shape == (1, 2)
+    assert bitmask_recovered.dtype == torch.int32
+    assert torch.all(bitmask_recovered == bitmask)
+
+
+def test_bitmask_to_bool_tensor_batch():
+    bitmask = torch.tensor(
+        [
+            # fmt: off
+            [0b10101010101010101010101010101010, 0b101],
+            [0b01010101010101010101010101010101, 0],
+            # fmt: on
+        ],
+        dtype=torch.int64,
+    )
+    bitmask = bitmask.to(torch.int32)
+    bool_tensor = xgr.bitmask_to_bool_tensor(bitmask, 35)
+    assert bool_tensor.shape == (2, 35)
+    assert bool_tensor.dtype == torch.bool
+    assert bool_tensor.tolist() == [
+        [
+            # fmt: off
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            True, False, True
+            # fmt: on
+        ],
+        [
+            # fmt: off
+            True, False, True, False, True, False, True, False,
+            True, False, True, False, True, False, True, False,
+            True, False, True, False, True, False, True, False,
+            True, False, True, False, True, False, True, False,
+            False, False, False
+            # fmt: on
+        ],
+    ]
+    bitmask_recovered = xgr.bool_tensor_to_bitmask(bool_tensor)
+    assert bitmask_recovered.shape == (2, 2)
+    assert bitmask_recovered.dtype == torch.int32
+    assert torch.all(bitmask_recovered == bitmask)
+
+
+def test_bitmask_to_bool_tensor_batch_cuda():
+    bitmask = torch.tensor(
+        [
+            # fmt: off
+            [0b10101010101010101010101010101010, 0b101],
+            [0b01010101010101010101010101010101, 0],
+            # fmt: on
+        ],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    bitmask = bitmask.to(torch.int32)
+    bool_tensor = xgr.bitmask_to_bool_tensor(bitmask, 35)
+    assert bool_tensor.device.type == "cuda"
+    assert bool_tensor.shape == (2, 35)
+    assert bool_tensor.dtype == torch.bool
+    assert bool_tensor.tolist() == [
+        [
+            # fmt: off
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            False, True, False, True, False, True, False, True,
+            True, False, True
+            # fmt: on
+        ],
+        [
+            # fmt: off
+            True, False, True, False, True, False, True, False,
+            True, False, True, False, True, False, True, False,
+            True, False, True, False, True, False, True, False,
+            True, False, True, False, True, False, True, False,
+            False, False, False
+            # fmt: on
+        ],
+    ]
+    bitmask_recovered = xgr.bool_tensor_to_bitmask(bool_tensor)
+    assert bitmask_recovered.device.type == "cuda"
+    assert bitmask_recovered.shape == (2, 2)
+    print(bitmask_recovered.dtype)
+    assert bitmask_recovered.dtype == torch.int32
+    assert torch.all(bitmask_recovered == bitmask)
 
 
 if __name__ == "__main__":

@@ -18,8 +18,8 @@ import argparse
 import torch
 from triton.testing import do_bench
 
+import xgrammar as xgr
 from xgrammar.kernels import apply_token_bitmask_inplace_kernels
-from xgrammar.testing import _bool_mask_to_bitmask
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -54,7 +54,7 @@ if __name__ == "__main__":
             )
             bool_mask.scatter_(1, masked_positions, False)
             assert (bool_mask.sum(dim=-1) + masked_cnt == vocab_size).all().item()
-    bitmask = _bool_mask_to_bitmask(bool_mask)
+    bitmask = xgr.bool_tensor_to_bitmask(bool_mask)
 
     masked_batch_ids = torch.arange(0, batch_size, stride, dtype=torch.int32, device="cuda")
     kwargs = {} if stride == 1 else {"indices": masked_batch_ids}
