@@ -514,10 +514,6 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
   // {-1} means the universal set, i.e. all tokens initially
   tmp_rejected_indices_.assign({-1});
 
-  // If there is a stack top that is a tag dispatch, we allow special tokens to be accepted
-  // because in function calling cases, only the part within the tag is constrained
-  bool have_tag_dispatch = false;
-
   if (debug_print) {
     XGRAMMAR_LOG(INFO) << "FillNextTokenBitmask: index=" << index
                        << ", num of stacks=" << latest_stack_tops.size();
@@ -528,15 +524,14 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
   for (auto top : latest_stack_tops) {
     ++stack_top_cnt;
     auto cur_stack_element = persistent_stack_[top];
-    auto cur_sequence = grammar_->GetRuleExpr(cur_stack_element.sequence_id);
-    if (cur_sequence.type != RuleExprType::kTagDispatch &&
-        cur_stack_element.parent_id == StackElement::kNoParent &&
-        cur_stack_element.element_id == cur_sequence.size()) {
-      continue;
-    }
-
-    if (cur_sequence.type == RuleExprType::kTagDispatch) {
-      have_tag_dispatch = true;
+    if (cur_stack_element.rule_id == -1 ||
+        !grammar_->per_rule_fsms[cur_stack_element.rule_id].has_value()) {
+      auto cur_sequence = grammar_->GetRuleExpr(cur_stack_element.sequence_id);
+      XGRAMMAR_DCHECK(cur_sequence.type == RuleExprType::kSequence);
+      if (cur_stack_element.parent_id == StackElement::kNoParent &&
+          cur_stack_element.element_id == cur_sequence.size()) {
+        continue;
+      }
     }
 
     auto adaptive_token_mask_it = adaptive_token_mask_cache.find(cur_stack_element);
@@ -637,11 +632,7 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
   // Finally update the rejected_ids bitset
   bool can_reach_end = CanReachEnd();
   SetTokenBitmask(
-      bitmask_data_ptr,
-      tmp_accepted_bitset_,
-      tmp_rejected_indices_,
-      can_reach_end,
-      have_tag_dispatch
+      bitmask_data_ptr, tmp_accepted_bitset_, tmp_rejected_indices_, can_reach_end, false
   );
   if (debug_print) {
     XGRAMMAR_LOG(INFO) << "Filled bitmask: " << PrintBitmask(bitmask_data_ptr, tokenizer_info_);
@@ -666,13 +657,15 @@ std::string GrammarMatcher::Impl::FindJumpForwardString() {
     int next_char = -1;
     for (auto stack_top : stack_tops) {
       auto stack_element = persistent_stack_[stack_top];
-      auto cur_sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
 
       // We cannot deduce the next char for tag dispatch
-      if (cur_sequence.type == RuleExprType::kTagDispatch) {
+      if (stack_element.rule_id != -1 &&
+          grammar_->per_rule_fsms[stack_element.rule_id].has_value()) {
         can_find_next_char = false;
         continue;
       }
+
+      auto cur_sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
 
       // The state comes to the end of the grammar
       if (stack_element.parent_id == StackElement::kNoParent &&

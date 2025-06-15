@@ -13,10 +13,14 @@
 #include <unordered_set>
 #include <vector>
 
+#include "fsm_builder.h"
 #include "grammar_data_structure.h"
 #include "support/encoding.h"
 
 namespace xgrammar {
+
+using RuleExpr = Grammar::Impl::RuleExpr;
+using RuleExprType = Grammar::Impl::RuleExprType;
 
 /*************************** Impl of grammar functors ***************************/
 
@@ -121,10 +125,13 @@ class StructureNormalizerSub : public GrammarMutator {
         return builder_.AddSequence(VisitSequence_(assertion_expr));
       case RuleExprType::kChoices:
         XGRAMMAR_LOG(FATAL) << "Choices in lookahead assertion are not supported yet";
+        XGRAMMAR_UNREACHABLE();
       case RuleExprType::kEmptyStr:
         XGRAMMAR_LOG(FATAL) << "Empty string should not be in lookahead assertion";
+        XGRAMMAR_UNREACHABLE();
       case RuleExprType::kTagDispatch:
         XGRAMMAR_LOG(FATAL) << "TagDispatch should not be in lookahead assertion";
+        XGRAMMAR_UNREACHABLE();
       case RuleExprType::kByteString:
       case RuleExprType::kCharacterClass:
       case RuleExprType::kCharacterClassStar:
@@ -133,6 +140,7 @@ class StructureNormalizerSub : public GrammarMutator {
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected lookahead assertion type: "
                             << static_cast<int>(assertion_expr.type);
+        XGRAMMAR_UNREACHABLE();
     }
   }
 
@@ -154,6 +162,7 @@ class StructureNormalizerSub : public GrammarMutator {
         return VisitTagDispatch(rule_expr);
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected sequence type: " << static_cast<int>(rule_expr.type);
+        XGRAMMAR_UNREACHABLE();
     }
   }
 
@@ -710,7 +719,10 @@ class GrammarUnionFunctorImpl : public SubGrammarCombiner {
   }
 
   // Avoid hiding the original Apply(const Grammar&)
-  Grammar Apply(const Grammar& grammar) final { XGRAMMAR_LOG(FATAL) << "Should not be called"; }
+  Grammar Apply(const Grammar& grammar) final {
+    XGRAMMAR_LOG(FATAL) << "Should not be called";
+    XGRAMMAR_UNREACHABLE();
+  }
 };
 
 /*!
@@ -744,7 +756,10 @@ class GrammarConcatFunctorImpl : public SubGrammarCombiner {
   }
 
   // Avoid hiding the original Apply(const Grammar&)
-  Grammar Apply(const Grammar& grammar) final { XGRAMMAR_LOG(FATAL) << "Should not be called"; }
+  Grammar Apply(const Grammar& grammar) final {
+    XGRAMMAR_LOG(FATAL) << "Should not be called";
+    XGRAMMAR_UNREACHABLE();
+  }
 };
 
 /*!
@@ -819,7 +834,6 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
       auto rule = base_grammar_->GetRule(i);
       auto rule_expr = base_grammar_->GetRuleExpr(rule.body_expr_id);
       if (rule_expr.type == RuleExprType::kTagDispatch) {
-        empty_rule_id_set->insert(i);
         continue;
       }
 
@@ -967,7 +981,44 @@ class StructuralTagGrammarCreatorImpl : public SubGrammarCombiner {
   }
 
   // Avoid hiding the original Apply(const Grammar&)
-  Grammar Apply(const Grammar& grammar) final { XGRAMMAR_LOG(FATAL) << "Should not be called"; }
+  Grammar Apply(const Grammar& grammar) final {
+    XGRAMMAR_LOG(FATAL) << "Should not be called";
+    XGRAMMAR_UNREACHABLE();
+  }
+};
+
+class GrammarFSMBuilderImpl {
+ public:
+  void Apply(Grammar* grammar) {
+    FSM complete_fsm;
+    std::vector<std::optional<FSMWithStartEnd>> per_rule_fsms((*grammar)->NumRules());
+    std::unordered_map<int, int> state_mapping;
+
+    for (int i = 0; i < (*grammar)->NumRules(); ++i) {
+      auto rule = (*grammar)->GetRule(i);
+      auto rule_expr = (*grammar)->GetRuleExpr(rule.body_expr_id);
+      if (rule_expr.type == RuleExprType::kTagDispatch) {
+        auto rule_fsm = TagDispatchFSMBuilder::Build(rule_expr, *grammar);
+        XGRAMMAR_CHECK(rule_fsm.has_value()) << "Failed to build tag dispatch fsm for rule " << i;
+        per_rule_fsms[i] = rule_fsm->AddToCompleteFSM(&complete_fsm, &state_mapping);
+      }
+    }
+
+    // Compress to compact fsm
+    CompactFSM compact_complete_fsm = complete_fsm.ToCompact();
+    std::vector<std::optional<CompactFSMWithStartEnd>> compact_per_rule_fsms((*grammar)->NumRules()
+    );
+    for (int i = 0; i < (*grammar)->NumRules(); ++i) {
+      if (per_rule_fsms[i]) {
+        compact_per_rule_fsms[i] = CompactFSMWithStartEnd(
+            compact_complete_fsm, per_rule_fsms[i]->GetStart(), per_rule_fsms[i]->GetEnds()
+        );
+      }
+    }
+
+    (*grammar)->complete_fsm = std::move(compact_complete_fsm);
+    (*grammar)->per_rule_fsms = std::move(compact_per_rule_fsms);
+  }
 };
 
 /*************************** Forward grammar functors to their impl ***************************/
@@ -1012,5 +1063,7 @@ Grammar StructureNormalizer::Apply(const Grammar& grammar) {
 Grammar LookaheadAssertionAnalyzer::Apply(const Grammar& grammar) {
   return LookaheadAssertionAnalyzerImpl().Apply(grammar);
 }
+
+void GrammarFSMBuilder::Apply(Grammar* grammar) { GrammarFSMBuilderImpl().Apply(grammar); }
 
 }  // namespace xgrammar

@@ -44,6 +44,7 @@ std::string GrammarPrinter::PrintRuleExpr(const RuleExpr& rule_expr) {
       return PrintTagDispatch(rule_expr);
     default:
       XGRAMMAR_LOG(FATAL) << "Unexpected RuleExpr type: " << static_cast<int>(rule_expr.type);
+      XGRAMMAR_UNREACHABLE();
   }
 }
 
