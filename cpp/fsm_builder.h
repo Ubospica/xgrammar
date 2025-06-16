@@ -41,13 +41,15 @@ class TrieFSMBuilder {
    * \param allow_overlap Whether to allow overlap between patterns (one being a prefix of the
    * other). It does not allow empty patterns either. If false and there is overlap, will return
    * std::nullopt.
+   * \param add_back_edges Whether to add back edges to the FSM. This complements the trie to an
+   * Aho-Corasick automaton.
    * \return If success, the FSM with start and end states. Otherwise, std::nullopt.
    */
   static std::optional<FSMWithStartEnd> Build(
       const std::vector<std::string>& patterns,
       std::vector<int32_t>* end_states = nullptr,
       bool allow_overlap = true,
-      bool add_back_edges = true
+      bool add_back_edges = false
   );
 };
 
