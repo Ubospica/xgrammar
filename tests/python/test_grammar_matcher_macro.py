@@ -48,25 +48,6 @@ rule2 ::= "efg" [t]*
 
 
 def test_exit_triggers():
-    grammar_str = """root ::= root1
-root1 ::= TagDispatch(("tag1", rule1), ("tag2", rule2), exit_triggers=("tag3", "ll"))
-rule1 ::= "abcd" [p]*
-rule2 ::= "efg" [t]*
-"""
-
-    grammar = xgr.Grammar.from_ebnf(grammar_str)
-    print(grammar)
-    assert _is_grammar_accept_string(grammar, "tag1abcdll")
-    assert _is_grammar_accept_string(grammar, "tag1abcdtag3")
-    assert _is_grammar_accept_string(grammar, "tag1abcd", require_termination=False)
-    assert _is_grammar_accept_string(grammar, "tag2efgttt", require_termination=False)
-    assert not _is_grammar_accept_string(grammar, "tag1abcd")
-    assert not _is_grammar_accept_string(grammar, "tag2efgttt")
-    assert not _is_grammar_accept_string(grammar, "tag1abce")
-    assert not _is_grammar_accept_string(grammar, "tag1abcdlltag3", require_termination=False)
-
-
-def test_exit_triggers():
     grammar_str = """root ::= root1 "w"
 root1 ::= TagDispatch(("tag1", rule1), ("tag2", rule2), exit_triggers=("tag3", "ll"))
 rule1 ::= "abcd" [p]*
