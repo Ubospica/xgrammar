@@ -14,6 +14,9 @@
 #include <optional>
 #include <tuple>
 #include <type_traits>
+#include <unordered_set>
+#include <utility>
+#include <variant>
 
 #include "logging.h"
 
@@ -45,6 +48,13 @@ inline uint32_t HashCombine(Args... args) {
 #define XGRAMMAR_UNREACHABLE()
 #endif
 
+/******************* MemorySize Procotol *******************/
+
+template <typename T, typename = std::enable_if_t<std::is_trivially_copyable_v<T>>>
+inline constexpr std::size_t MemorySize(const T& value) {
+  return 0;
+}
+
 /*!
  * \brief Compute the memory consumption in heap memory. This function is specialized for
  * containers.
@@ -52,12 +62,18 @@ inline uint32_t HashCombine(Args... args) {
  * \param container The container.
  * \return The memory consumption in heap memory of the container.
  */
-template <typename Container>
-inline constexpr std::size_t MemorySize(const Container& container) {
-  using Element_t = std::decay_t<decltype(*std::begin(container))>;
-  static_assert(std::is_trivially_copyable_v<Element_t>, "Element type must be trivial");
-  static_assert(!std::is_trivially_copyable_v<Container>, "Container type must not be trivial");
-  return sizeof(Element_t) * std::size(container);
+template <typename T>
+inline constexpr std::size_t MemorySize(const std::vector<T>& container) {
+  std::size_t result = sizeof(T) * container.size();
+  for (const auto& item : container) {
+    result += MemorySize(item);
+  }
+  return result;
+}
+
+template <typename T>
+inline constexpr std::size_t MemorySize(const std::unordered_set<T>& container) {
+  return sizeof(T) * container.size();
 }
 
 /*!
@@ -67,93 +83,137 @@ inline constexpr std::size_t MemorySize(const Container& container) {
  * \param range The optional.
  * \return The memory consumption in heap memory of the optional.
  */
-template <typename Tp>
-inline constexpr std::size_t MemorySize(const std::optional<Tp>& range) {
-  return range.has_value() ? MemorySize(*range) : 0;
+template <typename T>
+inline constexpr std::size_t MemorySize(const std::optional<T>& optional_value) {
+  return optional_value.has_value() ? MemorySize(*optional_value) : 0;
 }
+
+/*!
+ * \brief An error class that contains a type. The type can be an enum.
+ */
+template <typename T>
+class TypedError : public std::runtime_error {
+ public:
+  explicit TypedError(T type, const std::string& msg) : std::runtime_error(msg), type_(type) {}
+  const T& Type() const noexcept { return type_; }
+
+ private:
+  T type_;
+};
 
 /*!
  * \brief A Result type similar to Rust's Result, representing either success (Ok) or failure (Err).
  * \tparam T The type of the success value
  */
-template <typename T>
+template <typename T, typename E = std::runtime_error>
 class Result {
- public:
-  /*! \brief Construct a success Result */
-  static Result Ok(T value) { return Result(std::move(value), nullptr); }
+ private:
+  static_assert(!std::is_same_v<T, E>, "T and E cannot be the same type");
 
-  /*! \brief Construct an error Result */
-  static Result Err(std::shared_ptr<Error> error) { return Result(std::nullopt, std::move(error)); }
+ public:
+  /*! \brief Construct a success Result with a const reference */
+  static Result Ok(const T& value) { return Result(value); }
+  /*! \brief Construct a success Result with a move */
+  static Result Ok(T&& value) { return Result(std::move(value)); }
+
+  /*! \brief Construct an error Result with a const reference */
+  static Result Err(const E& error) { return Result(error); }
+  /*! \brief Construct an error Result with a move */
+  static Result Err(E&& error) { return Result(std::move(error)); }
+  /*! \brief Forward constructor for error type */
+  template <typename... Args>
+  static Result Err(Args&&... args) {
+    return Result(E(std::forward<Args>(args)...));
+  }
 
   /*! \brief Check if Result contains success value */
-  bool IsOk() const { return value_.has_value(); }
+  bool IsOk() const { return std::holds_alternative<T>(data_); }
 
   /*! \brief Check if Result contains error */
-  bool IsErr() const { return error_ != nullptr; }
+  bool IsErr() const { return std::holds_alternative<E>(data_); }
 
-  /*! \brief Get the success value, or terminate if this is an error */
+  /*! \brief Get the success value, or throw an exception if this is an error */
+  T& Unwrap() & {
+    if (!IsOk()) {
+      XGRAMMAR_LOG(FATAL) << "Called Unwrap() on an Err value";
+      XGRAMMAR_UNREACHABLE();
+    }
+    return std::get<T>(data_);
+  }
+
+  /*! \brief Get the success value, or throw an exception if this is an error */
   const T& Unwrap() const& {
     if (!IsOk()) {
       XGRAMMAR_LOG(FATAL) << "Called Unwrap() on an Err value";
       XGRAMMAR_UNREACHABLE();
     }
-    return *value_;
+    return std::get<T>(data_);
   }
 
-  /*! \brief Get the success value, or terminate if this is an error */
+  /*! \brief Get the success value, or throw an exception if this is an error */
   T&& Unwrap() && {
     if (!IsOk()) {
       XGRAMMAR_LOG(FATAL) << "Called Unwrap() on an Err value";
       XGRAMMAR_UNREACHABLE();
     }
-    return std::move(*value_);
+    return std::move(std::get<T>(data_));
   }
 
-  /*! \brief Get the error value as a pointer, or terminate if this is not an error */
-  std::shared_ptr<Error> UnwrapErr() const& {
+  /*! \brief Get the error value, or throw an exception if this is a success */
+  E& UnwrapErr() & {
+    if (IsOk()) {
+      XGRAMMAR_LOG(FATAL) << "Called UnwrapErr() on an Ok value";
+      XGRAMMAR_UNREACHABLE();
+    }
+    return std::get<E>(data_);
+  }
+
+  /*! \brief Get the error value, or throw an exception if this is a success */
+  const E& UnwrapErr() const& {
     if (!IsErr()) {
       XGRAMMAR_LOG(FATAL) << "Called UnwrapErr() on an Ok value";
       XGRAMMAR_UNREACHABLE();
     }
-    return error_;
+    return std::get<E>(data_);
   }
 
-  /*! \brief Get the error value as a pointer, or terminate if this is not an error */
-  std::shared_ptr<Error> UnwrapErr() && {
+  /*! \brief Get the error value, or throw an exception if this is a success */
+  E&& UnwrapErr() && {
     if (!IsErr()) {
       XGRAMMAR_LOG(FATAL) << "Called UnwrapErr() on an Ok value";
       XGRAMMAR_UNREACHABLE();
     }
-    return std::move(error_);
+    return std::move(std::get<E>(data_));
   }
 
   /*! \brief Get the success value if present, otherwise return the provided default */
-  T UnwrapOr(T default_value) const { return IsOk() ? *value_ : default_value; }
+  T UnwrapOr(T default_value) const { return IsOk() ? std::get<T>(data_) : default_value; }
 
   /*! \brief Map success value to new type using provided function */
   template <typename U, typename F>
   Result<U> Map(F&& f) const {
     if (IsOk()) {
-      return Result<U>::Ok(f(*value_));
+      return Result<U, E>::Ok(f(std::get<T>(data_)));
     }
-    return Result<U>::Err(error_);
+    return Result<U, E>::Err(std::get<E>(data_));
   }
 
   /*! \brief Map error value to new type using provided function */
-  template <typename F>
-  Result<T> MapErr(F&& f) const {
+  template <typename V, typename F>
+  Result<T, V> MapErr(F&& f) const {
     if (IsErr()) {
-      return Result<T>::Err(f(error_));
+      return Result<T, V>::Err(f(std::get<E>(data_)));
     }
-    return Result<T>::Ok(*value_);
+    return Result<T, V>::Ok(std::get<T>(data_));
   }
 
  private:
-  Result(std::optional<T> value, std::shared_ptr<Error> error)
-      : value_(std::move(value)), error_(std::move(error)) {}
+  explicit Result(const T& value) : data_(value) {}
+  explicit Result(T&& value) : data_(std::move(value)) {}
+  explicit Result(const E& err) : data_(err) {}
+  explicit Result(E&& err) : data_(std::move(err)) {}
 
-  std::optional<T> value_;
-  std::shared_ptr<Error> error_;
+  std::variant<T, E> data_;
 };
 
 }  // namespace xgrammar

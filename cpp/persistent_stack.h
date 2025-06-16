@@ -60,8 +60,6 @@ struct StackElement {
   }
 
   inline constexpr static int32_t kUnexpandedRuleStartSequenceId = 128000;
-
-  inline constexpr static int32_t kDispatchedTagDispatchElementId = -1;
 };
 
 /*! \brief A special value for invalid StackElement. */
@@ -333,12 +331,12 @@ inline bool PersistentStack::IsEndOfGrammar(const StackElement& stack_element) c
   if (stack_element.parent_id != StackElement::kNoParent) {
     return false;
   }
-  auto seq_expr = grammar_->GetRuleExpr(stack_element.sequence_id);
-  if (seq_expr.type == Grammar::Impl::RuleExprType::kTagDispatch) {
-    return stack_element.element_id != -1;
-  } else {
-    return seq_expr.size() == stack_element.element_id;
+  if (stack_element.rule_id != -1 && grammar_->per_rule_fsms[stack_element.rule_id].has_value()) {
+    return grammar_->per_rule_fsms[stack_element.rule_id]->IsEndState(stack_element.element_id);
   }
+  auto seq_expr = grammar_->GetRuleExpr(stack_element.sequence_id);
+  XGRAMMAR_DCHECK(seq_expr.type == Grammar::Impl::RuleExprType::kSequence);
+  return seq_expr.size() == stack_element.element_id;
 }
 
 inline std::string PersistentStack::PrintStackElement(int32_t id) const {
@@ -352,19 +350,22 @@ inline std::string PersistentStack::PrintStackElement(const StackElement& stack_
     ss << ": " << grammar_->GetRule(stack_element.rule_id).name;
   }
 
-  if (stack_element.sequence_id == StackElement::kUnexpandedRuleStartSequenceId) {
-    ss << ", unexpanded rule start sequence";
-  } else {
-    ss << ", sequence " << stack_element.sequence_id << ": "
-       << GrammarPrinter(grammar_).PrintRuleExpr(stack_element.sequence_id);
-
-    if (stack_element.sequence_id == StackElement::kDispatchedTagDispatchElementId) {
-      ss << ", dispatched tag dispatch";
+  if (stack_element.rule_id != -1 && grammar_->per_rule_fsms[stack_element.rule_id].has_value()) {
+    ss << ", rule_fsm: " << grammar_->per_rule_fsms[stack_element.rule_id]->ToString();
+    if (stack_element.sequence_id == StackElement::kUnexpandedRuleStartSequenceId) {
+      ss << ", unexpanded rule start";
     } else {
-      ss << ", element id: " << stack_element.element_id;
+      ss << ", node: " << stack_element.element_id;
+    }
+  } else {
+    if (stack_element.sequence_id == StackElement::kUnexpandedRuleStartSequenceId) {
+      ss << ", unexpanded rule start";
+    } else {
       auto sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
-      if (sequence.type != Grammar::Impl::RuleExprType::kTagDispatch &&
-          stack_element.element_id < static_cast<int32_t>(sequence.size())) {
+      ss << ", sequence " << stack_element.sequence_id << ": "
+         << GrammarPrinter(grammar_).PrintRuleExpr(sequence);
+      ss << ", element id: " << stack_element.element_id;
+      if (stack_element.element_id < static_cast<int32_t>(sequence.size())) {
         auto element = grammar_->GetRuleExpr(sequence[stack_element.element_id]);
         if (element.type == Grammar::Impl::RuleExprType::kByteString) {
           ss << ", element in string: " << stack_element.element_in_string;

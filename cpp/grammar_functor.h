@@ -127,6 +127,7 @@ class GrammarFunctor {
         return VisitTagDispatch(rule_expr);
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected sequence type: " << static_cast<int>(rule_expr.type);
+        XGRAMMAR_UNREACHABLE();
     }
   }
 
@@ -331,6 +332,14 @@ class DeadCodeEliminator {
 class LookaheadAssertionAnalyzer {
  public:
   static Grammar Apply(const Grammar& grammar);
+};
+
+/*!
+ * \brief Build the FSMs of the grammar.
+ */
+class GrammarFSMBuilder {
+ public:
+  static void Apply(Grammar* grammar);
 };
 
 }  // namespace xgrammar

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "fsm.h"
+#include "grammar_data_structure.h"
 #include "support/utils.h"
 
 namespace xgrammar {
@@ -19,14 +20,12 @@ namespace xgrammar {
  */
 class RegexFSMBuilder {
  public:
-  RegexFSMBuilder() = default;
-
   /*!
    * \brief Converts a regex string to a FSM.
    * \param regex The regex string.
    * \return The FSM with start and end states.
    */
-  Result<FSMWithStartEnd> Build(const std::string& regex);
+  static Result<FSMWithStartEnd> Build(const std::string& regex);
 };
 
 /*!
@@ -34,17 +33,51 @@ class RegexFSMBuilder {
  */
 class TrieFSMBuilder {
  public:
-  TrieFSMBuilder() = default;
-
   /*!
    * \brief Build a trie-based FSM from a list of patterns.
    * \param patterns The patterns to be built.
    * \param end_states The end states of the FSM. This is the terminal state of each pattern and
    * the order follows the order of patterns.
+   * \param allow_overlap Whether to allow overlap between patterns (one being a prefix of the
+   * other). It does not allow empty patterns either. If false and there is overlap, will return
+   * std::nullopt.
+   * \param add_back_edges Whether to add back edges to the FSM. This complements the trie to an
+   * Aho-Corasick automaton.
+   * \return If success, the FSM with start and end states. Otherwise, std::nullopt.
+   */
+  static std::optional<FSMWithStartEnd> Build(
+      const std::vector<std::string>& patterns,
+      std::vector<int32_t>* end_states = nullptr,
+      bool allow_overlap = true,
+      bool add_back_edges = false
+  );
+};
+
+class TagDispatchFSMBuilder {
+ public:
+  /*!
+   * \brief Build a FSM from a tag dispatch rule.
+   * \param rule_expr The rule expr.
+   * \param grammar The grammar that contains the rule expr.
    * \return The FSM with start and end states.
    */
-  FSMWithStartEnd Build(
-      const std::vector<std::string>& patterns, std::vector<int32_t>* end_states = nullptr
+  static std::optional<FSMWithStartEnd> Build(
+      const Grammar::Impl::RuleExpr& rule_expr, const Grammar& grammar
+  );
+
+  /*!
+   * \brief Build a FSM from a tag dispatch rule. Mainly for test purposes.
+   * \param tag_dispatch_rules The tag dispatch rules.
+   * \param stop_strings The stop strings.
+   * \param loop_after_dispatch Whether to loop after dispatch.
+   * \param accept_eos Whether to accept EOS.
+   * \return The FSM with start and end states.
+   */
+  static std::optional<FSMWithStartEnd> Build(
+      const std::vector<std::pair<std::string, int>>& tag_dispatch_rules,
+      const std::vector<std::string>& stop_strings,
+      bool loop_after_dispatch,
+      bool accept_eos
   );
 };
 

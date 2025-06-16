@@ -78,7 +78,7 @@ class Grammar::Impl {
   };
 
   /*! \brief Get the number of rules. */
-  size_t NumRules() const { return rules_.size(); }
+  int32_t NumRules() const { return rules_.size(); }
   /*! \brief Get the rule with the given id. */
   const Rule& GetRule(int32_t rule_id) const {
     XGRAMMAR_DCHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(rules_.size()))
@@ -135,7 +135,7 @@ class Grammar::Impl {
   };
 
   /*! \brief Get the number of rule_exprs. */
-  size_t NumRuleExprs() const { return rule_expr_indptr_.size(); }
+  int32_t NumRuleExprs() const { return rule_expr_indptr_.size(); }
   /*! \brief Get the rule_expr with the given id. */
   RuleExpr GetRuleExpr(int32_t rule_expr_id) const {
     XGRAMMAR_DCHECK(
@@ -148,6 +148,17 @@ class Grammar::Impl {
     auto data_ptr = start_ptr + 2;
     auto data_len = start_ptr[1];
     return {type, data_ptr, data_len};
+  }
+
+  /*! \brief Get the string of the byte string rule expr. */
+  std::string GetByteString(int32_t rule_expr_id) const {
+    auto rule_expr = GetRuleExpr(rule_expr_id);
+    std::string str;
+    str.reserve(rule_expr.size());
+    for (int i = 0; i < rule_expr.size(); ++i) {
+      str.push_back(static_cast<char>(rule_expr[i]));
+    }
+    return str;
   }
 
  private:
@@ -164,12 +175,15 @@ class Grammar::Impl {
  public:
   /******************* Aux information for matching *******************/
 
-  /*! \brief The fsm for the root tag dispatch rule. If the grammar does not have a root tag
-   * dispatch rule, it is not built. */
-  std::optional<CompactFSMWithStartEnd> root_tag_dispatch_fsm = std::nullopt;
+  /*! \brief The complete FSM for the grammar. It contains the FSMs for all rules. */
+  CompactFSM complete_fsm{NullObj{}};
 
-  /*! \brief The map from the end nodes of the root tag dispatch fsm to the rule ids. */
-  std::unordered_map<int32_t, int32_t> tag_dispatch_end_node_to_rule_id;
+  /*!
+   * \brief The FSM for each rule.
+   * \details The FSM will be used in matching if it exists. If it does not exist (std::nullopt),
+   * the rule will be used in matching, and the rule's body must be a kChoices expr.
+   */
+  std::vector<std::optional<CompactFSMWithStartEnd>> per_rule_fsms;
 
   /*! \brief The ids of the rules that are allowed to be empty. */
   std::vector<int32_t> allow_empty_rule_ids;
