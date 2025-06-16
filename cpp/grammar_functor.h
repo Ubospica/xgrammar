@@ -167,23 +167,10 @@ class GrammarFunctor {
 
   virtual T VisitTagDispatch(const RuleExpr& rule_expr) {
     if constexpr (std::is_same<T, void>::value) {
-      for (int i = 0; i < rule_expr.size() - 2; i += 2) {
-        VisitExpr(rule_expr[i]);
-      }
+      return;
     } else if constexpr (std::is_same<T, int32_t>::value) {
-      std::vector<std::pair<int32_t, int32_t>> tag_dispatch_list;
-      for (int i = 0; i < rule_expr.size() - 2; i += 2) {
-        tag_dispatch_list.push_back({VisitExpr(rule_expr[i]), rule_expr[i + 1]});
-      }
-      auto exit_triggers_expr = base_grammar_->GetRuleExpr(rule_expr[rule_expr.size() - 2]);
-      XGRAMMAR_DCHECK(exit_triggers_expr.type == RuleExprType::kChoices);
-      std::vector<int32_t> exit_triggers;
-      for (int i = 0; i < exit_triggers_expr.size(); ++i) {
-        exit_triggers.push_back(VisitExpr(exit_triggers_expr[i]));
-      }
-      int32_t exit_triggers_id = builder_.AddChoices(exit_triggers);
-      bool loop_after_dispatch = static_cast<bool>(rule_expr[rule_expr.size() - 1]);
-      return builder_.AddTagDispatch(tag_dispatch_list, exit_triggers_id, loop_after_dispatch);
+      Grammar::Impl::TagDispatch tag_dispatch = base_grammar_->GetTagDispatch(rule_expr);
+      return builder_.AddTagDispatch(tag_dispatch);
     } else {
       return T();
     }

@@ -945,10 +945,10 @@ int32_t EBNFParser::ParseTagDispatch() {
   auto start = current_token_;
   auto args = ParseMacroArguments();
   auto delta_element = start - current_token_;  // Used to report parse errors
-  // Process the arguments for TagDispatch
-  std::vector<std::pair<int32_t, int32_t>> tag_rule_pairs;
 
-  // Process each argument in the form of ("tag", rule_name)
+  Grammar::Impl::TagDispatch tag_dispatch;
+
+  // Position parameters: ("tag", rule_name)
   for (const auto& arg : args.arguments) {
     auto tuple_node = std::get_if<MacroIR::TupleNode>(arg.get());
     if (tuple_node == nullptr) {
@@ -964,8 +964,6 @@ int32_t EBNFParser::ParseTagDispatch() {
     if (tag_str_node == nullptr || tag_str_node->value.empty()) {
       ReportParseError("Tag must be a non-empty string literal", delta_element);
     }
-    auto tag_id = builder_.AddByteString(tag_str_node->value);
-
     // Second element should be an identifier (rule name)
     auto rule_name_node = std::get_if<MacroIR::IdentifierNode>(tuple_node->elements[1].get());
     if (rule_name_node == nullptr) {
@@ -977,50 +975,54 @@ int32_t EBNFParser::ParseTagDispatch() {
       ReportParseError("Rule \"" + rule_name_node->name + "\" is not defined", delta_element);
     }
 
-    tag_rule_pairs.push_back({tag_id, rule_id});
+    tag_dispatch.tag_rule_pairs.push_back({tag_str_node->value, rule_id});
   }
 
-  // Exit triggers
-  int32_t exit_triggers_id = -1;
-  if (auto it = args.named_arguments.find("exit_triggers"); it != args.named_arguments.end()) {
+  // stop_eos
+  tag_dispatch.stop_eos = true;
+  if (auto it = args.named_arguments.find("stop_eos"); it != args.named_arguments.end()) {
+    auto bool_node = std::get_if<MacroIR::BooleanNode>(it->second.get());
+    if (bool_node == nullptr) {
+      ReportParseError("stop_eos must be a boolean literal", delta_element);
+    }
+    tag_dispatch.stop_eos = bool_node->value;
+  }
+
+  // stop_str
+  if (auto it = args.named_arguments.find("stop_str"); it != args.named_arguments.end()) {
     auto tuple_node = std::get_if<MacroIR::TupleNode>(it->second.get());
-    if (tuple_node == nullptr || tuple_node->elements.empty()) {
-      ReportParseError("Exit triggers must be a non-empty tuple", delta_element);
+    if (tuple_node == nullptr) {
+      ReportParseError("Stop strings must be a tuple", delta_element);
     }
 
-    std::vector<int32_t> exit_triggers_str_expr_ids;
-    bool has_empty_exit_triggers = false;
     for (const auto& element : tuple_node->elements) {
-      auto exit_triggers_node = std::get_if<MacroIR::StringNode>(element.get());
-      if (exit_triggers_node == nullptr) {
-        ReportParseError("Exit trigger must be a string literal", delta_element);
+      auto stop_str_node = std::get_if<MacroIR::StringNode>(element.get());
+      if (stop_str_node == nullptr || stop_str_node->value.empty()) {
+        ReportParseError("Stop string must be a non-empty string literal", delta_element);
       }
-      if (exit_triggers_node->value.empty()) {
-        has_empty_exit_triggers = true;
-      } else {
-        exit_triggers_str_expr_ids.push_back(builder_.AddByteString(exit_triggers_node->value));
-      }
+      tag_dispatch.stop_str.push_back(stop_str_node->value);
     }
-    if (has_empty_exit_triggers) {
-      exit_triggers_str_expr_ids.insert(exit_triggers_str_expr_ids.begin(), builder_.AddEmptyStr());
-    }
-    exit_triggers_id = builder_.AddChoices(exit_triggers_str_expr_ids);
-  } else {
-    exit_triggers_id = builder_.AddChoices({builder_.AddEmptyStr()});
   }
 
   // loop_after_dispatch
-  bool loop_after_dispatch = true;
+  tag_dispatch.loop_after_dispatch = true;
   if (auto it = args.named_arguments.find("loop_after_dispatch");
       it != args.named_arguments.end()) {
     auto bool_node = std::get_if<MacroIR::BooleanNode>(it->second.get());
     if (bool_node == nullptr) {
       ReportParseError("loop_after_dispatch must be a boolean literal", delta_element);
     }
-    loop_after_dispatch = bool_node->value;
+    tag_dispatch.loop_after_dispatch = bool_node->value;
   }
 
-  return builder_.AddTagDispatch(tag_rule_pairs, exit_triggers_id, loop_after_dispatch);
+  // Well formed check
+  if (!tag_dispatch.stop_eos && tag_dispatch.stop_str.empty()) {
+    ReportParseError(
+        "The TagDispatch must have stop_eos=true or stop_str is not empty", delta_element
+    );
+  }
+
+  return builder_.AddTagDispatch(tag_dispatch);
 }
 
 int32_t EBNFParser::ParseLookaheadAssertion() {

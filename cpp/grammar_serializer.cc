@@ -119,24 +119,29 @@ std::string GrammarPrinter::PrintChoices(const RuleExpr& rule_expr) {
   return result;
 }
 
+std::string GrammarPrinter::PrintString(const std::string& str) {
+  return "\"" + PrintAsEscapedUTF8(str) + "\"";
+}
+
+std::string GrammarPrinter::PrintBoolean(bool value) { return value ? "true" : "false"; }
+
 std::string GrammarPrinter::PrintTagDispatch(const RuleExpr& rule_expr) {
-  std::string result = "TagDispatch(";
-  XGRAMMAR_DCHECK(rule_expr.data_len >= 2);  // At least one exit_triggers, one loop_after_dispatch
-  for (int i = 0; i < rule_expr.data_len - 2; i += 2) {
-    result +=
-        "(" + PrintRuleExpr(rule_expr[i]) + ", " + grammar_->GetRule(rule_expr[i + 1]).name + "), ";
+  auto tag_dispatch = grammar_->GetTagDispatch(rule_expr);
+  std::string result = "TagDispatch(\n";
+  std::string indent = "  ";
+  for (const auto& [tag, rule_id] : tag_dispatch.tag_rule_pairs) {
+    result += indent + "(" + PrintString(tag) + ", " + grammar_->GetRule(rule_id).name + "),\n";
   }
-  result += "exit_triggers=(";
-  auto exit_triggers_expr = grammar_->GetRuleExpr(rule_expr[rule_expr.data_len - 2]);
-  XGRAMMAR_DCHECK(exit_triggers_expr.type == RuleExprType::kChoices);
-  for (int i = 0; i < exit_triggers_expr.data_len; ++i) {
-    result += PrintRuleExpr(exit_triggers_expr[i]);
-    if (i + 1 != exit_triggers_expr.data_len) {
+  result += indent + "stop_eos=" + PrintBoolean(tag_dispatch.stop_eos) + ",\n";
+  result += indent + "stop_str=(";
+  for (int i = 0; i < static_cast<int>(tag_dispatch.stop_str.size()); ++i) {
+    result += PrintString(tag_dispatch.stop_str[i]);
+    if (i + 1 != static_cast<int>(tag_dispatch.stop_str.size())) {
       result += ", ";
     }
   }
-  result += "), loop_after_dispatch=";
-  result += static_cast<bool>(rule_expr[rule_expr.data_len - 1]) ? "true" : "false";
+  result += "),\n";
+  result += indent + "loop_after_dispatch=" + PrintBoolean(tag_dispatch.loop_after_dispatch) + "\n";
   result += ")";
   return result;
 }

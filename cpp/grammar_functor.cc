@@ -476,8 +476,9 @@ class UsedRulesAnalyzer : public GrammarVisitor<std::vector<int32_t>> {
   }
 
   void VisitTagDispatch(const RuleExpr& rule_expr) {
-    for (int i = 0; i < rule_expr.size() - 2; i += 2) {
-      visit_queue_.push(rule_expr[i + 1]);
+    auto tag_dispatch = base_grammar_->GetTagDispatch(rule_expr);
+    for (const auto& [tag, rule_id] : tag_dispatch.tag_rule_pairs) {
+      visit_queue_.push(rule_id);
     }
   }
 
@@ -512,21 +513,13 @@ class DeadCodeEliminatorImpl : public GrammarMutator {
   }
 
   int32_t VisitTagDispatch(const RuleExpr& rule_expr) final {
-    std::vector<std::pair<int32_t, int32_t>> tag_dispatch_list;
-    for (int i = 0; i < rule_expr.size() - 2; i += 2) {
-      XGRAMMAR_DCHECK(rule_id_map_.count(rule_expr[i + 1]) > 0);
-      auto new_rule_id = rule_id_map_[rule_expr[i + 1]];
-      tag_dispatch_list.push_back({VisitExpr(rule_expr[i]), new_rule_id});
+    Grammar::Impl::TagDispatch tag_dispatch = base_grammar_->GetTagDispatch(rule_expr);
+    for (auto& [tag, rule_id] : tag_dispatch.tag_rule_pairs) {
+      XGRAMMAR_DCHECK(rule_id_map_.count(rule_id) > 0);
+      rule_id = rule_id_map_[rule_id];
     }
-    auto exit_triggers_expr = base_grammar_->GetRuleExpr(rule_expr[rule_expr.size() - 2]);
-    XGRAMMAR_DCHECK(exit_triggers_expr.type == RuleExprType::kChoices);
-    std::vector<int32_t> exit_triggers;
-    for (int i = 0; i < exit_triggers_expr.size(); ++i) {
-      exit_triggers.push_back(VisitExpr(exit_triggers_expr[i]));
-    }
-    int32_t exit_triggers_id = builder_.AddChoices(exit_triggers);
-    bool loop_after_dispatch = static_cast<bool>(rule_expr[rule_expr.size() - 1]);
-    return builder_.AddTagDispatch(tag_dispatch_list, exit_triggers_id, loop_after_dispatch);
+
+    return builder_.AddTagDispatch(tag_dispatch);
   }
 
   int32_t VisitRuleRef(const RuleExpr& rule_expr) final {
@@ -570,7 +563,7 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
       auto rule = base_grammar_->GetRule(i);
       auto rule_expr = base_grammar_->GetRuleExpr(rule.body_expr_id);
       if (rule_expr.type == RuleExprType::kTagDispatch) {
-        for (int j = 1; j < rule_expr.size(); j += 2) {
+        for (int j = 1; j < rule_expr.size() - 3; j += 2) {
           if (rule_expr[j] == rule_id) {
             return -1;
           }
@@ -920,9 +913,15 @@ class StructuralTagGrammarCreatorImpl : public SubGrammarCombiner {
     builder_ = GrammarBuilder();
     auto root_rule_id = builder_.AddEmptyRule("root");
 
+    Grammar::Impl::TagDispatch tag_dispatch{
+        .tag_rule_pairs = {},
+        .stop_eos = true,
+        .stop_str = {},
+        .loop_after_dispatch = true,
+    };
+    tag_dispatch.tag_rule_pairs.reserve(triggers.size());
+
     // Create rules for each trigger group
-    std::vector<std::pair<int32_t, int32_t>> trigger_rule_pairs;
-    trigger_rule_pairs.reserve(triggers.size());
     for (size_t i = 0; i < triggers.size(); i++) {
       // Skip empty trigger groups
       if (tag_groups[i].empty()) {
@@ -931,9 +930,6 @@ class StructuralTagGrammarCreatorImpl : public SubGrammarCombiner {
 
       auto rule_name = "trigger_rule_" + std::to_string(i);
       auto rule_id = builder_.AddEmptyRule(rule_name);
-
-      // Convert trigger string to byte string expr
-      auto trigger_expr_id = builder_.AddByteString(triggers[i]);
 
       // Create choices for each tag in this trigger group
       std::vector<int32_t> choices;
@@ -963,19 +959,11 @@ class StructuralTagGrammarCreatorImpl : public SubGrammarCombiner {
       }
 
       builder_.UpdateRuleBody(rule_id, builder_.AddChoices(choices));
-      trigger_rule_pairs.emplace_back(trigger_expr_id, rule_id);
+      tag_dispatch.tag_rule_pairs.emplace_back(triggers[i], rule_id);
     }
 
     // Create root TagDispatch rule
-    std::vector<std::pair<int32_t, int32_t>> tag_dispatch_data;
-    tag_dispatch_data.reserve(trigger_rule_pairs.size());
-    for (const auto& [trigger_id, rule_id] : trigger_rule_pairs) {
-      tag_dispatch_data.emplace_back(trigger_id, rule_id);
-    }
-    auto exit_triggers_id = builder_.AddChoices({builder_.AddEmptyStr()});
-    bool loop_after_dispatch = true;
-    auto tag_dispatch_id =
-        builder_.AddTagDispatch(tag_dispatch_data, exit_triggers_id, loop_after_dispatch);
+    auto tag_dispatch_id = builder_.AddTagDispatch(tag_dispatch);
     builder_.UpdateRuleBody(root_rule_id, tag_dispatch_id);
     return builder_.Get(root_rule_id);
   }
@@ -998,7 +986,7 @@ class GrammarFSMBuilderImpl {
       auto rule = (*grammar)->GetRule(i);
       auto rule_expr = (*grammar)->GetRuleExpr(rule.body_expr_id);
       if (rule_expr.type == RuleExprType::kTagDispatch) {
-        auto rule_fsm = TagDispatchFSMBuilder::Build(rule_expr, *grammar);
+        auto rule_fsm = TagDispatchFSMBuilder::Build((*grammar)->GetTagDispatch(rule_expr));
         XGRAMMAR_CHECK(rule_fsm.has_value()) << "Failed to build tag dispatch fsm for rule " << i;
         per_rule_fsms[i] = rule_fsm->AddToCompleteFSM(&complete_fsm, &state_mapping);
       }

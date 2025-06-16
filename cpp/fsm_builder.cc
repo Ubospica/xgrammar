@@ -889,16 +889,7 @@ class TagDispatchFSMBuilderImpl {
  public:
   TagDispatchFSMBuilderImpl() = default;
 
-  std::optional<FSMWithStartEnd> Build(
-      const Grammar::Impl::RuleExpr& rule_expr, const Grammar& grammar
-  );
-
-  std::optional<FSMWithStartEnd> Build(
-      const std::vector<std::pair<std::string, int>>& tag_dispatch_rules,
-      const std::vector<std::string>& stop_strings,
-      bool loop_after_dispatch,
-      bool accept_eos
-  );
+  std::optional<FSMWithStartEnd> Build(const Grammar::Impl::TagDispatch& tag_dispatch);
 
   std::optional<FSMWithStartEnd> BuildWithEOSStop(
       const std::vector<std::pair<std::string, int>>& tag_dispatch_rules, bool loop_after_dispatch
@@ -912,43 +903,14 @@ class TagDispatchFSMBuilderImpl {
 };
 
 std::optional<FSMWithStartEnd> TagDispatchFSMBuilderImpl::Build(
-    const Grammar::Impl::RuleExpr& rule_expr, const Grammar& grammar
+    const Grammar::Impl::TagDispatch& tag_dispatch
 ) {
-  // Decode the rule expr.
-  XGRAMMAR_DCHECK(rule_expr.type == Grammar::Impl::RuleExprType::kTagDispatch);
-  std::vector<std::pair<std::string, int>> tag_dispatch_rules;
-  std::vector<std::string> stop_strings;
-  tag_dispatch_rules.reserve((rule_expr.size() - 2) / 2);
-  for (int i = 0; i < rule_expr.size() - 2; i += 2) {
-    std::string tag_name = grammar->GetByteString(rule_expr[i]);
-    tag_dispatch_rules.emplace_back(tag_name, rule_expr[i + 1]);
-  }
-  auto stop_strings_expr = grammar->GetRuleExpr(rule_expr[rule_expr.size() - 2]);
-  bool accept_eos = false;
-  stop_strings.reserve(stop_strings_expr.size());
-  for (int i = 0; i < stop_strings_expr.size(); i++) {
-    auto stop_string = grammar->GetByteString(stop_strings_expr[i]);
-    if (stop_string == "") {
-      accept_eos = true;
-    } else {
-      stop_strings.push_back(stop_string);
-    }
-  }
-  bool loop_after_dispatch = static_cast<bool>(rule_expr[rule_expr.size() - 1]);
-
-  return Build(tag_dispatch_rules, stop_strings, loop_after_dispatch, accept_eos);
-}
-
-std::optional<FSMWithStartEnd> TagDispatchFSMBuilderImpl::Build(
-    const std::vector<std::pair<std::string, int>>& tag_dispatch_rules,
-    const std::vector<std::string>& stop_strings,
-    bool loop_after_dispatch,
-    bool accept_eos
-) {
-  if (accept_eos) {
-    return BuildWithEOSStop(tag_dispatch_rules, loop_after_dispatch);
+  if (tag_dispatch.stop_eos) {
+    return BuildWithEOSStop(tag_dispatch.tag_rule_pairs, tag_dispatch.loop_after_dispatch);
   } else {
-    return BuildWithStopString(tag_dispatch_rules, stop_strings, loop_after_dispatch);
+    return BuildWithStopString(
+        tag_dispatch.tag_rule_pairs, tag_dispatch.stop_str, tag_dispatch.loop_after_dispatch
+    );
   }
 }
 
@@ -1058,20 +1020,9 @@ std::optional<FSMWithStartEnd> TagDispatchFSMBuilderImpl::BuildWithStopString(
 }
 
 std::optional<FSMWithStartEnd> TagDispatchFSMBuilder::Build(
-    const Grammar::Impl::RuleExpr& rule_expr, const Grammar& grammar
+    const Grammar::Impl::TagDispatch& tag_dispatch
 ) {
-  return TagDispatchFSMBuilderImpl().Build(rule_expr, grammar);
-}
-
-std::optional<FSMWithStartEnd> TagDispatchFSMBuilder::Build(
-    const std::vector<std::pair<std::string, int>>& tag_dispatch_rules,
-    const std::vector<std::string>& stop_strings,
-    bool loop_after_dispatch,
-    bool accept_eos
-) {
-  return TagDispatchFSMBuilderImpl().Build(
-      tag_dispatch_rules, stop_strings, loop_after_dispatch, accept_eos
-  );
+  return TagDispatchFSMBuilderImpl().Build(tag_dispatch);
 }
 
 }  // namespace xgrammar

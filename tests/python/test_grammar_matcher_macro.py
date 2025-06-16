@@ -47,9 +47,14 @@ rule2 ::= "efg" [t]*
     assert not _is_grammar_accept_string(grammar, "tag2efgtag1")
 
 
-def test_exit_triggers():
+def test_stop_str():
     grammar_str = """root ::= root1 "w"
-root1 ::= TagDispatch(("tag1", rule1), ("tag2", rule2), exit_triggers=("tag3", "ll"))
+root1 ::= TagDispatch(
+  ("tag1", rule1),
+  ("tag2", rule2),
+  stop_eos=false,
+  stop_str=("tag3", "ll")
+)
 rule1 ::= "abcd" [p]*
 rule2 ::= "efg" [t]*
 """
@@ -66,9 +71,15 @@ rule2 ::= "efg" [t]*
     assert not _is_grammar_accept_string(grammar, "tag1abcdlltag3w", require_termination=False)
 
 
-def test_exit_triggers_no_loop():
+def test_stop_str_no_loop():
     grammar_str = """root ::= root1 "w"
-root1 ::= TagDispatch(("tag1", rule1), ("tag2", rule2), exit_triggers=("tag3", "ll"), loop_after_dispatch=false)
+root1 ::= TagDispatch(
+  ("tag1", rule1),
+  ("tag2", rule2),
+  stop_eos=false,
+  stop_str=("tag3", "ll"),
+  loop_after_dispatch=false
+)
 rule1 ::= "abcd" [p]*
 rule2 ::= "efg" [t]*
 """
