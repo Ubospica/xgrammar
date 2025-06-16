@@ -37,7 +37,13 @@ def test_utf8():
         assert _is_grammar_accept_string(grammar, input_str, print_time=True)
 
 
-expected_grammar_test_structural_tag = r"""root ::= TagDispatch(("<function=f", trigger_rule_0), ("<function=g", trigger_rule_1), exit_triggers=(""), loop_after_dispatch=true)
+expected_grammar_test_structural_tag = r"""root ::= TagDispatch(
+  ("<function=f", trigger_rule_0),
+  ("<function=g", trigger_rule_1),
+  stop_eos=true,
+  stop_str=(),
+  loop_after_dispatch=true
+)
 trigger_rule_0 ::= (("1>" root_1 "</function>") | ("2>" root_2 "</function>"))
 basic_escape ::= (([\"\\/bfnrt]) | ("u" [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9])) (=(basic_string_sub))
 basic_string_sub ::= (("\"") | ([^\0-\x1f\"\\\r\n] basic_string_sub) | ("\\" basic_escape basic_string_sub)) (=([ \n\t]* [,}\]:]))
