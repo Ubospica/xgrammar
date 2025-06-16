@@ -60,6 +60,10 @@ class GrammarPrinter {
   std::string PrintChoices(const RuleExpr& rule_expr);
   /*! \brief Print a RuleExpr for tag dispatch. */
   std::string PrintTagDispatch(const RuleExpr& rule_expr);
+  /*! \brief Print a string. */
+  std::string PrintString(const std::string& str);
+  /*! \brief Print a boolean. */
+  std::string PrintBoolean(bool value);
 
   Grammar grammar_;
 };

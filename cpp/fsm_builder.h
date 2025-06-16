@@ -57,28 +57,10 @@ class TagDispatchFSMBuilder {
  public:
   /*!
    * \brief Build a FSM from a tag dispatch rule.
-   * \param rule_expr The rule expr.
-   * \param grammar The grammar that contains the rule expr.
+   * \param tag_dispatch The tag dispatch.
    * \return The FSM with start and end states.
    */
-  static std::optional<FSMWithStartEnd> Build(
-      const Grammar::Impl::RuleExpr& rule_expr, const Grammar& grammar
-  );
-
-  /*!
-   * \brief Build a FSM from a tag dispatch rule. Mainly for test purposes.
-   * \param tag_dispatch_rules The tag dispatch rules.
-   * \param stop_strings The stop strings.
-   * \param loop_after_dispatch Whether to loop after dispatch.
-   * \param accept_eos Whether to accept EOS.
-   * \return The FSM with start and end states.
-   */
-  static std::optional<FSMWithStartEnd> Build(
-      const std::vector<std::pair<std::string, int>>& tag_dispatch_rules,
-      const std::vector<std::string>& stop_strings,
-      bool loop_after_dispatch,
-      bool accept_eos
-  );
+  static std::optional<FSMWithStartEnd> Build(const Grammar::Impl::TagDispatch& tag_dispatch);
 };
 
 }  // namespace xgrammar

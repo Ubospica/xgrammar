@@ -53,10 +53,14 @@ TEST(XGrammarFSMBuilderTest, TestTrieFSMBuilder) {
 }
 
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder1) {
-  // Case 1. loop_after_dispatch = true, accept_eos = true
-  std::vector<std::pair<std::string, int>> tag_dispatch_rules = {{"hel", 1}, {"hi", 2}, {"哈", 3}};
-  std::vector<std::string> stop_strings;  // empty
-  auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch_rules, stop_strings, true, true);
+  // Case 1. stop_eos = true, loop_after_dispatch = true
+  Grammar::Impl::TagDispatch tag_dispatch = {
+      .tag_rule_pairs = {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      .stop_eos = true,
+      .stop_str = {},
+      .loop_after_dispatch = true,
+  };
+  auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
   auto fsm = std::move(fsm_result).value();
   auto fsm_printed = fsm.ToString();
@@ -75,10 +79,14 @@ TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder1) {
 }
 
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder2) {
-  // Case 2. loop_after_dispatch = false, accept_eos = true
-  std::vector<std::pair<std::string, int>> tag_dispatch_rules = {{"hel", 1}, {"hi", 2}, {"哈", 3}};
-  std::vector<std::string> stop_strings;  // empty
-  auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch_rules, stop_strings, false, true);
+  // Case 2. stop_eos = true, loop_after_dispatch = false
+  Grammar::Impl::TagDispatch tag_dispatch = {
+      .tag_rule_pairs = {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      .stop_eos = true,
+      .stop_str = {},
+      .loop_after_dispatch = false,
+  };
+  auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
   auto fsm = std::move(fsm_result).value();
   auto fsm_printed = fsm.ToString();
@@ -101,10 +109,14 @@ TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder2) {
 }
 
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder3) {
-  // Case 3. loop_after_dispatch = true, accept_eos = false
-  std::vector<std::pair<std::string, int>> tag_dispatch_rules = {{"hel", 1}, {"hi", 2}, {"哈", 3}};
-  std::vector<std::string> stop_strings = {"hos", "eos"};  // empty
-  auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch_rules, stop_strings, true, false);
+  // Case 3. stop_eos = false, loop_after_dispatch = true
+  Grammar::Impl::TagDispatch tag_dispatch = {
+      .tag_rule_pairs = {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      .stop_eos = false,
+      .stop_str = {"hos", "eos"},
+      .loop_after_dispatch = true,
+  };
+  auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
   auto fsm = std::move(fsm_result).value();
   auto fsm_printed = fsm.ToString();
@@ -128,10 +140,14 @@ TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder3) {
 }
 
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder4) {
-  // Case 4. loop_after_dispatch = false, accept_eos = false
-  std::vector<std::pair<std::string, int>> tag_dispatch_rules = {{"hel", 1}, {"hi", 2}, {"哈", 3}};
-  std::vector<std::string> stop_strings = {"hos", "eos"};
-  auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch_rules, stop_strings, false, false);
+  // Case 4. stop_eos = false, loop_after_dispatch = false
+  Grammar::Impl::TagDispatch tag_dispatch = {
+      .tag_rule_pairs = {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      .stop_eos = false,
+      .stop_str = {"hos", "eos"},
+      .loop_after_dispatch = false,
+  };
+  auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
   auto fsm = std::move(fsm_result).value();
   auto fsm_printed = fsm.ToString();

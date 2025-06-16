@@ -174,19 +174,20 @@ class GrammarBuilder {
    * \brief Add a RuleExpr for tag dispatch.
    * \param tag_dispatch_list A list of pairs of tag_expr_id and rule_id.
    */
-  int32_t AddTagDispatch(
-      const std::vector<std::pair<int32_t, int32_t>>& tag_dispatch_list,
-      int32_t exit_triggers_id,
-      bool loop_after_dispatch
-  ) {
+  int32_t AddTagDispatch(const Grammar::Impl::TagDispatch& tag_dispatch) {
     std::vector<int32_t> data;
-    data.reserve(tag_dispatch_list.size() * 2);
-    for (const auto& [tag_expr_id, rule_id] : tag_dispatch_list) {
-      data.push_back(tag_expr_id);
+    data.reserve(tag_dispatch.tag_rule_pairs.size() * 2 + 3);
+    for (const auto& [tag, rule_id] : tag_dispatch.tag_rule_pairs) {
+      data.push_back(AddByteString(tag));
       data.push_back(rule_id);
     }
-    data.push_back(exit_triggers_id);
-    data.push_back(static_cast<int32_t>(loop_after_dispatch));
+    data.push_back(static_cast<int32_t>(tag_dispatch.stop_eos));
+    std::vector<int32_t> stop_str_expr_ids;
+    for (const auto& stop_str : tag_dispatch.stop_str) {
+      stop_str_expr_ids.push_back(AddByteString(stop_str));
+    }
+    data.push_back(AddChoices(stop_str_expr_ids));
+    data.push_back(static_cast<int32_t>(tag_dispatch.loop_after_dispatch));
     return AddRuleExpr({RuleExprType::kTagDispatch, data.data(), static_cast<int32_t>(data.size())}
     );
   }
