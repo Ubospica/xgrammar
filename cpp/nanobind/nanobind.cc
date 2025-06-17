@@ -14,6 +14,7 @@
 
 #include "../grammar_functor.h"
 #include "../json_schema_converter.h"
+#include "../parser_structural_tag.h"
 #include "../regex_converter.h"
 #include "../support/recursion_guard.h"
 #include "../testing.h"
@@ -230,6 +231,14 @@ NB_MODULE(xgrammar_bindings, m) {
           },
           nb::arg("start").none(),
           nb::arg("end").none()
+      )
+      .def(
+          "_parser_structural_tag",
+          [](const std::string& input, const std::vector<std::string>& triggers) {
+            return parse_structural_tag(input, triggers);
+          },
+          nb::arg("input"),
+          nb::arg("triggers")
       );
 
   auto pyGrammarFunctorModule = pyTestingModule.def_submodule("grammar_functor");
