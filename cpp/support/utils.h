@@ -231,7 +231,7 @@ class Result {
   }
 
   /*! \brief Map error value to new type using provided function */
-  template <typename V, typename F>
+  template <typename F, typename V = std::decay_t<std::invoke_result_t<F, E>>>
   Result<T, V> MapErr(F&& f) && {
     if (IsErr()) {
       return Result<T, V>::Err(f(std::get<E>(std::move(data_))));
@@ -239,15 +239,19 @@ class Result {
     return Result<T, V>::Ok(std::get<T>(std::move(data_)));
   }
 
-  template <typename U>
-  static Result<T, E> Convert(Result<U, E>&& result) {
+  /*!
+   * \brief Convert a Result<U, V> to a Result<T, E>. U should be convertible to T, and V should be
+   * convertible to E.
+   */
+  template <typename U, typename V>
+  static Result<T, E> Convert(Result<U, V>&& result) {
     if (result.IsOk()) {
       return Result<T, E>::Ok(std::move(result).Unwrap());
     }
     return Result<T, E>::Err(std::move(result).UnwrapErr());
   }
 
-  /*! \brief Get a variant<T, E> from the result. */
+  /*! \brief Get a std::variant<T, E> from the result. */
   std::variant<T, E> ToVariant() && { return std::move(data_); }
 
   /*!
