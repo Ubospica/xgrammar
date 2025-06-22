@@ -350,9 +350,12 @@ std::variant<StructuralTag, std::runtime_error> StructuralTag::FromJSON(const st
   return StructuralTagImpl().FromJSON(json).ToVariant();
 }
 
-/************** StructuralTag Analyzer: Convert to internal IR **************/
+/************** StructuralTag Analyzer **************/
 
-class StructuralTagInternalIR {
+/*!
+ * \brief Analyze a StructuralTag and extract useful information for conversion to Grammar.
+ */
+class StructuralTagAnalyzer {
  public:
   std::optional<std::runtime_error> AnalyzeStructuralTag(StructuralTag* structural_tag);
 
@@ -366,25 +369,39 @@ class StructuralTagInternalIR {
   std::optional<std::runtime_error> VisitTriggeredTagsFormat(TriggeredTagsFormat* format);
   std::optional<std::runtime_error> VisitTagsWithSeparatorFormat(TagsWithSeparatorFormat* format);
 
+  std::optional<std::string> DetectEndString();
+
   struct Frame {
     Format* format;
     int element_id;  // The id of the element currently visited.
   };
 
   std::vector<Frame> stack_;
-  int parse_format_recursion_depth_ = 0;
+  int visit_format_recursion_depth_ = 0;
 };
 
-std::optional<std::runtime_error> StructuralTagInternalIR::AnalyzeStructuralTag(
+std::optional<std::string> StructuralTagAnalyzer::DetectEndString() {
+  for (int i = static_cast<int>(stack_.size()) - 1; i >= 0; --i) {
+    auto& frame = stack_[i];
+
+    if (frame.format->type == "tag") {
+      return frame.format->end;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
     StructuralTag* structural_tag
 ) {
   return VisitFormat(&structural_tag->format);
 }
 
-std::optional<std::runtime_error> StructuralTagInternalIR::VisitFormat(Format* format) {
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* format) {
+  RecursionGuard guard(&visit_format_recursion_depth_);
   stack_.push_back({format, 0});
-  std::visit(
-      [&](auto&& arg) {
+  auto result = std::visit(
+      [&](auto&& arg) -> std::optional<std::runtime_error> {
         using T = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<T, LiteralFormat>) {
           return VisitLiteralFormat(&arg);
@@ -406,6 +423,52 @@ std::optional<std::runtime_error> StructuralTagInternalIR::VisitFormat(Format* f
       },
       *format
   );
+  stack_.pop_back();
+  return result;
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitLiteralFormat(LiteralFormat* format) {
+  return std::nullopt;
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitJSONSchemaFormat(
+    JSONSchemaFormat* format
+) {
+  return std::nullopt;
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitWildcardTextFormat(
+    WildcardTextFormat* format
+) {
+  return std::nullopt;
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSequenceFormat(SequenceFormat* format
+) {
+  for (auto& element : format->elements) {
+    auto result = VisitFormat(&element);
+    if (result.has_value()) {
+      return result;
+    }
+    ++stack_.back().element_id;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagFormat(TagFormat* format) {
+  return VisitFormat(format->content.get());
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTriggeredTagsFormat(
+    TriggeredTagsFormat* format
+) {
+  return std::nullopt;
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagsWithSeparatorFormat(
+    TagsWithSeparatorFormat* format
+) {
+  return std::nullopt;
 }
 
 /************** StructuralTag to Grammar Converter **************/
