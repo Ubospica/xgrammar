@@ -980,7 +980,7 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
       result.AddEndState(state_map[state]);
     }
   }
-  return Result<FSMWithStartEnd>::Ok(result);
+  return Result<FSMWithStartEnd>::Ok(std::move(result));
 }
 
 bool FSMWithStartEnd::IsDFA() {

@@ -1,10 +1,9 @@
 import json
-from typing import Any, Callable, Dict, List, Literal, Type, Union
+from typing import Annotated, Any, Dict, List, Literal, Type, Union
 
-# from .base import _core
 from pydantic import BaseModel, Field
 
-# ---------- Basic Types ----------
+# ---------- Basic Formats ----------
 
 
 class LiteralFormat(BaseModel):
@@ -54,21 +53,35 @@ class TagsWithSeparatorFormat(BaseModel):
 
 # ---------- Discriminated Union ----------
 
-Format = Union[
-    LiteralFormat,
-    JSONSchemaFormat,
-    WildcardTextFormat,
-    SequenceFormat,
-    TagFormat,
-    TriggeredTagsFormat,
-    TagsWithSeparatorFormat,
+
+Format = Annotated[
+    Union[
+        TagFormat,
+        LiteralFormat,
+        JSONSchemaFormat,
+        SequenceFormat,
+        TriggeredTagsFormat,
+        TagsWithSeparatorFormat,
+        WildcardTextFormat,
+    ],
+    Field(discriminator="type"),
 ]
 
+
 # Solve forward references
-SequenceFormat.model_rebuild()
-TagFormat.model_rebuild()
-TriggeredTagsFormat.model_rebuild()
-TagsWithSeparatorFormat.model_rebuild()
+if hasattr(BaseModel, "model_rebuild"):
+    SequenceFormat.model_rebuild()
+    TagFormat.model_rebuild()
+    TriggeredTagsFormat.model_rebuild()
+    TagsWithSeparatorFormat.model_rebuild()
+elif hasattr(BaseModel, "update_forward_refs"):
+    # This is for backward compatibility with pydantic v1
+    SequenceFormat.update_forward_refs()
+    TagFormat.update_forward_refs()
+    TriggeredTagsFormat.update_forward_refs()
+    TagsWithSeparatorFormat.update_forward_refs()
+else:
+    raise RuntimeError("Unsupported pydantic version")
 
 
 # ---------- Top Level ----------
@@ -86,37 +99,6 @@ class StructuralTagItem(BaseModel):
     """The schema."""
     end: str
     """The end tag."""
-
-
-_TOOL_CALLING_TEMPLATE_REGISTRY: Dict[str, Callable] = {}
-_REASONING_TEMPLATE_REGISTRY: Dict[str, "StructuralTag"] = {}
-
-
-def register_tool_calling_template(name: str, override: bool = False):
-    def decorator(func: Callable[..., "StructuralTag"]) -> Callable:
-        if name in _TOOL_CALLING_TEMPLATE_REGISTRY and not override:
-            raise ValueError(
-                f"Tool calling template '{name}' is already registered. "
-                f"Use override=True to replace it."
-            )
-        _TOOL_CALLING_TEMPLATE_REGISTRY[name] = func
-        return func
-
-    return decorator
-
-
-def register_reasoning_template(name: str, override: bool = False):
-    def decorator(func: Callable[..., "StructuralTag"]) -> Callable:
-        if name in _REASONING_TEMPLATE_REGISTRY and not override:
-            raise ValueError(
-                f"Reasoning template '{name}' is already registered. "
-                f"Use override=True to replace it."
-            )
-
-        _REASONING_TEMPLATE_REGISTRY[name] = func
-        return func
-
-    return decorator
 
 
 class StructuralTag(BaseModel):
@@ -155,40 +137,17 @@ class StructuralTag(BaseModel):
         )
 
     @staticmethod
-    def from_openai_tool_calling(
-        template: str,
-        tools: List[Dict[str, Any]],
-        tool_choice: Union[str, Dict[str, Any]],
-        *,
-        allow_text: bool = True,
-        enable_thinking: bool = False,
-    ) -> "StructuralTag":
-        """Convert an OpenAI API format to a structural tag."""
-        return _TOOL_CALLING_TEMPLATE_REGISTRY[template](
-            tools=tools,
-            tool_choice=tool_choice,
-            allow_text=allow_text,
-            enable_thinking=enable_thinking,
-        )
-
-
-@register_tool_calling_template("llama-3.1-8b-instruct")
-def llama_3_1_8b_instruct_tool_calling_template(
-    tools: List[Dict[str, Any]], template: str
-) -> StructuralTag:
-    return StructuralTag(type="structural_tag", format=tools)
-
-
-@register_reasoning_template("deepseek")
-def deepseek_reasoning_template() -> StructuralTag:
-    return StructuralTag(
-        type="structural_tag",
-        format=TagFormat(begin="<think>", content=WildcardTextFormat(), end="</think>"),
-    )
+    def from_json(json_str: Union[str, Dict[str, Any]]) -> "StructuralTag":
+        """Convert a JSON string to a structural tag."""
+        if isinstance(json_str, str):
+            return StructuralTag.model_validate_json(json_str)
+        elif isinstance(json_str, dict):
+            return StructuralTag.model_validate(json_str)
+        else:
+            raise ValueError("Invalid JSON string or dictionary")
 
 
 def main():
-    pass
     # stag_str = """
     # {
     #     "type": "structural_tag",
@@ -221,6 +180,11 @@ def main():
     # }
     # stag_triggered_tags = TriggeredTagsFormat.model_validate(stag_triggered_tags_obj)
     # print(stag_triggered_tags)
+
+    stag_obj = {"type": "structural_tag", "format": {"type": "wildcard_text"}}
+    stag = StructuralTag.model_validate(stag_obj)
+    print(stag)
+    pass
 
 
 if __name__ == "__main__":

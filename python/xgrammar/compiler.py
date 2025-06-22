@@ -10,7 +10,7 @@ from .grammar import (
     Grammar,
     StructuralTagItem,
     _convert_schema_to_str,
-    _get_structural_tag_from_args,
+    _get_structural_tag_str_from_args,
 )
 from .structural_tag import StructuralTag
 from .tokenizer_info import TokenizerInfo
@@ -157,7 +157,11 @@ class GrammarCompiler(XGRObject):
         return CompiledGrammar._create_from_handle(self._handle.compile_regex(regex))
 
     @overload
-    def compile_structural_tag(structural_tag: StructuralTag) -> "Grammar": ...
+    def compile_structural_tag(
+        self, structural_tag: Union[StructuralTag, str, Dict[str, Any]]
+    ) -> CompiledGrammar:
+        """Compile a grammar from a structural tag."""
+        ...
 
     @overload
     @deprecated(
@@ -187,9 +191,9 @@ class GrammarCompiler(XGRObject):
 
     def compile_structural_tag(self, *args, **kwargs) -> CompiledGrammar:
         """Compile a grammar from structural tag."""
-        structural_tag = _get_structural_tag_from_args(args, kwargs)
+        structural_tag_str = _get_structural_tag_str_from_args(args, kwargs)
         return CompiledGrammar._create_from_handle(
-            self._handle.compile_structural_tag(structural_tag.model_dump_json(indent=None))
+            self._handle.compile_structural_tag(structural_tag_str)
         )
 
     @overload

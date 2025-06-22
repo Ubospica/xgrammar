@@ -12,6 +12,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <unordered_set>
@@ -101,9 +102,58 @@ class TypedError : public std::runtime_error {
   T type_;
 };
 
+namespace detail {
+
 /*!
- * \brief A Result type similar to Rust's Result, representing either success (Ok) or failure (Err).
+ * \brief Check if the parameter pack has exactly one type X. The generic version is false.
+ */
+template <typename X, typename... Args>
+constexpr bool is_exactly_one_type = false;
+
+/*!
+ * \brief Partial specialization of is_exactly_one_type that returns true if the parameter pack
+ * has exactly one type Arg when it is exactly one X.
+ */
+template <typename X, typename Arg>
+constexpr bool is_exactly_one_type<X, Arg> = std::is_same_v<std::decay_t<Arg>, X>;
+
+}  // namespace detail
+
+/*!
+ * \brief An always-move Result type similar to Rust's Result, representing either success (Ok) or
+ * failure (Err). It always uses move semantics for the success and error values.
  * \tparam T The type of the success value
+ * \tparam E The type of the error value
+ *
+ * \note The Ok and Err constructor, and all methods of this class (except for ValueRef and ErrRef)
+ * accept only rvalue references as parameters for performance reasons. You should use std::move to
+ * convert a Result to an rvalue reference before invoking these methods. Examples for move
+ * semantics are shown below.
+ *
+ * \example Construct a success result with a rvalue reference
+ * \code
+ * T value;
+ * return Result<T, std::string>::Ok(std::move(value));
+ * \endcode
+ * \example Construct a error result with a rvalue reference of std::runtime_error
+ * \code
+ * std::runtime_error error_msg = std::runtime_error("Error");
+ * return Result<T>::Err(std::move(error_msg));
+ * \endcode
+ * \example Construct a error result with a std::runtime_error object constructed with a string
+ * \code
+ * std::string error_msg = "Error";
+ * return Result<T>::Err(std::move(error_msg));
+ * \endcode
+ * \example Unwrap the rvalue reference of the result
+ * \code
+ * Result<T> result = func();
+ * if (result.IsOk()) {
+ *   T result_val = std::move(result).Unwrap();
+ * } else {
+ *   std::runtime_error error_msg = std::move(result).UnwrapErr();
+ * }
+ * \endcode
  */
 template <typename T, typename E = std::runtime_error>
 class Result {
@@ -111,19 +161,30 @@ class Result {
   static_assert(!std::is_same_v<T, E>, "T and E cannot be the same type");
 
  public:
-  /*! \brief Construct a success Result with a const reference */
-  static Result Ok(const T& value) { return Result(value); }
-  /*! \brief Construct a success Result with a move */
-  static Result Ok(T&& value) { return Result(std::move(value)); }
+  /*! \brief Construct a success Result by moving T */
+  static Result Ok(T&& value) { return Result(std::in_place_type<T>, std::move(value)); }
 
-  /*! \brief Construct an error Result with a const reference */
-  static Result Err(const E& error) { return Result(error); }
-  /*! \brief Construct an error Result with a move */
-  static Result Err(E&& error) { return Result(std::move(error)); }
-  /*! \brief Forward constructor for error type */
-  template <typename... Args>
+  /*!
+   * \brief Construct a success Result by invoking T's constructor.
+   * \note This method cannot accept T as the only argument, therefore avoiding user passing const
+   * T& and invoke the copy constructor.
+   */
+  template <typename... Args, typename = std::enable_if_t<!detail::is_exactly_one_type<T, Args...>>>
+  static Result Ok(Args&&... args) {
+    return Result(std::in_place_type<T>, std::forward<Args>(args)...);
+  }
+
+  /*! \brief Construct an error Result by moving E */
+  static Result Err(E&& value) { return Result(std::in_place_type<E>, std::move(value)); }
+
+  /*!
+   * \brief Construct an error Result by invoking E's constructor.
+   * \note This method cannot accept E as the only argument, therefore avoiding user passing const
+   * E& and invoke the copy constructor.
+   */
+  template <typename... Args, typename = std::enable_if_t<!detail::is_exactly_one_type<E, Args...>>>
   static Result Err(Args&&... args) {
-    return Result(E(std::forward<Args>(args)...));
+    return Result(std::in_place_type<E>, std::forward<Args>(args)...);
   }
 
   /*! \brief Check if Result contains success value */
@@ -132,86 +193,91 @@ class Result {
   /*! \brief Check if Result contains error */
   bool IsErr() const { return std::holds_alternative<E>(data_); }
 
-  /*! \brief Get the success value, or throw an exception if this is an error */
-  T& Unwrap() & {
-    if (!IsOk()) {
-      XGRAMMAR_LOG(FATAL) << "Called Unwrap() on an Err value";
-      XGRAMMAR_UNREACHABLE();
-    }
-    return std::get<T>(data_);
+  /*! \brief Get the success value. It assumes (or checks if in debug mode) the result is ok. */
+  T Unwrap() && {
+    XGRAMMAR_DCHECK(IsOk()) << "Called Unwrap() on an Err value";
+    return std::get<T>(std::move(data_));
   }
 
-  /*! \brief Get the success value, or throw an exception if this is an error */
-  const T& Unwrap() const& {
-    if (!IsOk()) {
-      XGRAMMAR_LOG(FATAL) << "Called Unwrap() on an Err value";
-      XGRAMMAR_UNREACHABLE();
-    }
-    return std::get<T>(data_);
-  }
-
-  /*! \brief Get the success value, or throw an exception if this is an error */
-  T&& Unwrap() && {
-    if (!IsOk()) {
-      XGRAMMAR_LOG(FATAL) << "Called Unwrap() on an Err value";
-      XGRAMMAR_UNREACHABLE();
-    }
-    return std::move(std::get<T>(data_));
-  }
-
-  /*! \brief Get the error value, or throw an exception if this is a success */
-  E& UnwrapErr() & {
-    if (IsOk()) {
-      XGRAMMAR_LOG(FATAL) << "Called UnwrapErr() on an Ok value";
-      XGRAMMAR_UNREACHABLE();
-    }
-    return std::get<E>(data_);
-  }
-
-  /*! \brief Get the error value, or throw an exception if this is a success */
-  const E& UnwrapErr() const& {
-    if (!IsErr()) {
-      XGRAMMAR_LOG(FATAL) << "Called UnwrapErr() on an Ok value";
-      XGRAMMAR_UNREACHABLE();
-    }
-    return std::get<E>(data_);
-  }
-
-  /*! \brief Get the error value, or throw an exception if this is a success */
-  E&& UnwrapErr() && {
-    if (!IsErr()) {
-      XGRAMMAR_LOG(FATAL) << "Called UnwrapErr() on an Ok value";
-      XGRAMMAR_UNREACHABLE();
-    }
-    return std::move(std::get<E>(data_));
+  /*! \brief Get the error value. It assumes (or checks if in debug mode) the result is an error. */
+  E UnwrapErr() && {
+    XGRAMMAR_DCHECK(IsErr()) << "Called UnwrapErr() on an Ok value";
+    return std::get<E>(std::move(data_));
   }
 
   /*! \brief Get the success value if present, otherwise return the provided default */
-  T UnwrapOr(T default_value) const { return IsOk() ? std::get<T>(data_) : default_value; }
+  T UnwrapOr(T default_value) && {
+    return IsOk() ? std::get<T>(std::move(data_)) : std::move(default_value);
+  }
+
+  /*!
+   * \brief Get the success value, or throw E if it is an error.
+   * \note It's useful when exposing Result values to Python.
+   */
+  T UnwrapOrThrow() && {
+    if (!IsOk()) {
+      throw std::get<E>(std::move(data_));
+    }
+    return std::get<T>(std::move(data_));
+  }
 
   /*! \brief Map success value to new type using provided function */
-  template <typename U, typename F>
-  Result<U> Map(F&& f) const {
+  template <typename F, typename U = std::decay_t<std::invoke_result_t<F, T>>>
+  Result<U, E> Map(F&& f) && {
     if (IsOk()) {
-      return Result<U, E>::Ok(f(std::get<T>(data_)));
+      return Result<U, E>::Ok(f(std::get<T>(std::move(data_))));
     }
-    return Result<U, E>::Err(std::get<E>(data_));
+    return Result<U, E>::Err(std::get<E>(std::move(data_)));
   }
 
   /*! \brief Map error value to new type using provided function */
   template <typename V, typename F>
-  Result<T, V> MapErr(F&& f) const {
+  Result<T, V> MapErr(F&& f) && {
     if (IsErr()) {
-      return Result<T, V>::Err(f(std::get<E>(data_)));
+      return Result<T, V>::Err(f(std::get<E>(std::move(data_))));
     }
-    return Result<T, V>::Ok(std::get<T>(data_));
+    return Result<T, V>::Ok(std::get<T>(std::move(data_)));
+  }
+
+  template <typename U>
+  static Result<T, E> Convert(Result<U, E>&& result) {
+    if (result.IsOk()) {
+      return Result<T, E>::Ok(std::move(result).Unwrap());
+    }
+    return Result<T, E>::Err(std::move(result).UnwrapErr());
+  }
+
+  /*! \brief Get a variant<T, E> from the result. */
+  std::variant<T, E> ToVariant() && { return std::move(data_); }
+
+  /*!
+   * \brief Get a reference to the success value. It assumes (or checks if in debug mode) the
+   * result is ok.
+   */
+  T& ValueRef() & {
+    XGRAMMAR_DCHECK(IsOk()) << "Called ValueRef() on an Err value";
+    return std::get<T>(data_);
+  }
+
+  /*!
+   * \brief Get a reference to the error value. It assumes (or checks if in debug mode) the
+   * result is an error.
+   */
+  E& ErrRef() & {
+    XGRAMMAR_DCHECK(IsErr()) << "Called ErrRef() on an Ok value";
+    return std::get<E>(data_);
   }
 
  private:
-  explicit Result(const T& value) : data_(value) {}
-  explicit Result(T&& value) : data_(std::move(value)) {}
-  explicit Result(const E& err) : data_(err) {}
-  explicit Result(E&& err) : data_(std::move(err)) {}
+  // in-place construct T in variant
+  template <typename... Args>
+  explicit Result(std::in_place_type_t<T>, Args&&... args)
+      : data_(std::in_place_type<T>, std::forward<Args>(args)...) {}
+
+  // in-place construct E in variant
+  template <typename... Args>
+  explicit Result(std::in_place_type_t<E>, Args&&... args)
+      : data_(std::in_place_type<E>, std::forward<Args>(args)...) {}
 
   std::variant<T, E> data_;
 };

@@ -2089,7 +2089,7 @@ std::string JSONSchemaConverter::VisitArray(
 ) {
   auto array_spec_result = ParseArraySchema(schema);
   if (array_spec_result.IsErr()) {
-    XGRAMMAR_LOG(FATAL) << array_spec_result.UnwrapErr().what();
+    XGRAMMAR_LOG(FATAL) << std::move(array_spec_result).UnwrapErr().what();
   }
 
   auto array_spec = std::move(array_spec_result).Unwrap();
