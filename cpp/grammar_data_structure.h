@@ -19,6 +19,66 @@
 
 namespace xgrammar {
 
+class GrammarAST {
+ public:
+  struct String;
+  struct CharClass;
+  struct CharClassStar;
+  struct EmptyStr;
+  struct RuleRef;
+  struct Sequence;
+  struct Choices;
+  struct TagDispatch;
+
+  using GrammarExpr = std::
+      variant<String, CharClass, CharClassStar, EmptyStr, RuleRef, Sequence, Choices, TagDispatch>;
+
+  struct String {
+    std::string str;
+  };
+
+  struct CharClass {
+    std::vector<std::pair<int32_t, int32_t>> ranges;
+    bool is_negative;
+  };
+
+  struct CharClassStar {
+    std::vector<std::pair<int32_t, int32_t>> ranges;
+    bool is_negative;
+  };
+
+  struct EmptyStr {};
+
+  struct RuleRef {
+    int32_t rule_id;
+  };
+
+  struct Sequence {
+    std::vector<GrammarExpr> exprs;
+  };
+
+  struct Choices {
+    std::vector<GrammarExpr> exprs;
+  };
+
+  /*! \brief The object representing a tag dispatch. */
+  struct TagDispatch {
+    /*! \brief The tag and rule id pairs. */
+    std::vector<std::pair<std::string, int32_t>> tag_rule_pairs;
+    /*! \brief If true, EOS is allowed to generate and will stop the tag dispatch. */
+    bool stop_eos;
+    /*! \brief The strings that will stop the tag dispatch. Only work if stop_eos is false. */
+    std::vector<std::string> stop_str;
+    /*! \brief If true, the tag dispatch will loop after dispatching. */
+    bool loop_after_dispatch;
+  };
+
+  struct Rule {
+    std::string name;
+    GrammarExpr expr;
+  };
+};
+
 /*!
  * \brief This class stores the abstract syntax tree (AST) of the Backus-Naur Form (BNF) grammar.
  * The BNF definition here is standard BNF, and the characters are represented using regex-style
@@ -166,18 +226,6 @@ class Grammar::Impl {
   std::string GetByteString(int32_t rule_expr_id) const {
     return GetByteString(GetRuleExpr(rule_expr_id));
   }
-
-  /*! \brief The object representing a tag dispatch. */
-  struct TagDispatch {
-    /*! \brief The tag and rule id pairs. */
-    std::vector<std::pair<std::string, int32_t>> tag_rule_pairs;
-    /*! \brief If true, EOS is allowed to generate and will stop the tag dispatch. */
-    bool stop_eos;
-    /*! \brief The strings that will stop the tag dispatch. Only work if stop_eos is false. */
-    std::vector<std::string> stop_str;
-    /*! \brief If true, the tag dispatch will loop after dispatching. */
-    bool loop_after_dispatch;
-  };
 
   /*! \brief Get the tag dispatch from the rule expr. */
   TagDispatch GetTagDispatch(const RuleExpr& rule_expr) {
