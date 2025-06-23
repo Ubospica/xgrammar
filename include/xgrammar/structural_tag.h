@@ -79,17 +79,6 @@ struct TagsWithSeparatorFormat {
   std::string separator;
   bool at_least_one = false;
   bool stop_after_first = false;
-
-  TagsWithSeparatorFormat(
-      std::vector<TagFormat> tags,
-      std::string separator,
-      bool at_least_one = false,
-      bool stop_after_first = false
-  )
-      : tags(std::move(tags)),
-        separator(std::move(separator)),
-        at_least_one(at_least_one),
-        stop_after_first(stop_after_first) {}
 };
 
 /******************** Top Level ********************/
