@@ -76,7 +76,7 @@ Result<StructuralTag> StructuralTagImpl::ParseStructuralTag(const picojson::valu
   if (format.IsErr()) {
     return Result<StructuralTag>::Err(std::move(format).UnwrapErr());
   }
-  return Result<StructuralTag>::Ok(StructuralTag(std::move(format).Unwrap()));
+  return Result<StructuralTag>::Ok(StructuralTag{std::move(format).Unwrap()});
 }
 
 Result<Format> StructuralTagImpl::ParseFormat(const picojson::value& value) {
@@ -150,7 +150,7 @@ Result<LiteralFormat> StructuralTagImpl::ParseLiteralFormat(const picojson::obje
         "Literal format must have a text field with a non-empty string"
     );
   }
-  return Result<LiteralFormat>::Ok(text_it->second.get<std::string>());
+  return Result<LiteralFormat>::Ok({text_it->second.get<std::string>()});
 }
 
 Result<JSONSchemaFormat> StructuralTagImpl::ParseJSONSchemaFormat(const picojson::object& obj) {
@@ -162,7 +162,7 @@ Result<JSONSchemaFormat> StructuralTagImpl::ParseJSONSchemaFormat(const picojson
     );
   }
   // here introduces a serialization/deserialization overhead; try to avoid it in the future.
-  return Result<JSONSchemaFormat>::Ok(json_schema_it->second.serialize(false));
+  return Result<JSONSchemaFormat>::Ok({json_schema_it->second.serialize(false)});
 }
 
 Result<WildcardTextFormat> StructuralTagImpl::ParseWildcardTextFormat(const picojson::object& obj) {
@@ -172,7 +172,7 @@ Result<WildcardTextFormat> StructuralTagImpl::ParseWildcardTextFormat(const pico
         "Wildcard text format should not have any fields other than type"
     );
   }
-  return Result<WildcardTextFormat>::Ok();
+  return Result<WildcardTextFormat>::Ok({});
 }
 
 Result<SequenceFormat> StructuralTagImpl::ParseSequenceFormat(const picojson::object& obj) {
@@ -191,7 +191,10 @@ Result<SequenceFormat> StructuralTagImpl::ParseSequenceFormat(const picojson::ob
     }
     elements.push_back(std::move(format).Unwrap());
   }
-  return Result<SequenceFormat>::Ok(std::move(elements));
+  if (elements.size() == 0) {
+    return Result<SequenceFormat>::Err("Empty sequence format is not allowed");
+  }
+  return Result<SequenceFormat>::Ok({std::move(elements)});
 }
 
 Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::value& value) {
@@ -229,9 +232,9 @@ Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::object& obj)
     return Result<TagFormat>::Err("Tag format must have an end field with a non-empty string");
   }
   return Result<TagFormat>::Ok(
-      begin_it->second.get<std::string>(),
-      std::make_shared<Format>(std::move(content).Unwrap()),
-      end_it->second.get<std::string>()
+      {begin_it->second.get<std::string>(),
+       std::make_shared<Format>(std::move(content).Unwrap()),
+       end_it->second.get<std::string>()}
   );
 }
 
@@ -253,6 +256,11 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
     }
     triggers.push_back(trigger.get<std::string>());
   }
+  if (triggers.size() == 0) {
+    return Result<TriggeredTagsFormat>::Err(
+        "Empty triggers are not allowed in triggered tags format"
+    );
+  }
   // tags is required.
   auto tags_it = obj.find("tags");
   if (tags_it == obj.end() || !tags_it->second.is<picojson::array>()) {
@@ -269,6 +277,9 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
       return Result<TriggeredTagsFormat>::Err(std::move(tag_format).UnwrapErr());
     }
     tags.push_back(std::move(tag_format).Unwrap());
+  }
+  if (tags.size() == 0) {
+    return Result<TriggeredTagsFormat>::Err("Empty tags are not allowed in triggered tags format");
   }
   // at_least_one is optional.
   bool at_least_one = false;
@@ -289,7 +300,7 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
     stop_after_first = stop_after_first_it->second.get<bool>();
   }
   return Result<TriggeredTagsFormat>::Ok(
-      std::move(triggers), std::move(tags), at_least_one, stop_after_first
+      {std::move(triggers), std::move(tags), at_least_one, stop_after_first}
   );
 }
 
@@ -312,6 +323,11 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
       return Result<TagsWithSeparatorFormat>::Err(std::move(tag_format).UnwrapErr());
     }
     tags.push_back(std::move(tag_format).Unwrap());
+  }
+  if (tags.size() == 0) {
+    return Result<TagsWithSeparatorFormat>::Err(
+        "Empty tags are not allowed in tags with separator format"
+    );
   }
   // separator is required.
   auto separator_it = obj.find("separator");
@@ -340,11 +356,11 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
     stop_after_first = stop_after_first_it->second.get<bool>();
   }
   return Result<TagsWithSeparatorFormat>::Ok(
-      std::move(tags), separator_it->second.get<std::string>(), at_least_one, stop_after_first
+      {std::move(tags), separator_it->second.get<std::string>(), at_least_one, stop_after_first}
   );
 }
 
-/************** StructuralTag Methods **************/
+/************** StructuralTag Public API **************/
 
 std::variant<StructuralTag, std::runtime_error> StructuralTag::FromJSON(const std::string& json) {
   return StructuralTagImpl().FromJSON(json).ToVariant();
@@ -355,24 +371,350 @@ std::variant<StructuralTag, std::runtime_error> StructuralTag::FromJSON(const st
 /*!
  * \brief Analyze a StructuralTag and extract useful information for conversion to Grammar.
  */
-class StructuralTagAnalyzer {
+class StructuralTagInternalIR {
  public:
-  std::optional<std::runtime_error> AnalyzeStructuralTag(StructuralTag* structural_tag);
+  struct LiteralFormatInternal;
+  struct JSONSchemaFormatInternal;
+  struct WildcardTextFormatInternal;
+  struct SequenceFormatInternal;
+  struct TagFormatInternal;
+  struct TriggeredTagsFormatInternal;
+  struct TagsWithSeparatorFormatInternal;
+
+  using FormatInternal = std::variant<
+      LiteralFormatInternal,
+      JSONSchemaFormatInternal,
+      WildcardTextFormatInternal,
+      SequenceFormatInternal,
+      TagFormatInternal,
+      TriggeredTagsFormatInternal,
+      TagsWithSeparatorFormatInternal>;
+
+  /******************** Basic Formats ********************/
+
+  struct LiteralFormatInternal {
+    inline static constexpr std::string_view type = "literal";
+    std::string text;
+    bool deprived_ = false;
+  };
+
+  struct JSONSchemaFormatInternal {
+    inline static constexpr std::string_view type = "json_schema";
+    std::string json_schema;
+  };
+
+  struct WildcardTextFormatInternal {
+    inline static constexpr std::string_view type = "wildcard_text";
+
+    std::optional<std::string> detected_end_string_ = std::nullopt;
+  };
+
+  /******************** Combinatorial Formats ********************/
+
+  struct SequenceFormatInternal {
+    inline static constexpr std::string_view type = "sequence";
+    std::vector<FormatInternal> elements;
+  };
+
+  struct TagFormatInternal {
+    inline static constexpr std::string_view type = "tag";
+    std::string begin;
+    std::shared_ptr<FormatInternal> content;
+    std::string end;
+
+    bool begin_deprived_ = false;
+    bool end_deprived_ = false;
+  };
+
+  struct TriggeredTagsFormatInternal {
+    inline static constexpr std::string_view type = "triggered_tags";
+    std::vector<std::string> triggers;
+    std::vector<TagFormatInternal> tags;
+    bool at_least_one = false;
+    bool stop_after_first = false;
+
+    std::optional<std::string> detected_end_string_ = std::nullopt;
+  };
+
+  struct TagsWithSeparatorFormatInternal {
+    inline static constexpr std::string_view type = "tags_with_separator";
+    std::vector<TagFormatInternal> tags;
+    std::string separator;
+    bool at_least_one = false;
+    bool stop_after_first = false;
+
+    std::optional<std::string> detected_end_string_ = std::nullopt;
+  };
+
+  struct StructuralTagInternal {
+    inline static constexpr std::string_view type = "structural_tag";
+    FormatInternal format;
+  };
+};
+
+using STIIR = StructuralTagInternalIR;
+
+class STIIRConverter {
+ public:
+  Result<STIIR::StructuralTagInternal> Convert(const StructuralTag& structural_tag);
 
  private:
-  std::optional<std::runtime_error> VisitFormat(Format* format);
-  std::optional<std::runtime_error> VisitLiteralFormat(LiteralFormat* format);
-  std::optional<std::runtime_error> VisitJSONSchemaFormat(JSONSchemaFormat* format);
-  std::optional<std::runtime_error> VisitWildcardTextFormat(WildcardTextFormat* format);
-  std::optional<std::runtime_error> VisitSequenceFormat(SequenceFormat* format);
-  std::optional<std::runtime_error> VisitTagFormat(TagFormat* format);
-  std::optional<std::runtime_error> VisitTriggeredTagsFormat(TriggeredTagsFormat* format);
-  std::optional<std::runtime_error> VisitTagsWithSeparatorFormat(TagsWithSeparatorFormat* format);
+  Result<STIIR::FormatInternal> VisitFormat(const Format& format);
+  Result<STIIR::LiteralFormatInternal> VisitLiteralFormat(const LiteralFormat& format);
+  Result<STIIR::JSONSchemaFormatInternal> VisitJSONSchemaFormat(const JSONSchemaFormat& format);
+  Result<STIIR::WildcardTextFormatInternal> VisitWildcardTextFormat(const WildcardTextFormat& format
+  );
+  Result<STIIR::SequenceFormatInternal> VisitSequenceFormat(const SequenceFormat& format);
+  Result<STIIR::TagFormatInternal> VisitTagFormat(const TagFormat& format);
+  Result<STIIR::TriggeredTagsFormatInternal> VisitTriggeredTagsFormat(
+      const TriggeredTagsFormat& format
+  );
+  Result<STIIR::TagsWithSeparatorFormatInternal> VisitTagsWithSeparatorFormat(
+      const TagsWithSeparatorFormat& format
+  );
 
-  std::optional<std::string> DetectEndString();
+  int visit_format_recursion_depth_ = 0;
+};
+
+Result<STIIR::StructuralTagInternal> STIIRConverter::Convert(const StructuralTag& structural_tag) {
+  return VisitFormat(structural_tag.format).Map([](auto&& format) {
+    return STIIR::StructuralTagInternal{std::move(format)};
+  });
+}
+
+Result<STIIR::FormatInternal> STIIRConverter::VisitFormat(const Format& format) {
+  RecursionGuard guard(&visit_format_recursion_depth_);
+  return std::visit(
+      [this](auto&& arg) -> Result<STIIR::FormatInternal> {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, LiteralFormat>) {
+          return Result<STIIR::FormatInternal>::Convert(VisitLiteralFormat(arg));
+        } else if constexpr (std::is_same_v<T, JSONSchemaFormat>) {
+          return Result<STIIR::FormatInternal>::Convert(VisitJSONSchemaFormat(arg));
+        } else if constexpr (std::is_same_v<T, WildcardTextFormat>) {
+          return Result<STIIR::FormatInternal>::Convert(VisitWildcardTextFormat(arg));
+        } else if constexpr (std::is_same_v<T, SequenceFormat>) {
+          return Result<STIIR::FormatInternal>::Convert(VisitSequenceFormat(arg));
+        } else if constexpr (std::is_same_v<T, TagFormat>) {
+          return Result<STIIR::FormatInternal>::Convert(VisitTagFormat(arg));
+        } else if constexpr (std::is_same_v<T, TriggeredTagsFormat>) {
+          return Result<STIIR::FormatInternal>::Convert(VisitTriggeredTagsFormat(arg));
+        } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormat>) {
+          return Result<STIIR::FormatInternal>::Convert(VisitTagsWithSeparatorFormat(arg));
+        } else {
+          // Should not be visited.
+          XGRAMMAR_LOG(FATAL) << "STIIRConverter Internal: Unhandled format type: "
+                              << typeid(T).name();
+        }
+      },
+      format
+  );
+}
+
+Result<STIIR::LiteralFormatInternal> STIIRConverter::VisitLiteralFormat(const LiteralFormat& format
+) {
+  return Result<STIIR::LiteralFormatInternal>::Ok({format.text});
+}
+
+Result<STIIR::JSONSchemaFormatInternal> STIIRConverter::VisitJSONSchemaFormat(
+    const JSONSchemaFormat& format
+) {
+  return Result<STIIR::JSONSchemaFormatInternal>::Ok({format.json_schema});
+}
+
+Result<STIIR::WildcardTextFormatInternal> STIIRConverter::VisitWildcardTextFormat(
+    const WildcardTextFormat& format
+) {
+  return Result<STIIR::WildcardTextFormatInternal>::Ok({});
+}
+
+Result<STIIR::SequenceFormatInternal> STIIRConverter::VisitSequenceFormat(
+    const SequenceFormat& format
+) {
+  std::vector<STIIR::FormatInternal> elements;
+  for (const auto& element : format.elements) {
+    auto result = VisitFormat(element);
+    if (result.IsErr()) {
+      return Result<STIIR::SequenceFormatInternal>::Err(std::move(result).UnwrapErr());
+    }
+    elements.push_back(std::move(result).Unwrap());
+  }
+  return Result<STIIR::SequenceFormatInternal>::Ok({std::move(elements)});
+}
+
+Result<STIIR::TagFormatInternal> STIIRConverter::VisitTagFormat(const TagFormat& format) {
+  auto content_result = VisitFormat(*format.content);
+  if (content_result.IsErr()) {
+    return Result<STIIR::TagFormatInternal>::Err(std::move(content_result).UnwrapErr());
+  }
+  return Result<STIIR::TagFormatInternal>::Ok(
+      {format.begin,
+       std::make_shared<STIIR::FormatInternal>(std::move(content_result).Unwrap()),
+       format.end}
+  );
+}
+
+Result<STIIR::TriggeredTagsFormatInternal> STIIRConverter::VisitTriggeredTagsFormat(
+    const TriggeredTagsFormat& format
+) {
+  std::vector<STIIR::TagFormatInternal> tags;
+  tags.reserve(format.tags.size());
+  for (const auto& tag : format.tags) {
+    auto result = VisitTagFormat(tag);
+    if (result.IsErr()) {
+      return Result<STIIR::TriggeredTagsFormatInternal>::Err(std::move(result).UnwrapErr());
+    }
+    tags.push_back(std::move(result).Unwrap());
+  }
+  return Result<STIIR::TriggeredTagsFormatInternal>::Ok(
+      {format.triggers, std::move(tags), format.at_least_one, format.stop_after_first}
+  );
+}
+
+Result<STIIR::TagsWithSeparatorFormatInternal> STIIRConverter::VisitTagsWithSeparatorFormat(
+    const TagsWithSeparatorFormat& format
+) {
+  std::vector<STIIR::TagFormatInternal> tags;
+  tags.reserve(format.tags.size());
+  for (const auto& tag : format.tags) {
+    auto result = VisitTagFormat(tag);
+    if (result.IsErr()) {
+      return Result<STIIR::TagsWithSeparatorFormatInternal>::Err(std::move(result).UnwrapErr());
+    }
+    tags.push_back(std::move(result).Unwrap());
+  }
+  return Result<STIIR::TagsWithSeparatorFormatInternal>::Ok(
+      {std::move(tags), format.separator, format.at_least_one, format.stop_after_first}
+  );
+}
+
+class StructuralTagNestedSeqRemover {
+ public:
+  void RemoveNestedSeq(STIIR::StructuralTagInternal* structural_tag);
+
+ private:
+  void VisitFormat(STIIR::FormatInternal* format);
+  void VisitLiteralFormat(STIIR::LiteralFormatInternal* format) {}
+  void VisitJSONSchemaFormat(STIIR::JSONSchemaFormatInternal* format) {}
+  void VisitWildcardTextFormat(STIIR::WildcardTextFormatInternal* format) {}
+  void VisitSequenceFormat(STIIR::SequenceFormatInternal* format);
+  void VisitTagFormat(STIIR::TagFormatInternal* format);
+  void VisitTriggeredTagsFormat(STIIR::TriggeredTagsFormatInternal* format);
+  void VisitTagsWithSeparatorFormat(STIIR::TagsWithSeparatorFormatInternal* format);
+};
+
+void StructuralTagNestedSeqRemover::RemoveNestedSeq(STIIR::StructuralTagInternal* structural_tag) {
+  VisitFormat(&structural_tag->format);
+}
+
+void StructuralTagNestedSeqRemover::VisitFormat(STIIR::FormatInternal* format) {
+  std::visit(
+      [this](auto& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, STIIR::LiteralFormatInternal>) {
+          VisitLiteralFormat(&arg);
+        } else if constexpr (std::is_same_v<T, STIIR::JSONSchemaFormatInternal>) {
+          VisitJSONSchemaFormat(&arg);
+        } else if constexpr (std::is_same_v<T, STIIR::WildcardTextFormatInternal>) {
+          VisitWildcardTextFormat(&arg);
+        } else if constexpr (std::is_same_v<T, STIIR::SequenceFormatInternal>) {
+          VisitSequenceFormat(&arg);
+        } else if constexpr (std::is_same_v<T, STIIR::TagFormatInternal>) {
+          VisitTagFormat(&arg);
+        } else if constexpr (std::is_same_v<T, STIIR::TriggeredTagsFormatInternal>) {
+          VisitTriggeredTagsFormat(&arg);
+        } else if constexpr (std::is_same_v<T, STIIR::TagsWithSeparatorFormatInternal>) {
+          VisitTagsWithSeparatorFormat(&arg);
+        } else {
+          // Should not be visited.
+          XGRAMMAR_LOG(FATAL) << "StructuralTagNestedSeqRemover Internal: Unhandled format type: "
+                              << typeid(T).name();
+        }
+      },
+      *format
+  );
+}
+
+void StructuralTagNestedSeqRemover::VisitSequenceFormat(STIIR::SequenceFormatInternal* format) {
+  std::vector<STIIR::FormatInternal> flattened_elements;
+
+  // Helper function to recursively flatten sequence elements
+  std::function<void(const std::vector<STIIR::FormatInternal>&)> f_flatten_element =
+      [&](const std::vector<STIIR::FormatInternal>& elements) {
+        for (const auto& element : elements) {
+          if (std::holds_alternative<STIIR::SequenceFormatInternal>(element)) {
+            const auto& seq = std::get<STIIR::SequenceFormatInternal>(element);
+            f_flatten_element(seq.elements);
+          } else {
+            flattened_elements.push_back(element);
+          }
+        }
+      };
+
+  f_flatten_element(format->elements);
+
+  for (auto& element : flattened_elements) {
+    XGRAMMAR_DCHECK(!std::holds_alternative<STIIR::SequenceFormatInternal>(element))
+        << "Nested sequence should be flattened";
+    VisitFormat(&element);
+  }
+
+  std::swap(format->elements, flattened_elements);
+}
+
+void StructuralTagNestedSeqRemover::VisitTagFormat(STIIR::TagFormatInternal* format) {
+  VisitFormat(format->content.get());
+}
+
+void StructuralTagNestedSeqRemover::VisitTriggeredTagsFormat(
+    STIIR::TriggeredTagsFormatInternal* format
+) {
+  for (auto& tag : format->tags) {
+    VisitTagFormat(&tag);
+  }
+}
+
+void StructuralTagNestedSeqRemover::VisitTagsWithSeparatorFormat(
+    STIIR::TagsWithSeparatorFormatInternal* format
+) {
+  for (auto& tag : format->tags) {
+    VisitTagFormat(&tag);
+  }
+}
+
+/************** StructuralTag Analyzer **************/
+
+class StructuralTagAnalyzer {
+ private:
+  using FormatInternal = STIIR::FormatInternal;
+  using LiteralFormatInternal = STIIR::LiteralFormatInternal;
+  using JSONSchemaFormatInternal = STIIR::JSONSchemaFormatInternal;
+  using WildcardTextFormatInternal = STIIR::WildcardTextFormatInternal;
+  using SequenceFormatInternal = STIIR::SequenceFormatInternal;
+  using TagFormatInternal = STIIR::TagFormatInternal;
+  using TriggeredTagsFormatInternal = STIIR::TriggeredTagsFormatInternal;
+  using TagsWithSeparatorFormatInternal = STIIR::TagsWithSeparatorFormatInternal;
+  using StructuralTagInternal = STIIR::StructuralTagInternal;
+
+ public:
+  std::optional<std::runtime_error> Analyze(StructuralTagInternal* structural_tag_internal);
+
+ private:
+  std::optional<std::runtime_error> VisitFormat(FormatInternal* format);
+  std::optional<std::runtime_error> VisitLiteralFormat(LiteralFormatInternal* format);
+  std::optional<std::runtime_error> VisitJSONSchemaFormat(JSONSchemaFormatInternal* format);
+  std::optional<std::runtime_error> VisitWildcardTextFormat(WildcardTextFormatInternal* format);
+  std::optional<std::runtime_error> VisitSequenceFormat(SequenceFormatInternal* format);
+  std::optional<std::runtime_error> VisitTagFormat(TagFormatInternal* format);
+  std::optional<std::runtime_error> VisitTriggeredTagsFormat(TriggeredTagsFormatInternal* format);
+  std::optional<std::runtime_error> VisitTagsWithSeparatorFormat(
+      TagsWithSeparatorFormatInternal* format
+  );
+
+  Result<std::optional<std::string>> DetectEndString();
 
   struct Frame {
-    Format* format;
+    STIIR::FormatInternal* format;
     int element_id;  // The id of the element currently visited.
   };
 
@@ -380,42 +722,105 @@ class StructuralTagAnalyzer {
   int visit_format_recursion_depth_ = 0;
 };
 
-std::optional<std::string> StructuralTagAnalyzer::DetectEndString() {
-  for (int i = static_cast<int>(stack_.size()) - 1; i >= 0; --i) {
-    auto& frame = stack_[i];
+std::optional<std::runtime_error> StructuralTagAnalyzer::Analyze(
+    STIIR::StructuralTagInternal* structural_tag_internal
+) {
+  return VisitFormat(&structural_tag_internal->format);
+}
 
-    if (frame.format->type == "tag") {
-      return frame.format->end;
+Result<std::optional<std::string>> StructuralTagAnalyzer::DetectEndString() {
+  for (int i = static_cast<int>(stack_.size()) - 2; i >= 0; --i) {
+    if (auto tag_format = std::get_if<TagFormatInternal>(stack_[i].format)) {
+      if (tag_format->end_deprived_) {
+        return Result<std::optional<std::string>>::Err(
+            "StructuralTagAnalyzer Internal: End string is already deprived"
+        );
+      }
+      tag_format->end_deprived_ = true;
+      return Result<std::optional<std::string>>::Ok(tag_format->end);
+    } else if (auto sequence_format = std::get_if<SequenceFormatInternal>(stack_[i].format)) {
+      XGRAMMAR_DCHECK(sequence_format->elements.size() > 0);
+      if (stack_[i].element_id == static_cast<int>(sequence_format->elements.size()) - 1) {
+        continue;
+      }
+      auto next_element = sequence_format->elements[stack_[i].element_id + 1];
+      if (auto next_element_tag = std::get_if<TagFormatInternal>(&next_element)) {
+        if (next_element_tag->begin_deprived_) {
+          return Result<std::optional<std::string>>::Err(
+              "StructuralTagAnalyzer Internal: Begin string is already deprived"
+          );
+        }
+        next_element_tag->begin_deprived_ = true;
+        return Result<std::optional<std::string>>::Ok(next_element_tag->begin);
+      } else if (auto next_element_literal = std::get_if<LiteralFormatInternal>(&next_element)) {
+        if (next_element_literal->deprived_) {
+          return Result<std::optional<std::string>>::Err(
+              "StructuralTagAnalyzer Internal: Literal string is already deprived"
+          );
+        }
+        next_element_literal->deprived_ = true;
+        return Result<std::optional<std::string>>::Ok(next_element_literal->text);
+      } else {
+        // Nested sequence should be flattened by the nested seq remover.
+        XGRAMMAR_DCHECK(!std::holds_alternative<SequenceFormatInternal>(next_element));
+        // Must be the following:
+        XGRAMMAR_DCHECK(
+            std::holds_alternative<JSONSchemaFormatInternal>(next_element) ||
+            std::holds_alternative<WildcardTextFormatInternal>(next_element) ||
+            std::holds_alternative<TriggeredTagsFormatInternal>(next_element) ||
+            std::holds_alternative<TagsWithSeparatorFormatInternal>(next_element)
+        );
+        auto type_name =
+            std::visit([](auto&& fmt) -> std::string_view { return fmt.type; }, next_element);
+        return Result<std::optional<std::string>>::Err(
+            std::string("StructuralTagAnalyzer: Cannot detect end string from type ") +
+            std::string(type_name)
+        );
+      }
+    } else {
+      const auto& fmt = *stack_[i].format;
+      // These formats cannot recursively contain other formats.
+      XGRAMMAR_DCHECK(
+          !std::holds_alternative<LiteralFormatInternal>(fmt) &&
+          !std::holds_alternative<JSONSchemaFormatInternal>(fmt) &&
+          !std::holds_alternative<WildcardTextFormatInternal>(fmt)
+      );
+      // Must be the following:
+      XGRAMMAR_DCHECK(
+          std::holds_alternative<TriggeredTagsFormatInternal>(fmt) ||
+          std::holds_alternative<TagsWithSeparatorFormatInternal>(fmt)
+      );
+      auto type_name = std::visit([](auto&& fmt) -> std::string_view { return fmt.type; }, fmt);
+      return Result<std::optional<std::string>>::Err(
+          std::string("StructuralTagAnalyzer: Cannot detect end string from type ") +
+          std::string(type_name)
+      );
     }
   }
-  return std::nullopt;
+  // If we reach the root, means the element is at the end of the structural tag, so there is no
+  // end string.
+  return Result<std::optional<std::string>>::Ok(std::nullopt);
 }
 
-std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
-    StructuralTag* structural_tag
-) {
-  return VisitFormat(&structural_tag->format);
-}
-
-std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* format) {
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(FormatInternal* format) {
   RecursionGuard guard(&visit_format_recursion_depth_);
   stack_.push_back({format, 0});
   auto result = std::visit(
-      [&](auto&& arg) -> std::optional<std::runtime_error> {
+      [&](auto& arg) -> std::optional<std::runtime_error> {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, LiteralFormat>) {
+        if constexpr (std::is_same_v<T, LiteralFormatInternal>) {
           return VisitLiteralFormat(&arg);
-        } else if constexpr (std::is_same_v<T, JSONSchemaFormat>) {
+        } else if constexpr (std::is_same_v<T, JSONSchemaFormatInternal>) {
           return VisitJSONSchemaFormat(&arg);
-        } else if constexpr (std::is_same_v<T, WildcardTextFormat>) {
+        } else if constexpr (std::is_same_v<T, WildcardTextFormatInternal>) {
           return VisitWildcardTextFormat(&arg);
-        } else if constexpr (std::is_same_v<T, SequenceFormat>) {
+        } else if constexpr (std::is_same_v<T, SequenceFormatInternal>) {
           return VisitSequenceFormat(&arg);
-        } else if constexpr (std::is_same_v<T, TagFormat>) {
+        } else if constexpr (std::is_same_v<T, TagFormatInternal>) {
           return VisitTagFormat(&arg);
-        } else if constexpr (std::is_same_v<T, TriggeredTagsFormat>) {
+        } else if constexpr (std::is_same_v<T, TriggeredTagsFormatInternal>) {
           return VisitTriggeredTagsFormat(&arg);
-        } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormat>) {
+        } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormatInternal>) {
           return VisitTagsWithSeparatorFormat(&arg);
         } else {
           XGRAMMAR_LOG(FATAL) << "Unhandled format type: " << typeid(T).name();
@@ -427,23 +832,31 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* for
   return result;
 }
 
-std::optional<std::runtime_error> StructuralTagAnalyzer::VisitLiteralFormat(LiteralFormat* format) {
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitLiteralFormat(
+    LiteralFormatInternal* format
+) {
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitJSONSchemaFormat(
-    JSONSchemaFormat* format
+    JSONSchemaFormatInternal* format
 ) {
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitWildcardTextFormat(
-    WildcardTextFormat* format
+    WildcardTextFormatInternal* format
 ) {
+  auto end_string_result = DetectEndString();
+  if (end_string_result.IsErr()) {
+    return std::move(end_string_result).UnwrapErr();
+  }
+  format->detected_end_string_ = std::move(end_string_result).Unwrap();
   return std::nullopt;
 }
 
-std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSequenceFormat(SequenceFormat* format
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSequenceFormat(
+    SequenceFormatInternal* format
 ) {
   for (auto& element : format->elements) {
     auto result = VisitFormat(&element);
@@ -455,34 +868,100 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSequenceFormat(Seq
   return std::nullopt;
 }
 
-std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagFormat(TagFormat* format) {
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagFormat(TagFormatInternal* format) {
   return VisitFormat(format->content.get());
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTriggeredTagsFormat(
-    TriggeredTagsFormat* format
+    TriggeredTagsFormatInternal* format
 ) {
+  auto end_string_result = DetectEndString();
+  if (end_string_result.IsErr()) {
+    return std::move(end_string_result).UnwrapErr();
+  }
+  format->detected_end_string_ = std::move(end_string_result).Unwrap();
+  for (auto& tag : format->tags) {
+    auto result = VisitTagFormat(&tag);
+    if (result.has_value()) {
+      return result;
+    }
+    ++stack_.back().element_id;
+  }
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagsWithSeparatorFormat(
-    TagsWithSeparatorFormat* format
+    TagsWithSeparatorFormatInternal* format
 ) {
+  auto end_string_result = DetectEndString();
+  if (end_string_result.IsErr()) {
+    return std::move(end_string_result).UnwrapErr();
+  }
+  format->detected_end_string_ = std::move(end_string_result).Unwrap();
+  for (auto& tag : format->tags) {
+    auto result = VisitTagFormat(&tag);
+    if (result.has_value()) {
+      return result;
+    }
+    ++stack_.back().element_id;
+  }
   return std::nullopt;
 }
 
-/************** StructuralTag to Grammar Converter **************/
+/************** StructuralTagInternal to Grammar Converter **************/
 
-class StructuralTagGrammarConverter {
- public:
+class StructuralTagInternalToGrammarConverter {
+ private:
+  using FormatInternal = STIIR::FormatInternal;
+  using LiteralFormatInternal = STIIR::LiteralFormatInternal;
+  using JSONSchemaFormatInternal = STIIR::JSONSchemaFormatInternal;
+  using WildcardTextFormatInternal = STIIR::WildcardTextFormatInternal;
+  using SequenceFormatInternal = STIIR::SequenceFormatInternal;
+  using TagFormatInternal = STIIR::TagFormatInternal;
+  using TriggeredTagsFormatInternal = STIIR::TriggeredTagsFormatInternal;
+  using TagsWithSeparatorFormatInternal = STIIR::TagsWithSeparatorFormatInternal;
   using StructuralTagInternal = STIIR::StructuralTagInternal;
 
-  Result<Grammar> Convert(const std::string& structural_tag_json);
-  Result<Grammar> Convert(const StructuralTag& structural_tag);
+ public:
   Result<Grammar> Convert(const StructuralTagInternal& structural_tag_internal);
 };
 
-Result<Grammar> StructuralTagGrammarConverter::Convert(const std::string& structural_tag_json) {
+// Result<Grammar> StructuralTagGrammarConverter::Convert(const std::string& structural_tag_json) {
+//   auto structural_tag = StructuralTagImpl().FromJSON(structural_tag_json);
+//   if (structural_tag.IsErr()) {
+//     throw std::runtime_error(std::move(structural_tag).UnwrapErr());
+//   }
+//   return Convert(std::move(structural_tag).Unwrap());
+// }
+
+// Result<Grammar> StructuralTagGrammarConverter::Convert(const StructuralTag& structural_tag) {
+//   return Result<Grammar>::Err("Not implemented");
+//   // auto structural_tag_internal = STIIR::FromStructuralTag(structural_tag);
+//   // if (structural_tag_internal.IsErr()) {
+//   //   return Result<Grammar>::Err(std::move(structural_tag_internal).UnwrapErr());
+//   // }
+//   // return Convert(std::move(structural_tag_internal).Unwrap());
+// }
+
+// Result<Grammar> StructuralTagGrammarConverter::Convert(
+//     const StructuralTagInternal& structural_tag_internal
+// ) {
+//   return Result<Grammar>::Err("Not implemented");
+// }
+
+/************** StructuralTag to Grammar Converter **************/
+
+/**
+ * \brief Convert a StructuralTag or a StructuralTag JSON string to a Grammar. It assembles the
+ * above conversion and analysis steps.
+ */
+class StructuralTagToGrammarConverter {
+ public:
+  static Result<Grammar> Convert(const std::string& structural_tag_json);
+  static Result<Grammar> Convert(const StructuralTag& structural_tag);
+};
+
+Result<Grammar> StructuralTagToGrammarConverter::Convert(const std::string& structural_tag_json) {
   auto structural_tag = StructuralTagImpl().FromJSON(structural_tag_json);
   if (structural_tag.IsErr()) {
     throw std::runtime_error(std::move(structural_tag).UnwrapErr());
@@ -490,28 +969,28 @@ Result<Grammar> StructuralTagGrammarConverter::Convert(const std::string& struct
   return Convert(std::move(structural_tag).Unwrap());
 }
 
-Result<Grammar> StructuralTagGrammarConverter::Convert(const StructuralTag& structural_tag) {
-  auto structural_tag_internal = STIIR::FromStructuralTag(structural_tag);
-  if (structural_tag_internal.IsErr()) {
-    return Result<Grammar>::Err(std::move(structural_tag_internal).UnwrapErr());
+Result<Grammar> StructuralTagToGrammarConverter::Convert(const StructuralTag& structural_tag) {
+  auto structural_tag_internal_result = STIIRConverter().Convert(structural_tag);
+  if (structural_tag_internal_result.IsErr()) {
+    return Result<Grammar>::Err(std::move(structural_tag_internal_result).UnwrapErr());
   }
-  return Convert(std::move(structural_tag_internal).Unwrap());
-}
-
-Result<Grammar> StructuralTagGrammarConverter::Convert(
-    const StructuralTagInternal& structural_tag_internal
-) {
-  return Result<Grammar>::Err("Not implemented");
+  auto structural_tag_internal = std::move(structural_tag_internal_result).Unwrap();
+  StructuralTagNestedSeqRemover().RemoveNestedSeq(&structural_tag_internal);
+  auto analyzer_result = StructuralTagAnalyzer().Analyze(&structural_tag_internal);
+  if (analyzer_result.has_value()) {
+    return Result<Grammar>::Err(std::move(*analyzer_result));
+  }
+  return StructuralTagInternalToGrammarConverter().Convert(structural_tag_internal);
 }
 
 /************** StructuralTag to Grammar Public API **************/
 
 Result<Grammar> StructuralTagToGrammar(const std::string& structural_tag_json) {
-  return StructuralTagGrammarConverter().Convert(structural_tag_json);
+  return StructuralTagToGrammarConverter::Convert(structural_tag_json);
 }
 
 Result<Grammar> StructuralTagToGrammar(const StructuralTag& structural_tag) {
-  return StructuralTagGrammarConverter().Convert(structural_tag);
+  return StructuralTagToGrammarConverter::Convert(structural_tag);
 }
 
 // Grammar StructuralTagToGrammar(

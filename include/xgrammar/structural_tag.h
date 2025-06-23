@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -37,108 +38,65 @@ using Format = std::variant<
 /******************** Basic Formats ********************/
 
 struct LiteralFormat {
-  static constexpr const char* type = "literal";
+  inline static constexpr std::string_view type = "literal";
   std::string text;
-  LiteralFormat(std::string text) : text(std::move(text)) {}
-
-  // For StructuralTagAnalyzer
- private:
-  bool deprived_ = false;
-  friend class StructuralTagAnalyzer;
 };
 
 struct JSONSchemaFormat {
-  static constexpr const char* type = "json_schema";
+  inline static constexpr std::string_view type = "json_schema";
   std::string json_schema;
-  JSONSchemaFormat(std::string json_schema) : json_schema(std::move(json_schema)) {}
 };
 
 struct WildcardTextFormat {
-  static constexpr const char* type = "wildcard_text";
-  WildcardTextFormat() {}
-
-  // For StructuralTagAnalyzer
- private:
-  bool deprived_ = false;
-  friend class StructuralTagAnalyzer;
+  inline static constexpr std::string_view type = "wildcard_text";
 };
 
 /******************** Combinatorial Formats ********************/
 
 struct SequenceFormat {
-  static constexpr const char* type = "sequence";
+  inline static constexpr std::string_view type = "sequence";
   std::vector<Format> elements;
-  SequenceFormat(std::vector<Format> elements) : elements(std::move(elements)) {}
 };
 
 struct TagFormat {
-  static constexpr const char* type = "tag";
+  inline static constexpr std::string_view type = "tag";
   std::string begin;
   std::shared_ptr<Format> content;
   std::string end;
-
-  TagFormat(std::string begin, std::shared_ptr<Format> content, std::string end)
-      : begin(std::move(begin)), content(std::move(content)), end(std::move(end)) {}
-
-  // For StructuralTagAnalyzer
- private:
-  bool begin_deprived_ = false;
-  bool end_deprived_ = false;
-  friend class StructuralTagAnalyzer;
 };
 
 struct TriggeredTagsFormat {
-  static constexpr const char* type = "triggered_tags";
+  inline static constexpr std::string_view type = "triggered_tags";
   std::vector<std::string> triggers;
   std::vector<TagFormat> tags;
   bool at_least_one = false;
   bool stop_after_first = false;
-
-  TriggeredTagsFormat(
-      std::vector<std::string> triggers,
-      std::vector<TagFormat> tags,
-      bool at_least_one,
-      bool stop_after_first
-  )
-      : triggers(std::move(triggers)),
-        tags(std::move(tags)),
-        at_least_one(at_least_one),
-        stop_after_first(stop_after_first) {}
-
-  // For StructuralTagAnalyzer
- private:
-  std::optional<std::string> detected_end_string_ = std::nullopt;
-  friend class StructuralTagAnalyzer;
 };
 
 struct TagsWithSeparatorFormat {
-  static constexpr const char* type = "tags_with_separator";
+  inline static constexpr std::string_view type = "tags_with_separator";
   std::vector<TagFormat> tags;
   std::string separator;
   bool at_least_one = false;
   bool stop_after_first = false;
 
   TagsWithSeparatorFormat(
-      std::vector<TagFormat> tags, std::string separator, bool at_least_one, bool stop_after_first
+      std::vector<TagFormat> tags,
+      std::string separator,
+      bool at_least_one = false,
+      bool stop_after_first = false
   )
       : tags(std::move(tags)),
         separator(std::move(separator)),
         at_least_one(at_least_one),
         stop_after_first(stop_after_first) {}
-
-  // For StructuralTagAnalyzer
- private:
-  std::optional<std::string> detected_end_string_ = std::nullopt;
-  friend class StructuralTagAnalyzer;
 };
 
 /******************** Top Level ********************/
 
 struct StructuralTag {
-  static constexpr const char* type = "structural_tag";
+  inline static constexpr std::string_view type = "structural_tag";
   Format format;
-
-  StructuralTag(Format format) : format(std::move(format)) {}
 
   /*!
    * \brief Parse a JSON string into a StructuralTag.
