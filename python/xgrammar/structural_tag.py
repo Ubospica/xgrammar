@@ -137,6 +137,15 @@ class StructuralTag(BaseModel):
         )
 
     @staticmethod
+    def is_legacy_structural_tag(json_str: Union[str, Dict[str, Any]]) -> bool:
+        """Check if a JSON string or dictionary is a legacy structural tag."""
+        if isinstance(json_str, str):
+            stag_obj = json.loads(json_str)
+        else:
+            stag_obj = json_str
+        return "tags" in stag_obj
+
+    @staticmethod
     def from_json(json_str: Union[str, Dict[str, Any]]) -> "StructuralTag":
         """Convert a JSON string to a structural tag."""
         if isinstance(json_str, str):
