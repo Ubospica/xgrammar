@@ -9,7 +9,7 @@ The mission of this project is to bring flexible zero-overhead structure generat
    :maxdepth: 1
    :caption: Get Started
 
-   start/install
+   start/installation
    start/quick_start
 
 .. toctree::
