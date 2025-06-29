@@ -924,7 +924,75 @@ class StructuralTagInternalToGrammarConverter {
 
  public:
   Result<Grammar> Convert(const StructuralTagInternal& structural_tag_internal);
+
+ private:
+  Result<int32_t> VisitFormat(const FormatInternal& format);
+  Result<int32_t> VisitLiteralFormat(const LiteralFormatInternal& format);
+  Result<int32_t> VisitJSONSchemaFormat(const JSONSchemaFormatInternal& format);
+  Result<int32_t> VisitWildcardTextFormat(const WildcardTextFormatInternal& format);
+  Result<int32_t> VisitSequenceFormat(const SequenceFormatInternal& format);
+  Result<int32_t> VisitTagFormat(const TagFormatInternal& format);
+  Result<int32_t> VisitTriggeredTagsFormat(const TriggeredTagsFormatInternal& format);
+  Result<int32_t> VisitTagsWithSeparatorFormat(const TagsWithSeparatorFormatInternal& format);
+
+  GrammarBuilder builder_;
 };
+
+void StructuralTagInternalToGrammarConverter::Convert(
+    const StructuralTagInternal& structural_tag_internal
+) {
+  builder_ = GrammarBuilder();
+  VisitFormat(structural_tag_internal.format);
+}
+
+Result<int32_t> StructuralTagInternalToGrammarConverter::VisitFormat(const FormatInternal& format) {
+  return std::visit(
+      [&](auto&& arg) -> Result<int32_t> {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, LiteralFormatInternal>) {
+          return VisitLiteralFormat(arg);
+        } else if constexpr (std::is_same_v<T, JSONSchemaFormatInternal>) {
+          return VisitJSONSchemaFormat(arg);
+        } else if constexpr (std::is_same_v<T, WildcardTextFormatInternal>) {
+          return VisitWildcardTextFormat(arg);
+        } else if constexpr (std::is_same_v<T, SequenceFormatInternal>) {
+          return VisitSequenceFormat(arg);
+        } else if constexpr (std::is_same_v<T, TagFormatInternal>) {
+          return VisitTagFormat(arg);
+        } else if constexpr (std::is_same_v<T, TriggeredTagsFormatInternal>) {
+          return VisitTriggeredTagsFormat(arg);
+        } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormatInternal>) {
+          return VisitTagsWithSeparatorFormat(arg);
+        }
+      },
+      format
+  );
+}
+
+Result<int32_t> StructuralTagInternalToGrammarConverter::VisitLiteralFormat(
+    const LiteralFormatInternal& format
+) {
+  auto rule_expr_id = builder_.AddByteString(format.text);
+  return Result<int32_t>::Ok(builder_.AddRuleWithHint("literal", rule_expr_id));
+}
+
+Result<int32_t> StructuralTagInternalToGrammarConverter::VisitJSONSchemaFormat(
+    const JSONSchemaFormatInternal& format
+) {
+  auto schema_grammar = Grammar::FromJSONSchema(format.schema, true);
+  return Result<int32_t>::Ok(SubGrammarAdder::Apply(&builder_, schema_grammar));
+}
+
+Result<int32_t> StructuralTagInternalToGrammarConverter::VisitWildcardTextFormat(
+    const WildcardTextFormatInternal& format
+) {
+  if (format.detected_end_string_.has_value()) {
+    auto rule_expr_id = builder_.AddByteString(*format.detected_end_string_);
+    return Result<int32_t>::Ok(builder_.AddRuleWithHint("wildcard_text", rule_expr_id));
+  }
+  return Result<int32_t>::Err(std::runtime_error("Wildcard text format has no detected end string")
+  );
+}
 
 // Result<Grammar> StructuralTagGrammarConverter::Convert(const std::string& structural_tag_json) {
 //   auto structural_tag = StructuralTagImpl().FromJSON(structural_tag_json);

@@ -38,6 +38,8 @@ struct alignas(8) FSMEdge {
     kEOS = -3,
   };
 
+  inline static constexpr int kMaxChar = 255;
+
   /*!
    * \brief The information of the edge.
    * \details When min >= 0, then it represents a range of characters [min, max].
