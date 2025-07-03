@@ -50,7 +50,7 @@ namespace xgrammar {
 std::size_t MemorySize(const Grammar::Impl& impl) {
   // we assume strings are not long, so we don't iterate through all the rules
   return impl.rules_.size() * sizeof(impl.rules_[0]) + MemorySize(impl.grammar_expr_data_) +
-         MemorySize(impl.grammar_expr_indptr_) + MemorySize(impl.root_tag_dispatch_fsm) +
+         MemorySize(impl.root_tag_dispatch_fsm) +
          MemorySize(impl.tag_dispatch_end_node_to_rule_id) + MemorySize(impl.allow_empty_rule_ids);
 }
 

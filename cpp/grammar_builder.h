@@ -68,15 +68,11 @@ class GrammarBuilder {
 
   /*! \brief Add a grammar_expr and return the grammar_expr id. */
   int32_t AddGrammarExpr(const GrammarExpr& grammar_expr) {
-    grammar_->grammar_expr_indptr_.push_back(grammar_->grammar_expr_data_.size());
-    grammar_->grammar_expr_data_.push_back(static_cast<int32_t>(grammar_expr.type));
-    grammar_->grammar_expr_data_.push_back(grammar_expr.data_len);
-    grammar_->grammar_expr_data_.insert(
-        grammar_->grammar_expr_data_.end(),
-        grammar_expr.data,
-        grammar_expr.data + grammar_expr.data_len
+    return grammar_->grammar_expr_data_.PushBackNonContiguous(
+        static_cast<int32_t>(grammar_expr.type),
+        grammar_expr.begin(),
+        static_cast<int32_t>(grammar_expr.size())
     );
-    return static_cast<int32_t>(grammar_->grammar_expr_indptr_.size()) - 1;
   }
 
   /*!

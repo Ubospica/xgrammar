@@ -138,29 +138,21 @@ class Grammar::Impl {
   };
 
   /*! \brief Get the number of grammar_exprs. */
-  size_t NumGrammarExprs() const { return grammar_expr_indptr_.size(); }
+  int32_t NumGrammarExprs() const { return grammar_expr_data_.size(); }
+
   /*! \brief Get the grammar_expr with the given id. */
   GrammarExpr GetGrammarExpr(int32_t grammar_expr_id) const {
-    XGRAMMAR_DCHECK(
-        grammar_expr_id >= 0 && grammar_expr_id < static_cast<int32_t>(grammar_expr_indptr_.size())
-    ) << "grammar_expr_id "
-      << grammar_expr_id << " is out of bound";
-    int start_index = grammar_expr_indptr_[grammar_expr_id];
-    auto start_ptr = grammar_expr_data_.data() + start_index;
-    auto type = static_cast<GrammarExprType>(start_ptr[0]);
-    auto data_ptr = start_ptr + 2;
-    auto data_len = start_ptr[1];
-    return {type, data_ptr, data_len};
+    XGRAMMAR_DCHECK(grammar_expr_id >= 0 && grammar_expr_id < NumGrammarExprs())
+        << "grammar_expr_id " << grammar_expr_id << " is out of bound";
+    auto row = grammar_expr_data_[grammar_expr_id];
+    return {static_cast<GrammarExprType>(row[0]), row.data + 1, row.data_len - 1};
   }
 
  private:
   /*! \brief The rules of the grammar. rule_id corresponds the index of this vector. */
   std::vector<Rule> rules_;
   /*! \brief The data of all grammar_exprs. */
-  std::vector<int32_t> grammar_expr_data_;
-  /*! \brief The start index of every grammar_expr in grammar_expr_data_. grammar_expr_id is the
-   * index to the elements in this vector. */
-  std::vector<int32_t> grammar_expr_indptr_;
+  Compact2DArray<int32_t> grammar_expr_data_;
   /*! \brief The id of the root rule. */
   int32_t root_rule_id_ = -1;
 
@@ -198,8 +190,6 @@ XGRAMMAR_MEMBER_TABLE(
     &Grammar::Impl::rules_,
     "grammar_expr_data_",
     &Grammar::Impl::grammar_expr_data_,
-    "grammar_expr_indptr_",
-    &Grammar::Impl::grammar_expr_indptr_,
     "root_rule_id_",
     &Grammar::Impl::root_rule_id_,
     "root_tag_dispatch_fsm",
