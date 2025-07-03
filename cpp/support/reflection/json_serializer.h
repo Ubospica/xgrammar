@@ -13,6 +13,8 @@
 
 namespace xgrammar {
 
+inline constexpr const char kXGrammarSerializeVersion[] = "v2";
+
 namespace details {
 
 template <typename, typename = void>

@@ -67,7 +67,9 @@ std::size_t CompiledGrammar::Impl::MemorySize() const {
   std::size_t sum = 0;
   sum += grammar->MemorySize();
   sum += adaptive_token_mask_cache.size() * sizeof(*adaptive_token_mask_cache.begin());
-  for (auto& [_, mask] : adaptive_token_mask_cache) sum += mask.MemorySize();
+  for (auto& [_, mask] : adaptive_token_mask_cache) {
+    sum += mask.MemorySize();
+  }
   return sum;
 }
 

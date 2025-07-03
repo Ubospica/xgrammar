@@ -267,13 +267,14 @@ NB_MODULE(xgrammar_bindings, m) {
   auto pyConfigModule = m.def_submodule("config");
   pyConfigModule
       .def(
-          "set_max_recursion_depth",
-          &RecursionGuard::SetMaxRecursionDepth,
-          nb::call_guard<nb::gil_scoped_release>()
+          "set_max_recursion_depth", &SetMaxRecursionDepth, nb::call_guard<nb::gil_scoped_release>()
       )
       .def(
-          "get_max_recursion_depth",
-          &RecursionGuard::GetMaxRecursionDepth,
+          "get_max_recursion_depth", &GetMaxRecursionDepth, nb::call_guard<nb::gil_scoped_release>()
+      )
+      .def(
+          "get_serialization_version",
+          &GetSerializationVersion,
           nb::call_guard<nb::gil_scoped_release>()
       );
 }
