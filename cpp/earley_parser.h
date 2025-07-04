@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include "grammar_data_structure.h"
+#include "grammar_impl.h"
 #include "support/compact_2d_array.h"
 #include "support/utils.h"
 #include "xgrammar/grammar.h"

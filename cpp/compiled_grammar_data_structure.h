@@ -1,6 +1,6 @@
 /*!
  *  Copyright (c) 2024 by Contributors
- * \file xgrammar/compiled_grammar_data_structure.h
+ * \file xgrammar/compiled_grammar_impl.h
  * \brief The header for the data structures of the compiled grammar.
  */
 #ifndef XGRAMMAR_COMPILED_GRAMMAR_DATA_STRUCTURE_H_

@@ -4,8 +4,8 @@
  * \brief The header for the support of grammar-guided generation.
  */
 
-#ifndef XGRAMMAR_GRAMMAR_DATA_STRUCTURE_H_
-#define XGRAMMAR_GRAMMAR_DATA_STRUCTURE_H_
+#ifndef XGRAMMAR_GRAMMAR_IMPL_H_
+#define XGRAMMAR_GRAMMAR_IMPL_H_
 
 #include <xgrammar/xgrammar.h>
 
@@ -202,4 +202,4 @@ XGRAMMAR_MEMBER_TABLE(
 
 }  // namespace xgrammar
 
-#endif  // XGRAMMAR_GRAMMAR_DATA_STRUCTURE_H_
+#endif  // XGRAMMAR_GRAMMAR_IMPL_H_
