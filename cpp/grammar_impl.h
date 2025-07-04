@@ -186,11 +186,11 @@ XGRAMMAR_MEMBER_ARRAY(
 
 XGRAMMAR_MEMBER_TABLE(
     Grammar::Impl,
-    "rules_",
+    "rules",
     &Grammar::Impl::rules_,
-    "grammar_expr_data_",
+    "grammar_expr_data",
     &Grammar::Impl::grammar_expr_data_,
-    "root_rule_id_",
+    "root_rule_id",
     &Grammar::Impl::root_rule_id_,
     "root_tag_dispatch_fsm",
     &Grammar::Impl::root_tag_dispatch_fsm,

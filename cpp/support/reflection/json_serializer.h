@@ -53,12 +53,28 @@ template <typename T>
 inline picojson::value AutoSerializeJSONValue(const T& value);
 
 /*!
+ * \brief Serializes a value to a JSON string. The members of T must be defined through
+ * XGRAMMAR_MEMBER_TABLE or XGRAMMAR_MEMBER_ARRAY. The serialization logic is automatically
+ * generated from the defined members.
+ */
+template <typename T>
+inline std::string AutoSerializeJSON(const T& value);
+
+/*!
  * \brief Deserializes a value from a JSON value. The members of T must be defined through
  * XGRAMMAR_MEMBER_TABLE or XGRAMMAR_MEMBER_ARRAY. The deserialization logic is automatically
  * generated from the defined members.
  */
 template <typename T>
 inline void AutoDeserializeJSONValue(T& result, const picojson::value& value);
+
+/*!
+ * \brief Deserializes a value from a JSON string. The members of T must be defined through
+ * XGRAMMAR_MEMBER_TABLE or XGRAMMAR_MEMBER_ARRAY. The deserialization logic is automatically
+ * generated from the defined members.
+ */
+template <typename T>
+inline void AutoDeserializeJSON(T& result, const std::string& json_string);
 
 /******************** Implementations ********************/
 
