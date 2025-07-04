@@ -1,10 +1,11 @@
-#ifndef XGRAMMAR_REFLECTION_JSON_H_
-#define XGRAMMAR_REFLECTION_JSON_H_
+#ifndef XGRAMMAR_SUPPORT_REFLECTION_JSON_SERIALIZER_H_
+#define XGRAMMAR_SUPPORT_REFLECTION_JSON_SERIALIZER_H_
 
 #include <picojson.h>
 
 #include <algorithm>
 #include <cstddef>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -13,7 +14,77 @@
 
 namespace xgrammar {
 
-inline constexpr const char kXGrammarSerializeVersion[] = "v2";
+/******************** Interfaces ********************/
+
+/*!
+ * \brief Manages the version of the serialized object. The version will be added to the serialized
+ * object, and during deserialization, the object's version must match the current serialization
+ * version in xgrammar.
+ */
+class SerializeVersion {
+ public:
+  /*!
+   * \brief Returns the current serialization version.
+   */
+  static std::string_view GetVersion() { return kXGrammarSerializeVersion; }
+
+  /*!
+   * \brief Adds the version info to the serialized object.
+   */
+  static void Apply(picojson::object* object);
+
+  /*!
+   * \brief Checks if the serialized object's version matches the current serialization version.
+   * \return An error if the version does not exist or does not match.
+   */
+  static std::optional<std::runtime_error> Check(const picojson::object& object);
+
+ private:
+  static constexpr const char kXGrammarSerializeVersionKey[] = "__VERSION__";
+  static constexpr const char kXGrammarSerializeVersion[] = "v2";
+};
+
+/*!
+ * \brief Serializes a value to a JSON value. The members of T must be defined through
+ * XGRAMMAR_MEMBER_TABLE or XGRAMMAR_MEMBER_ARRAY. The serialization logic is automatically
+ * generated from the defined members.
+ */
+template <typename T>
+inline picojson::value AutoSerializeJSONValue(const T& value);
+
+/*!
+ * \brief Deserializes a value from a JSON value. The members of T must be defined through
+ * XGRAMMAR_MEMBER_TABLE or XGRAMMAR_MEMBER_ARRAY. The deserialization logic is automatically
+ * generated from the defined members.
+ */
+template <typename T>
+inline void AutoDeserializeJSONValue(T& result, const picojson::value& value);
+
+/******************** Implementations ********************/
+
+inline void SerializeVersion::Apply(picojson::object* object) {
+  XGRAMMAR_DCHECK(object != nullptr);
+  XGRAMMAR_DCHECK(object->find(kXGrammarSerializeVersionKey) == object->end());
+  (*object)[kXGrammarSerializeVersionKey] = picojson::value(std::string(GetVersion()));
+}
+
+inline std::optional<std::runtime_error> SerializeVersion::Check(const picojson::object& object) {
+  if (object.find(kXGrammarSerializeVersionKey) == object.end()) {
+    return std::runtime_error(
+        std::string("Missing version in serialized object: ") + kXGrammarSerializeVersionKey
+    );
+  }
+  if (object.at(kXGrammarSerializeVersionKey).get<std::string>() != GetVersion()) {
+    return std::runtime_error(
+        std::string("Wrong version in serialized object: Got ") +
+        object.at(kXGrammarSerializeVersionKey).get<std::string>() + ", expected " +
+        std::string(GetVersion())
+    );
+  }
+  return std::nullopt;
+}
+
+/******************** Template Implementations ********************/
 
 namespace details {
 
@@ -87,18 +158,6 @@ inline const picojson::value& json_member(const picojson::object& value, const s
 }
 
 }  // namespace details
-
-template <typename T>
-inline picojson::value AutoSerializeJSONValue(const T& value);
-
-template <typename T>
-inline void AutoDeserializeJSONValue(T& result, const picojson::value& value);
-
-template <typename T>
-inline picojson::value TraitSerializeJSONValue(const T& value);
-
-template <typename T>
-inline void TraitDeserializeJSONValue(T& result, const picojson::value& value);
 
 template <typename T>
 inline picojson::value TraitSerializeJSONValue(const T& value) {
@@ -290,4 +349,4 @@ inline void AutoDeserializeJSONValue(T& result, const picojson::value& value) {
 
 }  // namespace xgrammar
 
-#endif  // XGRAMMAR_REFLECTION_JSON_H_
+#endif  // XGRAMMAR_SUPPORT_REFLECTION_JSON_SERIALIZER_H_

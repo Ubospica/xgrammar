@@ -92,13 +92,7 @@ NB_MODULE(xgrammar_bindings, m) {
       )
       .def_static("_detect_metadata_from_hf", &TokenizerInfo::DetectMetadataFromHF)
       .def("serialize_json", &TokenizerInfo::SerializeJSON)
-      .def_static(
-          "deserialize_json",
-          [](const std::string& str,
-             const nb::typed<nb::list, std::variant<std::string, nb::bytes>>& encoded_vocab) {
-            return TokenizerInfo::DeserializeJSON(str, CommonEncodedVocabType(encoded_vocab));
-          }
-      );
+      .def_static("deserialize_json", &TokenizerInfo::DeserializeJSON);
 
   auto pyGrammar = nb::class_<Grammar>(m, "Grammar");
   pyGrammar.def("to_string", &Grammar::ToString)

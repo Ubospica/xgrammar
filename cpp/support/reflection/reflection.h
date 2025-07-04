@@ -1,5 +1,5 @@
-#ifndef XGRAMMAR_REFLECTION_H_
-#define XGRAMMAR_REFLECTION_H_
+#ifndef XGRAMMAR_SUPPORT_REFLECTION_REFLECTION_H_
+#define XGRAMMAR_SUPPORT_REFLECTION_REFLECTION_H_
 
 #include "reflection_details.h"  // IWYU pragma: export
 
@@ -84,4 +84,4 @@ struct member_trait {
 
 }  // namespace xgrammar
 
-#endif  // XGRAMMAR_REFLECTION_H_
+#endif  // XGRAMMAR_SUPPORT_REFLECTION_REFLECTION_H_
