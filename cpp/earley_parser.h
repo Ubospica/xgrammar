@@ -28,13 +28,13 @@ namespace xgrammar {
  * In the ksequence, every element in the sequence must be a kbytestring, a
  * kcharacterclass, a kcharacterclassstar, or a rule reference.
  *
- * -rule_id: The id of the rule.
- * -sequence_id: The id of the sequence in the rule.
- * -element_id: The id of the element in the sequence, or the id of the node in
- * the tag dispatch fsm.
- * -rule_start_pos: The id of the parent node in the Earley parser. i.e. the rule
- * is predicted from the k-th character.
- * -sub_element_id: The id of the sub element in the current element, i.e.:
+ * - rule_id: The id of the rule.
+ * - sequence_id: The id of the sequence in the rule.
+ * - element_id: The id of the element in the sequence, or the id of the node in
+ *   the tag dispatch fsm.
+ * - rule_start_pos: The id of the parent node in the Earley parser. i.e. the rule
+ *   is predicted from the k-th character.
+ * - sub_element_id: The id of the sub element in the current element, i.e.:
  *   - kbytestring: the id of the byte in the string.
  *   - kcharacterclass: How many bytes are left to be read in the utf8 character.
  *   - kcharacterclassstar: How many bytes are left to be read in the utf8 character.
