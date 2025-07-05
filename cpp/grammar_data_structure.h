@@ -79,7 +79,7 @@ class Grammar::Impl {
   };
 
   /*! \brief Get the number of rules. */
-  size_t NumRules() const { return rules_.size(); }
+  int32_t NumRules() const { return rules_.size(); }
   /*! \brief Get the rule with the given id. */
   const Rule& GetRule(int32_t rule_id) const {
     XGRAMMAR_DCHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(rules_.size()))
@@ -136,7 +136,7 @@ class Grammar::Impl {
   };
 
   /*! \brief Get the number of rule_exprs. */
-  size_t NumRuleExprs() const { return rule_expr_indptr_.size(); }
+  int32_t NumRuleExprs() const { return rule_expr_indptr_.size(); }
   /*! \brief Get the rule_expr with the given id. */
   RuleExpr GetRuleExpr(int32_t rule_expr_id) const {
     XGRAMMAR_DCHECK(
@@ -149,6 +149,69 @@ class Grammar::Impl {
     auto data_ptr = start_ptr + 2;
     auto data_len = start_ptr[1];
     return {type, data_ptr, data_len};
+  }
+
+  /******************* RuleExpr Getters *******************/
+
+  /*! \brief Get the string of the byte string rule expr. */
+  std::string GetByteString(const RuleExpr& rule_expr) const {
+    std::string str;
+    str.reserve(rule_expr.size());
+    for (int i = 0; i < rule_expr.size(); ++i) {
+      str.push_back(static_cast<char>(static_cast<uint8_t>(rule_expr[i])));
+    }
+    return str;
+  }
+
+  /*! \brief Get the string of the byte string rule expr. */
+  std::string GetByteString(int32_t rule_expr_id) const {
+    return GetByteString(GetRuleExpr(rule_expr_id));
+  }
+
+  /*! \brief The object representing a tag dispatch. */
+  struct TagDispatch {
+    /*! \brief The tag and rule id pairs. */
+    std::vector<std::pair<std::string, int32_t>> tag_rule_pairs;
+    /*! \brief If true, EOS is allowed to generate and will stop the tag dispatch. */
+    bool stop_eos;
+    /*! \brief The strings that will stop the tag dispatch. Only work if stop_eos is false. */
+    std::vector<std::string> stop_str;
+    /*! \brief If true, the tag dispatch will loop after dispatching. */
+    bool loop_after_dispatch;
+  };
+
+  /*! \brief Get the tag dispatch from the rule expr. */
+  TagDispatch GetTagDispatch(const RuleExpr& rule_expr) {
+    XGRAMMAR_DCHECK(rule_expr.type == RuleExprType::kTagDispatch)
+        << "RuleExpr is not a tag dispatch";
+
+    TagDispatch result;
+    XGRAMMAR_DCHECK(rule_expr.size() >= 3);
+    result.tag_rule_pairs.reserve((rule_expr.size() - 3) / 2);
+
+    for (int i = 0; i < rule_expr.size() - 3; i += 2) {
+      auto tag_expr_id = rule_expr[i];
+      auto rule_id = rule_expr[i + 1];
+      result.tag_rule_pairs.push_back({GetByteString(tag_expr_id), rule_id});
+    }
+
+    result.stop_eos = static_cast<bool>(rule_expr[rule_expr.size() - 3]);
+
+    auto stop_str_expr = GetRuleExpr(rule_expr[rule_expr.size() - 2]);
+    XGRAMMAR_DCHECK(stop_str_expr.type == RuleExprType::kChoices);
+    result.stop_str.reserve(stop_str_expr.size());
+    for (int j = 0; j < stop_str_expr.size(); j++) {
+      result.stop_str.push_back(GetByteString(stop_str_expr[j]));
+    }
+
+    result.loop_after_dispatch = static_cast<bool>(rule_expr[rule_expr.size() - 1]);
+
+    return result;
+  }
+
+  /*! \brief Get the tag dispatch from the rule expr with the given id. */
+  TagDispatch GetTagDispatch(int32_t rule_expr_id) {
+    return GetTagDispatch(GetRuleExpr(rule_expr_id));
   }
 
  private:
@@ -165,12 +228,15 @@ class Grammar::Impl {
  public:
   /******************* Aux information for matching *******************/
 
-  /*! \brief The fsm for the root tag dispatch rule. If the grammar does not have a root tag
-   * dispatch rule, it is not built. */
-  std::optional<CompactFSMWithStartEnd> root_tag_dispatch_fsm = std::nullopt;
+  /*! \brief The complete FSM for the grammar. It contains the FSMs for all rules. */
+  CompactFSM complete_fsm{NullObj{}};
 
-  /*! \brief The map from the end nodes of the root tag dispatch fsm to the rule ids. */
-  std::unordered_map<int32_t, int32_t> tag_dispatch_end_node_to_rule_id;
+  /*!
+   * \brief The FSM for each rule.
+   * \details The FSM will be used in matching if it exists. If it does not exist (std::nullopt),
+   * the rule will be used in matching, and the rule's body must be a kChoices expr.
+   */
+  std::vector<std::optional<CompactFSMWithStartEnd>> per_rule_fsms;
 
   /*! \brief The ids of the rules that are allowed to be empty. */
   std::vector<int32_t> allow_empty_rule_ids;

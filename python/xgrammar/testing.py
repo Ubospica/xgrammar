@@ -131,6 +131,7 @@ def _is_grammar_accept_string(
     *,
     debug_print: bool = False,
     print_time: bool = False,
+    require_termination: bool = True,
 ) -> bool:
     """Check if a grammar accepts a string. For test purposes.
 
@@ -163,6 +164,10 @@ def _is_grammar_accept_string(
 
     if not accepted:
         return False
+
+    if not require_termination:
+        return True
+
     return grammar_matcher.is_terminated()
 
 
@@ -288,6 +293,12 @@ def _generate_range_regex(start: Optional[int] = None, end: Optional[int] = None
 
 def _generate_float_regex(start: Optional[float] = None, end: Optional[float] = None) -> str:
     return _core.testing._generate_float_regex(start, end)
+
+
+def _print_grammar_fsms(grammar: Grammar) -> str:
+    """Print the FSMs of the grammar. Now the fsms are initialized in the grammar compilation
+    process."""
+    return _core.testing._print_grammar_fsms(grammar._handle)
 
 
 class GrammarFunctor:

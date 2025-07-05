@@ -525,10 +525,6 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
   // {-1} means the universal set, i.e. all tokens initially
   tmp_rejected_indices_.assign({-1});
 
-  // If there is a leaf ParserState that is a tag dispatch, we allow special tokens to be accepted
-  // because in function calling cases, only the part within the tag is constrained
-  bool have_tag_dispatch = false;
-
   if (debug_print) {
     XGRAMMAR_LOG(INFO) << "FillNextTokenBitmask: index=" << index
                        << ", num of states=" << latest_states.size();
@@ -537,28 +533,24 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
   std::vector<std::pair<ParserState, decltype(adaptive_token_mask_cache.cbegin())>>
       latest_states_with_masks;
 
-  for (const auto& state : latest_states) {
-    auto cur_sequence = grammar_->GetRuleExpr(state.sequence_id);
-    XGRAMMAR_DCHECK(!(
-        cur_sequence.type == RuleExprType::kRuleRef ||
-        cur_sequence.type == RuleExprType::kChoices || cur_sequence.type == RuleExprType::kEmptyStr
-    ));
-    have_tag_dispatch = cur_sequence.type == RuleExprType::kTagDispatch;
-    XGRAMMAR_DCHECK(have_tag_dispatch || cur_sequence.type == RuleExprType::kSequence);
-    auto adaptive_token_mask_it = adaptive_token_mask_cache.find(state);
-    XGRAMMAR_CHECK(adaptive_token_mask_it != adaptive_token_mask_cache.end()) << state;
-    const auto& adaptive_token_mask = adaptive_token_mask_it->second;
-    latest_states_with_masks.push_back(std::make_pair(state, adaptive_token_mask_it));
-    if (adaptive_token_mask.store_type == StoreType::kAcceptedBitset) {
-      tmp_accepted_bitset_ |= adaptive_token_mask.accepted_bitset;
-    } else if (adaptive_token_mask.store_type == StoreType::kAccepted) {
-      for (auto idx : adaptive_token_mask.accepted_indices) {
-        tmp_accepted_bitset_.Set(sorted_decoded_vocab[idx].first, true);
+  for (auto top : latest_stack_tops) {
+    ++stack_top_cnt;
+    auto cur_stack_element = persistent_stack_[top];
+    if (cur_stack_element.rule_id == -1 ||
+        !grammar_->per_rule_fsms[cur_stack_element.rule_id].has_value()) {
+      auto cur_sequence = grammar_->GetRuleExpr(cur_stack_element.sequence_id);
+      XGRAMMAR_DCHECK(cur_sequence.type == RuleExprType::kSequence);
+      if (cur_stack_element.parent_id == StackElement::kNoParent &&
+          cur_stack_element.element_id == cur_sequence.size()) {
+        continue;
       }
     }
-  }
 
-  for (const auto& [state, adaptive_token_mask_it] : latest_states_with_masks) {
+    auto adaptive_token_mask_it = adaptive_token_mask_cache.find(cur_stack_element);
+    XGRAMMAR_CHECK(adaptive_token_mask_it != adaptive_token_mask_cache.end())
+        << "The adaptive token mask is not found for stack element: "
+        << persistent_stack_.PrintStackElement(cur_stack_element);
+
     const auto& adaptive_token_mask = adaptive_token_mask_it->second;
 
     // For each ParserState, we will check every uncertain token and put them into the accepted or
@@ -658,11 +650,7 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
   // Finally update the rejected_ids bitset
   bool can_reach_end = IsCompleted();
   SetTokenBitmask(
-      bitmask_data_ptr,
-      tmp_accepted_bitset_,
-      tmp_rejected_indices_,
-      can_reach_end,
-      have_tag_dispatch
+      bitmask_data_ptr, tmp_accepted_bitset_, tmp_rejected_indices_, can_reach_end, false
   );
   if (debug_print) {
     XGRAMMAR_LOG(INFO) << "Filled bitmask: " << PrintBitmask(bitmask_data_ptr, tokenizer_info_);
@@ -685,8 +673,21 @@ std::string GrammarMatcher::Impl::FindJumpForwardString() {
     // 1. Check that for every leaf ParserState, the next possible char is unique and the same
     // -1 means not found yet; 0~255 means the next char
     int next_char = -1;
-    for (const auto& ParserState : states) {
-      if (IsCompleted()) {
+    for (auto stack_top : stack_tops) {
+      auto stack_element = persistent_stack_[stack_top];
+
+      // We cannot deduce the next char for tag dispatch
+      if (stack_element.rule_id != -1 &&
+          grammar_->per_rule_fsms[stack_element.rule_id].has_value()) {
+        can_find_next_char = false;
+        continue;
+      }
+
+      auto cur_sequence = grammar_->GetRuleExpr(stack_element.sequence_id);
+
+      // The state comes to the end of the grammar
+      if (stack_element.parent_id == StackElement::kNoParent &&
+          stack_element.element_id == cur_sequence.size()) {
         can_find_next_char = false;
         break;
       }
