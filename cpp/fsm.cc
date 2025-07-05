@@ -858,7 +858,7 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
     const FSMWithStartEnd& lhs, const FSMWithStartEnd& rhs, int num_of_states_limited
 ) {
   if (!lhs.IsLeaf() || !rhs.IsLeaf()) {
-    return Result<FSMWithStartEnd>::Err("Intersect only support leaf fsm!");
+    return ResultErr("Intersect only support leaf fsm!");
   }
   auto lhs_dfa = lhs.ToDFA();
   auto rhs_dfa = rhs.ToDFA();
@@ -907,7 +907,7 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
   state_map[{lhs_dfa.GetStart(), rhs_dfa.GetStart()}] = 0;
   while (!queue.empty()) {
     if (int(state_map.size()) > num_of_states_limited) {
-      return Result<FSMWithStartEnd>::Err("Intersection have too many states!");
+      return ResultErr("Intersection have too many states!");
     }
     auto state = queue.front();
     queue.pop();
@@ -980,7 +980,7 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
       result.AddEndState(state_map[state]);
     }
   }
-  return Result<FSMWithStartEnd>::Ok(result);
+  return ResultOk(result);
 }
 
 bool FSMWithStartEnd::IsDFA() {

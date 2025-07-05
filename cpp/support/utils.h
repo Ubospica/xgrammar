@@ -9,9 +9,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <iterator>
-#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <unordered_set>
@@ -101,6 +100,28 @@ class TypedError : public std::runtime_error {
   T type_;
 };
 
+template <typename T, bool IsOk>
+struct PartialResult {
+  template <typename... Args>
+  PartialResult(Args&&... args) : value(std::forward<Args>(args)...) {}
+  T value;
+};
+
+template <typename E = std::runtime_error, typename..., typename... Args>
+inline PartialResult<E, false> ResultErr(Args&&... args) {
+  return PartialResult<E, false>{std::forward<Args>(args)...};
+}
+
+template <typename T, typename..., typename... Args>
+inline PartialResult<T, true> ResultOk(Args&&... args) {
+  return PartialResult<T, true>{std::forward<Args>(args)...};
+}
+
+template <typename T>
+inline PartialResult<T&&, true> ResultOk(T&& value) {
+  return PartialResult<T&&, true>{std::forward<T>(value)};
+}
+
 /*!
  * \brief A Result type similar to Rust's Result, representing either success (Ok) or failure (Err).
  * \tparam T The type of the success value
@@ -109,21 +130,22 @@ template <typename T, typename E = std::runtime_error>
 class Result {
  private:
   static_assert(!std::is_same_v<T, E>, "T and E cannot be the same type");
+  using OkTag = std::in_place_type_t<T>;
+  using ErrTag = std::in_place_type_t<E>;
 
  public:
-  /*! \brief Construct a success Result with a const reference */
-  static Result Ok(const T& value) { return Result(value); }
-  /*! \brief Construct a success Result with a move */
-  static Result Ok(T&& value) { return Result(std::move(value)); }
+  Result() = delete;
 
-  /*! \brief Construct an error Result with a const reference */
-  static Result Err(const E& error) { return Result(error); }
-  /*! \brief Construct an error Result with a move */
-  static Result Err(E&& error) { return Result(std::move(error)); }
-  /*! \brief Forward constructor for error type */
-  template <typename... Args>
-  static Result Err(Args&&... args) {
-    return Result(E(std::forward<Args>(args)...));
+  // This can only be the chain result of calling ResultErr
+  template <typename E2>
+  Result(PartialResult<E2, false>&& other) : data_(ErrTag{}, std::forward<E2>(other.value)) {
+    static_assert(std::is_same_v<std::decay_t<E2>, E>, "Error type mismatch");
+  }
+
+  // This can only be the chain result of calling ResultOk
+  template <typename T2>
+  Result(PartialResult<T2, true>&& other) : data_(OkTag{}, std::forward<T2>(other.value)) {
+    static_assert(std::is_same_v<std::decay_t<T2>, T>, "Success type mismatch");
   }
 
   /*! \brief Check if Result contains success value */
@@ -208,13 +230,15 @@ class Result {
   }
 
  private:
-  explicit Result(const T& value) : data_(value) {}
-  explicit Result(T&& value) : data_(std::move(value)) {}
-  explicit Result(const E& err) : data_(err) {}
-  explicit Result(E&& err) : data_(std::move(err)) {}
-
   std::variant<T, E> data_;
 };
+
+#define UNWRAP_OR_RETURN(variable, result)     \
+  auto&& _##variable = (result);               \
+  if (_##variable.IsErr()) {                   \
+    return ResultErr(_##variable.UnwrapErr()); \
+  }                                            \
+  auto variable = std::move(_##variable).Unwrap();
 
 }  // namespace xgrammar
 
