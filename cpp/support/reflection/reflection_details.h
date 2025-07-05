@@ -25,6 +25,7 @@ enum class member_type {
 }  // namespace xgrammar
 
 namespace xgrammar::details {
+
 // We cannot use `static_assert(false)` even in unreachable code in `if constexpr`.
 // See https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/p2593r1.html
 // for more details.
