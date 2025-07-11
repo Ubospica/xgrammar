@@ -3,6 +3,7 @@
 The APIs in this module are used for testing and debugging and are prone to
 change. Don't use them in production."""
 
+import json
 import time
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -333,3 +334,33 @@ class GrammarFunctor:
         return Grammar._create_from_handle(
             _core.testing.grammar_functor.lookahead_assertion_analyzer(grammar._handle)
         )
+
+
+class StructuralTagResultItem(BaseModel):
+    begin: str
+    params: Dict[str, Any]
+    end: str
+
+
+def parser_structural_tag(
+    input: str, structural_tags: Dict[str, Any]
+) -> Tuple[str, List[StructuralTagResultItem]]:
+    """Parse structural tags from input string."""
+    triggers = structural_tags.get("triggers", [])
+    raw_text, raw_tags = _core.testing._parser_structural_tag(input, triggers)
+
+    processed_tags = []
+    for start_tag, content, end_tag in raw_tags:
+        try:
+            if "{" in content and "}" in content:
+                parsed_content = json.loads(content)
+            else:
+                parsed_content = content
+        except json.JSONDecodeError:
+            parsed_content = content
+
+        processed_tags.append(
+            StructuralTagResultItem(begin=start_tag, params=parsed_content, end=end_tag)
+        )
+
+    return raw_text, processed_tags
