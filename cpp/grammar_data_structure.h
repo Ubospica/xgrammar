@@ -112,8 +112,11 @@ class Grammar::Impl {
     kSequence,
     // data format: [grammar_expr_id0, grammar_expr_id1, ...]
     kChoices,
-    // data format: [tag_expr0, rule_id0, tag_expr1, rule_id1, ...]
-    // tag_expr should be a byte string, and rule_id should be a rule id
+    // data format: [tag_expr0, rule_id0, tag_expr1, rule_id1, ..., stop_eos, stop_str_expr_id,
+    // loop_after_dispatch]
+    // where stop_eos is a bool, stop_str_expr_id is a choices GrammarExpr id.
+    // tag_expr should be a byte string, and rule_id should be a rule id.
+    // loop_after_dispatch is a bool.
     kTagDispatch,
   };
 
@@ -268,10 +271,10 @@ XGRAMMAR_MEMBER_TABLE(
     &Grammar::Impl::grammar_expr_indptr_,
     "root_rule_id_",
     &Grammar::Impl::root_rule_id_,
-    "root_tag_dispatch_fsm",
-    &Grammar::Impl::root_tag_dispatch_fsm,
-    "tag_dispatch_end_node_to_rule_id",
-    &Grammar::Impl::tag_dispatch_end_node_to_rule_id,
+    "complete_fsm",
+    &Grammar::Impl::complete_fsm,
+    "per_rule_fsms",
+    &Grammar::Impl::per_rule_fsms,
     "allow_empty_rule_ids",
     &Grammar::Impl::allow_empty_rule_ids
 );
