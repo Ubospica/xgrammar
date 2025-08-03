@@ -198,7 +198,7 @@ Result<FSMWithStartEnd> RegexIR::Build() const {
     if (visited.IsErr()) {
       return visited;
     }
-    fsm_list.push_back(visited.Unwrap());
+    fsm_list.push_back(std::move(visited).Unwrap());
   }
   if (fsm_list.size() > 1) {
     return Result<FSMWithStartEnd>::Ok(FSMWithStartEnd::Concat(fsm_list));
@@ -220,7 +220,7 @@ Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Union& state) const {
     if (visited.IsErr()) {
       return visited;
     }
-    fsm_list.push_back(visited.Unwrap());
+    fsm_list.push_back(std::move(visited).Unwrap());
   }
   if (fsm_list.size() <= 1) {
     return Result<FSMWithStartEnd>::Err("Invalid union");
@@ -240,13 +240,13 @@ Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Symbol& state) const {
 
   switch (state.symbol) {
     case RegexIR::RegexSymbol::plus: {
-      return Result<FSMWithStartEnd>::Ok(child.Unwrap().Plus());
+      return Result<FSMWithStartEnd>::Ok(std::move(child).Unwrap().Plus());
     }
     case RegexIR::RegexSymbol::star: {
-      return Result<FSMWithStartEnd>::Ok(child.Unwrap().Star());
+      return Result<FSMWithStartEnd>::Ok(std::move(child).Unwrap().Star());
     }
     case RegexIR::RegexSymbol::optional: {
-      return Result<FSMWithStartEnd>::Ok(child.Unwrap().Optional());
+      return Result<FSMWithStartEnd>::Ok(std::move(child).Unwrap().Optional());
     }
     default: {
       XGRAMMAR_LOG(FATAL) << "Unknown regex symbol: " << static_cast<int>(state.symbol);
@@ -261,7 +261,7 @@ Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Bracket& state) const {
     if (visited.IsErr()) {
       return visited;
     }
-    fsm_list.push_back(visited.Unwrap());
+    fsm_list.push_back(std::move(visited).Unwrap());
   }
   if (fsm_list.empty()) {
     return Result<FSMWithStartEnd>::Err("Invalid bracket");
@@ -278,7 +278,7 @@ Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Repeat& state) const {
   if (child.IsErr()) {
     return child;
   }
-  FSMWithStartEnd result = child.Unwrap();
+  FSMWithStartEnd result = std::move(child).Unwrap();
   std::unordered_set<int> new_ends;
 
   if (state.lower_bound == 1) {
@@ -289,10 +289,12 @@ Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Repeat& state) const {
   // Handling {n,}
   if (state.upper_bound == RegexIR::kRepeatNoUpperBound) {
     for (int i = 2; i < state.lower_bound; i++) {
-      result = FSMWithStartEnd::Concat(std::vector<FSMWithStartEnd>{result, child.Unwrap()});
+      result =
+          FSMWithStartEnd::Concat(std::vector<FSMWithStartEnd>{result, std::move(child).Unwrap()});
     }
     int end_state_of_lower_bound_fsm = *result.GetEnds().begin();
-    result = FSMWithStartEnd::Concat(std::vector<FSMWithStartEnd>{result, child.Unwrap()});
+    result =
+        FSMWithStartEnd::Concat(std::vector<FSMWithStartEnd>{result, std::move(child).Unwrap()});
     for (const auto& end : result.GetEnds()) {
       result->AddEpsilonEdge(end, end_state_of_lower_bound_fsm);
     }
@@ -300,7 +302,8 @@ Result<FSMWithStartEnd> RegexIR::visit(const RegexIR::Repeat& state) const {
   }
   // Handling {n, m} or {n}
   for (int i = 2; i <= state.upper_bound; i++) {
-    result = FSMWithStartEnd::Concat(std::vector<FSMWithStartEnd>{result, child.Unwrap()});
+    result =
+        FSMWithStartEnd::Concat(std::vector<FSMWithStartEnd>{result, std::move(child).Unwrap()});
     if (i >= state.lower_bound) {
       for (const auto& end : result.GetEnds()) {
         new_ends.insert(end);
@@ -693,12 +696,12 @@ Result<FSMWithStartEnd> RegexFSMBuilder::Build(const std::string& regex) {
       stack.pop();
       auto bounds_result = RegexIR::CheckRepeat(regex, i);
       if (bounds_result.IsErr()) {
-        return Result<FSMWithStartEnd>::Err(bounds_result.UnwrapErr());
+        return Result<FSMWithStartEnd>::Err(std::move(bounds_result).UnwrapErr());
       }
       auto child = std::get<RegexIR::State>(state);
       RegexIR::Repeat repeat;
-      repeat.lower_bound = bounds_result.Unwrap().first;
-      repeat.upper_bound = bounds_result.Unwrap().second;
+      repeat.lower_bound = std::move(bounds_result).Unwrap().first;
+      repeat.upper_bound = std::move(bounds_result).Unwrap().second;
       repeat.states.push_back(child);
       stack.push(repeat);
       continue;

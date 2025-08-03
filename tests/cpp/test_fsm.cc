@@ -104,9 +104,9 @@ TEST(XGrammarFSMTest, ConnectionTest) {
   std::cout << "--------- Connection Test3 -----------" << std::endl;
   auto result = RegexFSMBuilder::Build("(([\\d]|[\\w])|aaa)");
   if (result.IsErr()) {
-    std::cout << result.UnwrapErr().what() << std::endl;
+    std::cout << std::move(result).UnwrapErr().what() << std::endl;
   }
-  fsm_wse = result.Unwrap();
+  fsm_wse = std::move(result).Unwrap();
   test_str = "aaa";
   EXPECT_TRUE(fsm_wse.AcceptString(test_str));
   test_str = "1";

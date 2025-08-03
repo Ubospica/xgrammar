@@ -55,10 +55,10 @@ TEST(XGrammarFSMBuilderTest, TestTrieFSMBuilder) {
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder1) {
   // Case 1. stop_eos = true, loop_after_dispatch = true
   Grammar::Impl::TagDispatch tag_dispatch = {
-      .tag_rule_pairs = {{"hel", 1}, {"hi", 2}, {"哈", 3}},
-      .stop_eos = true,
-      .stop_str = {},
-      .loop_after_dispatch = true,
+      /* tag_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* stop_eos = */ true,
+      /* stop_str = */ {},
+      /* loop_after_dispatch = */ true,
   };
   auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
@@ -81,10 +81,10 @@ TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder1) {
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder2) {
   // Case 2. stop_eos = true, loop_after_dispatch = false
   Grammar::Impl::TagDispatch tag_dispatch = {
-      .tag_rule_pairs = {{"hel", 1}, {"hi", 2}, {"哈", 3}},
-      .stop_eos = true,
-      .stop_str = {},
-      .loop_after_dispatch = false,
+      /* tag_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* stop_eos = */ true,
+      /* stop_str = */ {},
+      /* loop_after_dispatch = */ false,
   };
   auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
@@ -111,10 +111,10 @@ TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder2) {
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder3) {
   // Case 3. stop_eos = false, loop_after_dispatch = true
   Grammar::Impl::TagDispatch tag_dispatch = {
-      .tag_rule_pairs = {{"hel", 1}, {"hi", 2}, {"哈", 3}},
-      .stop_eos = false,
-      .stop_str = {"hos", "eos"},
-      .loop_after_dispatch = true,
+      /* tag_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* stop_eos = */ false,
+      /* stop_str = */ {"hos", "eos"},
+      /* loop_after_dispatch = */ true,
   };
   auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
@@ -142,10 +142,10 @@ TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder3) {
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder4) {
   // Case 4. stop_eos = false, loop_after_dispatch = false
   Grammar::Impl::TagDispatch tag_dispatch = {
-      .tag_rule_pairs = {{"hel", 1}, {"hi", 2}, {"哈", 3}},
-      .stop_eos = false,
-      .stop_str = {"hos", "eos"},
-      .loop_after_dispatch = false,
+      /* tag_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* stop_eos = */ false,
+      /* stop_str = */ {"hos", "eos"},
+      /* loop_after_dispatch = */ false,
   };
   auto fsm_result = TagDispatchFSMBuilder::Build(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());

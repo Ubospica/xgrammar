@@ -914,10 +914,10 @@ class StructuralTagGrammarCreatorImpl : public SubGrammarCombiner {
     auto root_rule_id = builder_.AddEmptyRule("root");
 
     Grammar::Impl::TagDispatch tag_dispatch{
-        .tag_rule_pairs = {},
-        .stop_eos = true,
-        .stop_str = {},
-        .loop_after_dispatch = true,
+        /* tag_rule_pairs = */ {},
+        /* stop_eos = */ true,
+        /* stop_str = */ {},
+        /* loop_after_dispatch = */ true,
     };
     tag_dispatch.tag_rule_pairs.reserve(triggers.size());
 
