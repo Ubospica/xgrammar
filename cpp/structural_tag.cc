@@ -38,6 +38,7 @@ class StructuralTagImpl {
   Result<JSONSchemaFormat> ParseJSONSchemaFormat(const picojson::object& value);
   Result<WildcardTextFormat> ParseWildcardTextFormat(const picojson::object& value);
   Result<SequenceFormat> ParseSequenceFormat(const picojson::object& value);
+  Result<OrFormat> ParseOrFormat(const picojson::object& value);
   /*! \brief ParseTagFormat with extra check for object and the type field. */
   Result<TagFormat> ParseTagFormat(const picojson::value& value);
   Result<TagFormat> ParseTagFormat(const picojson::object& value);
@@ -51,44 +52,43 @@ Result<StructuralTag> StructuralTagImpl::FromJSON(const std::string& json) {
   picojson::value value;
   std::string err = picojson::parse(value, json);
   if (!err.empty()) {
-    return Result<StructuralTag>::Err("Failed to parse JSON: " + err);
+    return ResultErr("Failed to parse JSON: " + err);
   }
   return ParseStructuralTag(value);
 }
 
 Result<StructuralTag> StructuralTagImpl::ParseStructuralTag(const picojson::value& value) {
   if (!value.is<picojson::object>()) {
-    return Result<StructuralTag>::Err("Structural tag must be an object");
+    return ResultErr("Structural tag must be an object");
   }
   const auto& obj = value.get<picojson::object>();
   // The type field is optional but must be "structural_tag" if present.
   if (obj.find("type") != obj.end()) {
     if (!obj["type"].is<std::string>() || obj["type"].get<std::string>() != "structural_tag") {
-      return Result<StructuralTag>::Err("Structural tag's type must be a string \"structural_tag\""
-      );
+      return ResultErr("Structural tag's type must be a string \"structural_tag\"");
     }
   }
   // The format field is required.
   if (obj.find("format") == obj.end()) {
-    return Result<StructuralTag>::Err("Structural tag must have a format field");
+    return ResultErr("Structural tag must have a format field");
   }
   auto format = ParseFormat(obj["format"]);
   if (format.IsErr()) {
-    return Result<StructuralTag>::Err(std::move(format).UnwrapErr());
+    return ResultErr(std::move(format).UnwrapErr());
   }
-  return Result<StructuralTag>::Ok(StructuralTag(std::move(format).Unwrap()));
+  return ResultOk(StructuralTag(std::move(format).Unwrap()));
 }
 
 Result<Format> StructuralTagImpl::ParseFormat(const picojson::value& value) {
   RecursionGuard guard(&parse_format_recursion_depth_);
   if (!value.is<picojson::object>()) {
-    return Result<Format>::Err("Format must be an object");
+    return ResultErr("Format must be an object");
   }
   const auto& obj = value.get<picojson::object>();
   // If type is present, use it to determine the format.
   if (obj.find("type") != obj.end()) {
     if (!obj["type"].is<std::string>()) {
-      return Result<Format>::Err("Format's type must be a string");
+      return ResultErr("Format's type must be a string");
     }
     auto type = obj["type"].get<std::string>();
     if (type == "literal") {
@@ -99,6 +99,8 @@ Result<Format> StructuralTagImpl::ParseFormat(const picojson::value& value) {
       return Result<Format>::Convert(ParseWildcardTextFormat(obj));
     } else if (type == "sequence") {
       return Result<Format>::Convert(ParseSequenceFormat(obj));
+    } else if (type == "or") {
+      return Result<Format>::Convert(ParseOrFormat(obj));
     } else if (type == "tag") {
       return Result<Format>::Convert(ParseTagFormat(obj));
     } else if (type == "triggered_tags") {
@@ -106,39 +108,44 @@ Result<Format> StructuralTagImpl::ParseFormat(const picojson::value& value) {
     } else if (type == "tags_with_separator") {
       return Result<Format>::Convert(ParseTagsWithSeparatorFormat(obj));
     } else {
-      return Result<Format>::Err("Invalid format type: " + type);
+      return ResultErr("Invalid format type: " + type);
     }
   }
   // If type is not present, try every format type one by one. Tag is prioritized.
   auto tag_format = ParseTagFormat(obj);
   if (!tag_format.IsErr()) {
-    return Result<Format>::Ok(std::move(tag_format).Unwrap());
+    return ResultOk<Format>(std::move(tag_format).Unwrap());
+    // return Result<Format>::Ok(std::move(tag_format).Unwrap());
   }
   auto literal_format = ParseLiteralFormat(obj);
   if (!literal_format.IsErr()) {
-    return Result<Format>::Ok(std::move(literal_format).Unwrap());
+    return ResultOk<Format>(std::move(literal_format).Unwrap());
   }
   auto json_schema_format = ParseJSONSchemaFormat(obj);
   if (!json_schema_format.IsErr()) {
-    return Result<Format>::Ok(std::move(json_schema_format).Unwrap());
+    return ResultOk<Format>(std::move(json_schema_format).Unwrap());
   }
   auto wildcard_text_format = ParseWildcardTextFormat(obj);
   if (!wildcard_text_format.IsErr()) {
-    return Result<Format>::Ok(std::move(wildcard_text_format).Unwrap());
+    return ResultOk<Format>(std::move(wildcard_text_format).Unwrap());
   }
   auto sequence_format = ParseSequenceFormat(obj);
   if (!sequence_format.IsErr()) {
-    return Result<Format>::Ok(std::move(sequence_format).Unwrap());
+    return ResultOk<Format>(std::move(sequence_format).Unwrap());
+  }
+  auto or_format = ParseOrFormat(obj);
+  if (!or_format.IsErr()) {
+    return ResultOk<Format>(std::move(or_format).Unwrap());
   }
   auto triggered_tags_format = ParseTriggeredTagsFormat(obj);
   if (!triggered_tags_format.IsErr()) {
-    return Result<Format>::Ok(std::move(triggered_tags_format).Unwrap());
+    return ResultOk<Format>(std::move(triggered_tags_format).Unwrap());
   }
   auto tags_with_separator_format = ParseTagsWithSeparatorFormat(obj);
   if (!tags_with_separator_format.IsErr()) {
-    return Result<Format>::Ok(std::move(tags_with_separator_format).Unwrap());
+    return ResultOk<Format>(std::move(tags_with_separator_format).Unwrap());
   }
-  return Result<Format>::Err("Invalid format: " + value.serialize(false));
+  return ResultErr("Invalid format: " + value.serialize(false));
 }
 
 Result<LiteralFormat> StructuralTagImpl::ParseLiteralFormat(const picojson::object& obj) {
@@ -146,40 +153,34 @@ Result<LiteralFormat> StructuralTagImpl::ParseLiteralFormat(const picojson::obje
   auto text_it = obj.find("text");
   if (text_it == obj.end() || !text_it->second.is<std::string>() ||
       text_it->second.get<std::string>().empty()) {
-    return Result<LiteralFormat>::Err(
-        "Literal format must have a text field with a non-empty string"
-    );
+    return ResultErr("Literal format must have a text field with a non-empty string");
   }
-  return Result<LiteralFormat>::Ok(text_it->second.get<std::string>());
+  return ResultOk<LiteralFormat>(text_it->second.get<std::string>());
 }
 
 Result<JSONSchemaFormat> StructuralTagImpl::ParseJSONSchemaFormat(const picojson::object& obj) {
   // json_schema is required.
   auto json_schema_it = obj.find("json_schema");
   if (json_schema_it == obj.end() || !json_schema_it->second.is<picojson::object>()) {
-    return Result<JSONSchemaFormat>::Err(
-        "JSON schema format must have a json_schema field with a JSON object"
-    );
+    return ResultErr("JSON schema format must have a json_schema field with a JSON object");
   }
   // here introduces a serialization/deserialization overhead; try to avoid it in the future.
-  return Result<JSONSchemaFormat>::Ok(json_schema_it->second.serialize(false));
+  return ResultOk<JSONSchemaFormat>(json_schema_it->second.serialize(false));
 }
 
 Result<WildcardTextFormat> StructuralTagImpl::ParseWildcardTextFormat(const picojson::object& obj) {
   // obj should not have any fields other than "type"
   if (obj.size() > 1 || (obj.size() == 1 && obj.begin()->first != "type")) {
-    return Result<WildcardTextFormat>::Err(
-        "Wildcard text format should not have any fields other than type"
-    );
+    return ResultErr("Wildcard text format should not have any fields other than type");
   }
-  return Result<WildcardTextFormat>::Ok();
+  return ResultOk<WildcardTextFormat>();
 }
 
 Result<SequenceFormat> StructuralTagImpl::ParseSequenceFormat(const picojson::object& obj) {
   // elements is required.
   auto elements_it = obj.find("elements");
   if (elements_it == obj.end() || !elements_it->second.is<picojson::array>()) {
-    return Result<SequenceFormat>::Err("Sequence format must have an elements field with an array");
+    return ResultErr("Sequence format must have an elements field with an array");
   }
   const auto& elements_array = elements_it->second.get<picojson::array>();
   std::vector<Format> elements;
@@ -187,21 +188,40 @@ Result<SequenceFormat> StructuralTagImpl::ParseSequenceFormat(const picojson::ob
   for (const auto& element : elements_array) {
     auto format = ParseFormat(element);
     if (format.IsErr()) {
-      return Result<SequenceFormat>::Err(std::move(format).UnwrapErr());
+      return ResultErr(std::move(format).UnwrapErr());
     }
     elements.push_back(std::move(format).Unwrap());
   }
-  return Result<SequenceFormat>::Ok(std::move(elements));
+  return ResultOk<SequenceFormat>(std::move(elements));
+}
+
+Result<OrFormat> StructuralTagImpl::ParseOrFormat(const picojson::object& obj) {
+  // elements is required.
+  auto elements_it = obj.find("elements");
+  if (elements_it == obj.end() || !elements_it->second.is<picojson::array>()) {
+    return ResultErr("Or format must have an elements field with an array");
+  }
+  const auto& elements_array = elements_it->second.get<picojson::array>();
+  std::vector<Format> elements;
+  elements.reserve(elements_array.size());
+  for (const auto& element : elements_array) {
+    auto format = ParseFormat(element);
+    if (format.IsErr()) {
+      return ResultErr(std::move(format).UnwrapErr());
+    }
+    elements.push_back(std::move(format).Unwrap());
+  }
+  return ResultOk<OrFormat>(std::move(elements));
 }
 
 Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::value& value) {
   if (!value.is<picojson::object>()) {
-    return Result<TagFormat>::Err("Tag format must be an object");
+    return ResultErr("Tag format must be an object");
   }
   const auto& obj = value.get<picojson::object>();
   if (obj.find("type") != obj.end() &&
       (!obj["type"].is<std::string>() || obj["type"].get<std::string>() != "tag")) {
-    return Result<TagFormat>::Err("Tag format's type must be a string \"tag\"");
+    return ResultErr("Tag format's type must be a string \"tag\"");
   }
   return ParseTagFormat(obj);
 }
@@ -211,24 +231,24 @@ Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::object& obj)
   auto begin_it = obj.find("begin");
   if (begin_it == obj.end() || !begin_it->second.is<std::string>() ||
       begin_it->second.get<std::string>().empty()) {
-    return Result<TagFormat>::Err("Tag format must have a begin field with a non-empty string");
+    return ResultErr("Tag format must have a begin field with a non-empty string");
   }
   // content is required.
   auto content_it = obj.find("content");
   if (content_it == obj.end()) {
-    return Result<TagFormat>::Err("Tag format must have a content field");
+    return ResultErr("Tag format must have a content field");
   }
   auto content = ParseFormat(content_it->second);
   if (content.IsErr()) {
-    return Result<TagFormat>::Err(std::move(content).UnwrapErr());
+    return ResultErr(std::move(content).UnwrapErr());
   }
   // end is required.
   auto end_it = obj.find("end");
   if (end_it == obj.end() || !end_it->second.is<std::string>() ||
       end_it->second.get<std::string>().empty()) {
-    return Result<TagFormat>::Err("Tag format must have an end field with a non-empty string");
+    return ResultErr("Tag format must have an end field with a non-empty string");
   }
-  return Result<TagFormat>::Ok(
+  return ResultOk<TagFormat>(
       begin_it->second.get<std::string>(),
       std::make_shared<Format>(std::move(content).Unwrap()),
       end_it->second.get<std::string>()
@@ -240,25 +260,21 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
   // triggers is required.
   auto triggers_it = obj.find("triggers");
   if (triggers_it == obj.end() || !triggers_it->second.is<picojson::array>()) {
-    return Result<TriggeredTagsFormat>::Err(
-        "Triggered tags format must have a triggers field with an array"
-    );
+    return ResultErr("Triggered tags format must have a triggers field with an array");
   }
   const auto& triggers_array = triggers_it->second.get<picojson::array>();
   std::vector<std::string> triggers;
   triggers.reserve(triggers_array.size());
   for (const auto& trigger : triggers_array) {
     if (!trigger.is<std::string>() || trigger.get<std::string>().empty()) {
-      return Result<TriggeredTagsFormat>::Err("Triggers must be non-empty strings");
+      return ResultErr("Triggers must be non-empty strings");
     }
     triggers.push_back(trigger.get<std::string>());
   }
   // tags is required.
   auto tags_it = obj.find("tags");
   if (tags_it == obj.end() || !tags_it->second.is<picojson::array>()) {
-    return Result<TriggeredTagsFormat>::Err(
-        "Triggered tags format must have a tags field with an array"
-    );
+    return ResultErr("Triggered tags format must have a tags field with an array");
   }
   const auto& tags_array = tags_it->second.get<picojson::array>();
   std::vector<TagFormat> tags;
@@ -266,7 +282,7 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
   for (const auto& tag : tags_array) {
     auto tag_format = ParseTagFormat(tag);
     if (tag_format.IsErr()) {
-      return Result<TriggeredTagsFormat>::Err(std::move(tag_format).UnwrapErr());
+      return ResultErr(std::move(tag_format).UnwrapErr());
     }
     tags.push_back(std::move(tag_format).Unwrap());
   }
@@ -275,7 +291,7 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
   auto at_least_one_it = obj.find("at_least_one");
   if (at_least_one_it != obj.end()) {
     if (!at_least_one_it->second.is<bool>()) {
-      return Result<TriggeredTagsFormat>::Err("at_least_one must be a boolean");
+      return ResultErr("at_least_one must be a boolean");
     }
     at_least_one = at_least_one_it->second.get<bool>();
   }
@@ -284,11 +300,11 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
   auto stop_after_first_it = obj.find("stop_after_first");
   if (stop_after_first_it != obj.end()) {
     if (!stop_after_first_it->second.is<bool>()) {
-      return Result<TriggeredTagsFormat>::Err("stop_after_first must be a boolean");
+      return ResultErr("stop_after_first must be a boolean");
     }
     stop_after_first = stop_after_first_it->second.get<bool>();
   }
-  return Result<TriggeredTagsFormat>::Ok(
+  return ResultOk<TriggeredTagsFormat>(
       std::move(triggers), std::move(tags), at_least_one, stop_after_first
   );
 }
@@ -299,9 +315,7 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
   // tags is required.
   auto tags_it = obj.find("tags");
   if (tags_it == obj.end() || !tags_it->second.is<picojson::array>()) {
-    return Result<TagsWithSeparatorFormat>::Err(
-        "Tags with separator format must have a tags field with an array"
-    );
+    return ResultErr("Tags with separator format must have a tags field with an array");
   }
   const auto& tags_array = tags_it->second.get<picojson::array>();
   std::vector<TagFormat> tags;
@@ -309,7 +323,7 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
   for (const auto& tag : tags_array) {
     auto tag_format = ParseTagFormat(tag);
     if (tag_format.IsErr()) {
-      return Result<TagsWithSeparatorFormat>::Err(std::move(tag_format).UnwrapErr());
+      return ResultErr(std::move(tag_format).UnwrapErr());
     }
     tags.push_back(std::move(tag_format).Unwrap());
   }
@@ -317,7 +331,7 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
   auto separator_it = obj.find("separator");
   if (separator_it == obj.end() || !separator_it->second.is<std::string>() ||
       separator_it->second.get<std::string>().empty()) {
-    return Result<TagsWithSeparatorFormat>::Err(
+    return ResultErr(
         "Tags with separator format must have a separator field with a non-empty string"
     );
   }
@@ -326,7 +340,7 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
   auto at_least_one_it = obj.find("at_least_one");
   if (at_least_one_it != obj.end()) {
     if (!at_least_one_it->second.is<bool>()) {
-      return Result<TagsWithSeparatorFormat>::Err("at_least_one must be a boolean");
+      return ResultErr("at_least_one must be a boolean");
     }
     at_least_one = at_least_one_it->second.get<bool>();
   }
@@ -335,11 +349,11 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
   auto stop_after_first_it = obj.find("stop_after_first");
   if (stop_after_first_it != obj.end()) {
     if (!stop_after_first_it->second.is<bool>()) {
-      return Result<TagsWithSeparatorFormat>::Err("stop_after_first must be a boolean");
+      return ResultErr("stop_after_first must be a boolean");
     }
     stop_after_first = stop_after_first_it->second.get<bool>();
   }
-  return Result<TagsWithSeparatorFormat>::Ok(
+  return ResultOk<TagsWithSeparatorFormat>(
       std::move(tags), separator_it->second.get<std::string>(), at_least_one, stop_after_first
   );
 }
@@ -365,31 +379,18 @@ class StructuralTagAnalyzer {
   std::optional<std::runtime_error> VisitJSONSchemaFormat(JSONSchemaFormat* format);
   std::optional<std::runtime_error> VisitWildcardTextFormat(WildcardTextFormat* format);
   std::optional<std::runtime_error> VisitSequenceFormat(SequenceFormat* format);
+  std::optional<std::runtime_error> VisitOrFormat(OrFormat* format);
   std::optional<std::runtime_error> VisitTagFormat(TagFormat* format);
   std::optional<std::runtime_error> VisitTriggeredTagsFormat(TriggeredTagsFormat* format);
   std::optional<std::runtime_error> VisitTagsWithSeparatorFormat(TagsWithSeparatorFormat* format);
 
-  std::optional<std::string> DetectEndString();
+  std::optional<std::runtime_error> CheckLastLeaf();
+  void UpdateLastLeafEnd(const std::string& end);
 
-  struct Frame {
-    Format* format;
-    int element_id;  // The id of the element currently visited.
-  };
-
-  std::vector<Frame> stack_;
+  std::optional<FormatPtr> last_leaf = std::nullopt;
+  std::optional<std::string> first = std::nullopt;
   int visit_format_recursion_depth_ = 0;
 };
-
-std::optional<std::string> StructuralTagAnalyzer::DetectEndString() {
-  for (int i = static_cast<int>(stack_.size()) - 1; i >= 0; --i) {
-    auto& frame = stack_[i];
-
-    if (frame.format->type == "tag") {
-      return frame.format->end;
-    }
-  }
-  return std::nullopt;
-}
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
     StructuralTag* structural_tag
@@ -397,9 +398,48 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
   return VisitFormat(&structural_tag->format);
 }
 
+std::optional<std::runtime_error> StructuralTagAnalyzer::CheckLastLeaf() {
+  if (last_leaf.has_value()) {
+    auto result = std::visit(
+        [&](auto&& arg) -> std::optional<std::runtime_error> {
+          using T = std::decay_t<decltype(*arg)>;
+          if constexpr (std::is_same_v<T, LiteralFormat*>) {
+            return std::runtime_error("Bad form: LiteralFormat is in the middle of strunctural tag"
+            );
+          } else if constexpr (std::is_same_v<T, WildcardTextFormat*>) {
+            return std::runtime_error(
+                "Bad form: WildcardTextFormat is in the middle of strunctural tag"
+            );
+          } else {
+            return std::nullopt;
+          }
+        },
+        last_leaf.value()
+    );
+    return result;
+  }
+  return std::nullopt;
+}
+
+void StructuralTagAnalyzer::UpdateLastLeafEnd(const std::string& end) {
+  if (last_leaf.has_value()) {
+    std::visit(
+        [&](auto&& arg) {
+          using T = std::decay_t<decltype(*arg)>;
+          if constexpr (std::is_same_v<T, LiteralFormat*>) {
+            arg->end_ = end;
+          } else if constexpr (std::is_same_v<T, WildcardTextFormat*>) {
+            arg->end_ = end;
+          }
+        },
+        last_leaf.value()
+    );
+  }
+  last_leaf = std::nullopt;
+}
+
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* format) {
   RecursionGuard guard(&visit_format_recursion_depth_);
-  stack_.push_back({format, 0});
   auto result = std::visit(
       [&](auto&& arg) -> std::optional<std::runtime_error> {
         using T = std::decay_t<decltype(arg)>;
@@ -411,6 +451,8 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* for
           return VisitWildcardTextFormat(&arg);
         } else if constexpr (std::is_same_v<T, SequenceFormat>) {
           return VisitSequenceFormat(&arg);
+        } else if constexpr (std::is_same_v<T, OrFormat>) {
+          return VisitOrFormat(&arg);
         } else if constexpr (std::is_same_v<T, TagFormat>) {
           return VisitTagFormat(&arg);
         } else if constexpr (std::is_same_v<T, TriggeredTagsFormat>) {
@@ -423,24 +465,29 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* for
       },
       *format
   );
-  stack_.pop_back();
   return result;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitLiteralFormat(LiteralFormat* format) {
-  return std::nullopt;
+  auto result = CheckLastLeaf();
+  last_leaf = format;
+  return result;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitJSONSchemaFormat(
     JSONSchemaFormat* format
 ) {
-  return std::nullopt;
+  auto result = CheckLastLeaf();
+  last_leaf = format;
+  return result;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitWildcardTextFormat(
     WildcardTextFormat* format
 ) {
-  return std::nullopt;
+  auto result = CheckLastLeaf();
+  last_leaf = format;
+  return result;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSequenceFormat(SequenceFormat* format
@@ -450,13 +497,24 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSequenceFormat(Seq
     if (result.has_value()) {
       return result;
     }
-    ++stack_.back().element_id;
   }
   return std::nullopt;
 }
 
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitOrFormat(OrFormat* format) {
+  for (auto& element : format->elements) {
+    auto result = VisitFormat(&element);
+    if (result.has_value()) {
+      return result;
+    }
+  }
+  // TODO
+  return std::nullopt;
+}
+
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagFormat(TagFormat* format) {
-  return VisitFormat(format->content.get());
+  UpdateLastLeafEnd(format->begin);
+  auto result = VisitFormat(format->content.get());
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTriggeredTagsFormat(
@@ -493,7 +551,7 @@ Result<Grammar> StructuralTagGrammarConverter::Convert(const std::string& struct
 Result<Grammar> StructuralTagGrammarConverter::Convert(const StructuralTag& structural_tag) {
   auto structural_tag_internal = STIIR::FromStructuralTag(structural_tag);
   if (structural_tag_internal.IsErr()) {
-    return Result<Grammar>::Err(std::move(structural_tag_internal).UnwrapErr());
+    return ResultErr(std::move(structural_tag_internal).UnwrapErr());
   }
   return Convert(std::move(structural_tag_internal).Unwrap());
 }
@@ -501,7 +559,7 @@ Result<Grammar> StructuralTagGrammarConverter::Convert(const StructuralTag& stru
 Result<Grammar> StructuralTagGrammarConverter::Convert(
     const StructuralTagInternal& structural_tag_internal
 ) {
-  return Result<Grammar>::Err("Not implemented");
+  return ResultErr("Not implemented");
 }
 
 /************** StructuralTag to Grammar Public API **************/

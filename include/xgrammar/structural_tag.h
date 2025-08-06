@@ -21,6 +21,7 @@ struct LiteralFormat;
 struct JSONSchemaFormat;
 struct WildcardTextFormat;
 struct SequenceFormat;
+struct OrFormat;
 struct TagFormat;
 struct TriggeredTagsFormat;
 struct TagsWithSeparatorFormat;
@@ -30,9 +31,20 @@ using Format = std::variant<
     JSONSchemaFormat,
     WildcardTextFormat,
     SequenceFormat,
+    OrFormat,
     TagFormat,
     TriggeredTagsFormat,
     TagsWithSeparatorFormat>;
+
+using FormatPtr = std::variant<
+    LiteralFormat*,
+    JSONSchemaFormat*,
+    WildcardTextFormat*,
+    SequenceFormat*,
+    OrFormat*,
+    TagFormat*,
+    TriggeredTagsFormat*,
+    TagsWithSeparatorFormat*>;
 
 /******************** Basic Formats ********************/
 
@@ -43,7 +55,7 @@ struct LiteralFormat {
 
   // For StructuralTagAnalyzer
  private:
-  bool deprived_ = false;
+  std::optional<std::vector<std::string>> end_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
@@ -59,7 +71,7 @@ struct WildcardTextFormat {
 
   // For StructuralTagAnalyzer
  private:
-  bool deprived_ = false;
+  std::optional<std::vector<std::string>> end_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
@@ -69,6 +81,12 @@ struct SequenceFormat {
   static constexpr const char* type = "sequence";
   std::vector<Format> elements;
   SequenceFormat(std::vector<Format> elements) : elements(std::move(elements)) {}
+};
+
+struct OrFormat {
+  static constexpr const char* type = "or";
+  std::vector<Format> elements;
+  OrFormat(std::vector<Format> elements) : elements(std::move(elements)) {}
 };
 
 struct TagFormat {
@@ -82,8 +100,6 @@ struct TagFormat {
 
   // For StructuralTagAnalyzer
  private:
-  bool begin_deprived_ = false;
-  bool end_deprived_ = false;
   friend class StructuralTagAnalyzer;
 };
 
@@ -107,7 +123,6 @@ struct TriggeredTagsFormat {
 
   // For StructuralTagAnalyzer
  private:
-  std::optional<std::string> detected_end_string_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
@@ -128,7 +143,6 @@ struct TagsWithSeparatorFormat {
 
   // For StructuralTagAnalyzer
  private:
-  std::optional<std::string> detected_end_string_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
