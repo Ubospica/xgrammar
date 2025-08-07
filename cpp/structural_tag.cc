@@ -405,6 +405,7 @@ class StructuralTagAnalyzer {
 
   std::optional<std::string> DetectEndString();
   bool IsUnlimited(const Format& format);
+  bool IsPrefix(const std::string& str1, const std::string& str2);
 
   int visit_format_recursion_depth_ = 0;
   std::vector<FormatPtrVariant> stack_;
@@ -550,8 +551,23 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSub(TagFormat* for
   return std::nullopt;
 }
 
+bool StructuralTagAnalyzer::IsPrefix(const std::string& str1, const std::string& str2) {
+  return str1.size() <= str2.size() && std::string_view(str2).substr(0, str1.size()) == str1;
+}
+
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSub(TriggeredTagsFormat* format) {
   for (auto& tag : format->tags) {
+    if (!std::any_of(
+            format->triggers.begin(),
+            format->triggers.end(),
+            [&](const std::string& trigger) { return IsPrefix(trigger, tag.begin); }
+        )) {
+      return std::runtime_error(
+          "The begin of each tag in a triggered tags format must start with one of the triggers, "
+          "but the begin of tag " +
+          tag.begin + " does not start with any trigger"
+      );
+    }
     auto err = Visit(&tag);
     if (err.has_value()) {
       return err;
@@ -579,27 +595,104 @@ class StructuralTagGrammarConverter {
   static Result<Grammar> Convert(const StructuralTag& structural_tag);
 
  private:
-  std::optional<std::runtime_error> Visit(const Format& format);
-  std::optional<std::runtime_error> Visit(const LiteralFormat& format);
-  std::optional<std::runtime_error> Visit(const JSONSchemaFormat& format);
-  std::optional<std::runtime_error> Visit(const WildcardTextFormat& format);
-  std::optional<std::runtime_error> Visit(const SequenceFormat& format);
-  std::optional<std::runtime_error> Visit(const OrFormat& format);
-  std::optional<std::runtime_error> Visit(const TagFormat& format);
-  std::optional<std::runtime_error> Visit(const TriggeredTagsFormat& format);
-  std::optional<std::runtime_error> Visit(const TagsWithSeparatorFormat& format);
+  Result<int> Visit(const Format& format);
+  Result<int> VisitSub(const LiteralFormat& format);
+  Result<int> VisitSub(const JSONSchemaFormat& format);
+  Result<int> VisitSub(const WildcardTextFormat& format);
+  Result<int> VisitSub(const SequenceFormat& format);
+  Result<int> VisitSub(const OrFormat& format);
+  Result<int> VisitSub(const TagFormat& format);
+  Result<int> VisitSub(const TriggeredTagsFormat& format);
+  Result<int> VisitSub(const TagsWithSeparatorFormat& format);
+  Grammar AddRootRuleAndGetGrammar(int ref_rule_id);
 
   GrammarBuilder grammar_builder_;
 };
 
 Result<Grammar> StructuralTagGrammarConverter::Convert(const StructuralTag& structural_tag) {
   auto converter = StructuralTagGrammarConverter();
-  auto err = converter.Visit(structural_tag.format);
-  if (err.has_value()) {
-    return ResultErr(std::move(err).value());
+  auto result = converter.Visit(structural_tag.format);
+  if (result.IsErr()) {
+    return ResultErr(std::move(result).UnwrapErr());
   }
-  auto grammar = converter.grammar_builder_.Get();
-  return ResultOk(std::move(grammar));
+  // Add a root rule
+  return ResultOk(converter.AddRootRuleAndGetGrammar(std::move(result).Unwrap()));
+}
+
+Grammar StructuralTagGrammarConverter::AddRootRuleAndGetGrammar(int ref_rule_id) {
+  auto expr = grammar_builder_.AddRuleRef(ref_rule_id);
+  auto root_rule_id = grammar_builder_.AddRule("root", expr);
+  return grammar_builder_.Get(root_rule_id);
+}
+
+Result<int> StructuralTagGrammarConverter::Visit(const Format& format) {
+  return std::visit([&](auto&& arg) -> Result<int> { return VisitSub(arg); }, format);
+}
+
+Result<int> StructuralTagGrammarConverter::VisitSub(const LiteralFormat& format) {
+  auto expr = grammar_builder_.AddByteString(format.text);
+  return ResultOk(grammar_builder_.AddRuleWithHint("literal", expr));
+}
+
+Result<int> StructuralTagGrammarConverter::VisitSub(const JSONSchemaFormat& format) {
+  auto sub_grammar = Grammar::FromJSONSchema(format.json_schema);
+  return ResultOk(SubGrammarAdder().Apply(&grammar_builder_, sub_grammar));
+}
+
+Result<int> StructuralTagGrammarConverter::VisitSub(const WildcardTextFormat& format) {
+  // TODO
+  return ResultOk(grammar_builder_.AddRuleWithHint("wildcard_text", expr));
+}
+
+Result<int> StructuralTagGrammarConverter::VisitSub(const SequenceFormat& format) {
+  std::vector<int> rule_ref_ids;
+  for (auto& element : format.elements) {
+    auto result = Visit(element);
+    if (result.IsErr()) {
+      return result;
+    }
+    int sub_rule_id = std::move(result).Unwrap();
+    rule_ref_ids.push_back(grammar_builder_.AddRuleRef(sub_rule_id));
+  }
+  auto expr = grammar_builder_.AddChoices({grammar_builder_.AddSequence(rule_ref_ids)});
+  return ResultOk(grammar_builder_.AddRuleWithHint("sequence", expr));
+}
+
+Result<int> StructuralTagGrammarConverter::VisitSub(const OrFormat& format) {
+  std::vector<int> sequence_ids;
+  for (auto& element : format.elements) {
+    auto result = Visit(element);
+    if (result.IsErr()) {
+      return result;
+    }
+    int sub_rule_id = std::move(result).Unwrap();
+    auto rule_ref_expr = grammar_builder_.AddRuleRef(sub_rule_id);
+    sequence_ids.push_back(grammar_builder_.AddSequence({rule_ref_expr}));
+  }
+  auto expr = grammar_builder_.AddChoices(sequence_ids);
+  return ResultOk(grammar_builder_.AddRuleWithHint("or", expr));
+}
+
+Result<int> StructuralTagGrammarConverter::VisitSub(const TagFormat& format) {
+  auto result = Visit(*format.content);
+  if (result.IsErr()) {
+    return result;
+  }
+  auto sub_rule_id = std::move(result).Unwrap();
+  auto begin_expr = grammar_builder_.AddByteString(format.begin);
+  auto end_expr = grammar_builder_.AddByteString(format.end);
+  auto rule_ref_expr = grammar_builder_.AddRuleRef(sub_rule_id);
+  auto sequence_expr = grammar_builder_.AddSequence({begin_expr, rule_ref_expr, end_expr});
+  auto choices_expr = grammar_builder_.AddChoices({sequence_expr});
+  return ResultOk(grammar_builder_.AddRuleWithHint("tag", choices_expr));
+}
+
+Result<int> StructuralTagGrammarConverter::VisitSub(const TriggeredTagsFormat& format) {
+  return ResultOk(0);
+}
+
+Result<int> StructuralTagGrammarConverter::VisitSub(const TagsWithSeparatorFormat& format) {
+  return ResultOk(0);
 }
 
 /************** StructuralTag to Grammar Public API **************/
