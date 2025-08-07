@@ -189,9 +189,9 @@ class Result {
   template <typename U, typename V>
   static Result<T, E> Convert(Result<U, V>&& result) {
     if (result.IsOk()) {
-      return ResultOk(std::move(result).Unwrap());
+      return ResultOk<T>(std::move(result).Unwrap());
     }
-    return ResultErr(std::move(result).UnwrapErr());
+    return ResultErr<E>(std::move(result).UnwrapErr());
   }
 
   /*! \brief Get a std::variant<T, E> from the result. */

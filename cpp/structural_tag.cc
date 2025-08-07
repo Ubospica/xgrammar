@@ -26,6 +26,7 @@ class StructuralTagImpl {
 
  private:
   Result<StructuralTag> ParseStructuralTag(const picojson::value& value);
+
   /*!
    * \brief Parse a Format object from a JSON value.
    * \param value The JSON value to parse.
@@ -111,6 +112,7 @@ Result<Format> StructuralTagImpl::ParseFormat(const picojson::value& value) {
       return ResultErr("Invalid format type: " + type);
     }
   }
+
   // If type is not present, try every format type one by one. Tag is prioritized.
   auto tag_format = ParseTagFormat(obj);
   if (!tag_format.IsErr()) {
