@@ -245,15 +245,15 @@ Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::object& obj)
     return ResultErr(std::move(content).UnwrapErr());
   }
   // end is required.
-  auto end_it = obj.find("end");
-  if (end_it == obj.end() || !end_it->second.is<std::string>() ||
-      end_it->second.get<std::string>().empty()) {
+  auto detected_end_str_it = obj.find("end");
+  if (detected_end_str_it == obj.end() || !detected_end_str_it->second.is<std::string>() ||
+      detected_end_str_it->second.get<std::string>().empty()) {
     return ResultErr("Tag format must have an end field with a non-empty string");
   }
   return ResultOk<TagFormat>(
       begin_it->second.get<std::string>(),
-      std::make_shared<Format>(std::move(content).Unwrap()),
-      end_it->second.get<std::string>()
+      std::make_unique<Format>(std::move(content).Unwrap()),
+      detected_end_str_it->second.get<std::string>()
   );
 }
 
@@ -366,11 +366,6 @@ std::variant<StructuralTag, std::runtime_error> StructuralTag::FromJSON(const st
   return StructuralTagImpl().FromJSON(json).ToVariant();
 }
 
-/************** Utils Methods **************/
-const std::string get_format_type(const Format* format) {
-  return std::visit([](const auto& f) -> std::string { return f.type; }, *format);
-}
-
 /************** StructuralTag Analyzer **************/
 
 /*!
@@ -381,7 +376,24 @@ class StructuralTagAnalyzer {
   std::optional<std::runtime_error> AnalyzeStructuralTag(StructuralTag* structural_tag);
 
  private:
+  /*! \brief A variant that can hold the pointer of any Format types. */
+  using FormatPtrVariant = std::variant<
+      LiteralFormat*,
+      JSONSchemaFormat*,
+      WildcardTextFormat*,
+      SequenceFormat*,
+      OrFormat*,
+      TagFormat*,
+      TriggeredTagsFormat*,
+      TagsWithSeparatorFormat*>;
+
+  // Call this if we have a pointer to a Format.
   std::optional<std::runtime_error> VisitFormat(Format* format);
+  // Call this if we have a pointer to a variant of Format.
+  std::optional<std::runtime_error> VisitFormat(FormatPtrVariant format);
+
+  // The following is dispatched from VisitFormat. Don't call them directly because they don't
+  // handle stack logics.
   std::optional<std::runtime_error> VisitLiteralFormat(LiteralFormat* format);
   std::optional<std::runtime_error> VisitJSONSchemaFormat(JSONSchemaFormat* format);
   std::optional<std::runtime_error> VisitWildcardTextFormat(WildcardTextFormat* format);
@@ -390,11 +402,12 @@ class StructuralTagAnalyzer {
   std::optional<std::runtime_error> VisitTagFormat(TagFormat* format);
   std::optional<std::runtime_error> VisitTriggeredTagsFormat(TriggeredTagsFormat* format);
   std::optional<std::runtime_error> VisitTagsWithSeparatorFormat(TagsWithSeparatorFormat* format);
+
   std::optional<std::string> DetectEndString();
-  bool is_unlimited(Format* format);
+  bool IsUnlimited(const Format& format);
 
   int visit_format_recursion_depth_ = 0;
-  std::vector<Format*> stack_;
+  std::vector<FormatPtrVariant> stack_;
 };
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
@@ -407,65 +420,78 @@ std::optional<std::string> StructuralTagAnalyzer::DetectEndString() {
   for (int i = static_cast<int>(stack_.size()) - 1; i >= 0; --i) {
     auto& format = stack_[i];
 
-    if (get_format_type(format) == "tag") {
-      TagFormat& tag = std::get<TagFormat>(*format);
-      return tag.end;
+    if (std::holds_alternative<TagFormat*>(format)) {
+      auto* tag = std::get<TagFormat*>(format);
+      return tag->end;
     }
   }
   return std::nullopt;
 }
 
-bool StructuralTagAnalyzer::is_unlimited(Format* format) {
+bool StructuralTagAnalyzer::IsUnlimited(const Format& format) {
   return std::visit(
       [&](auto&& arg) -> bool {
         using T = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<T, WildcardTextFormat>) {
-          return !(arg.end_.has_value());
+          return true;
         } else if constexpr (std::is_same_v<T, TriggeredTagsFormat>) {
-          return !(arg.end_.has_value());
+          return true;
         } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormat>) {
-          return !(arg.end_.has_value());
+          return true;
         } else if constexpr (std::is_same_v<T, SequenceFormat>) {
-          return arg.unlimit_;
+          return arg.is_unlimited_;
         } else if constexpr (std::is_same_v<T, OrFormat>) {
-          return arg.unlimit_;
+          return arg.is_unlimited_;
         } else {
           return false;
         }
       },
-      *format
+      format
   );
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* format) {
+  FormatPtrVariant format_ptr_variant =
+      std::visit([&](auto&& arg) -> FormatPtrVariant { return &arg; }, *format);
+  return VisitFormat(format_ptr_variant);
+}
+
+std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(FormatPtrVariant format) {
   RecursionGuard guard(&visit_format_recursion_depth_);
+
+  // Push format to stack
   stack_.push_back(format);
+
+  // Dispatch to the corresponding visit function
   auto result = std::visit(
       [&](auto&& arg) -> std::optional<std::runtime_error> {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, LiteralFormat>) {
-          return VisitLiteralFormat(&arg);
-        } else if constexpr (std::is_same_v<T, JSONSchemaFormat>) {
-          return VisitJSONSchemaFormat(&arg);
-        } else if constexpr (std::is_same_v<T, WildcardTextFormat>) {
-          return VisitWildcardTextFormat(&arg);
-        } else if constexpr (std::is_same_v<T, SequenceFormat>) {
-          return VisitSequenceFormat(&arg);
-        } else if constexpr (std::is_same_v<T, OrFormat>) {
-          return VisitOrFormat(&arg);
-        } else if constexpr (std::is_same_v<T, TagFormat>) {
-          return VisitTagFormat(&arg);
-        } else if constexpr (std::is_same_v<T, TriggeredTagsFormat>) {
-          return VisitTriggeredTagsFormat(&arg);
-        } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormat>) {
-          return VisitTagsWithSeparatorFormat(&arg);
+        if constexpr (std::is_same_v<T, LiteralFormat*>) {
+          return VisitLiteralFormat(arg);
+        } else if constexpr (std::is_same_v<T, JSONSchemaFormat*>) {
+          return VisitJSONSchemaFormat(arg);
+        } else if constexpr (std::is_same_v<T, WildcardTextFormat*>) {
+          return VisitWildcardTextFormat(arg);
+        } else if constexpr (std::is_same_v<T, SequenceFormat*>) {
+          return VisitSequenceFormat(arg);
+        } else if constexpr (std::is_same_v<T, OrFormat*>) {
+          return VisitOrFormat(arg);
+        } else if constexpr (std::is_same_v<T, TagFormat*>) {
+          return VisitTagFormat(arg);
+        } else if constexpr (std::is_same_v<T, TriggeredTagsFormat*>) {
+          return VisitTriggeredTagsFormat(arg);
+        } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormat*>) {
+          return VisitTagsWithSeparatorFormat(arg);
         } else {
-          XGRAMMAR_LOG(FATAL) << "Unhandled format type: " << typeid(T).name();
+          XGRAMMAR_LOG(FATAL) << "Unhandled format pointer type: " << typeid(T).name();
         }
       },
-      *format
+      format
   );
+
+  // Pop format from stack
   stack_.pop_back();
+
   return result;
 }
 
@@ -482,7 +508,7 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitJSONSchemaFormat(
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitWildcardTextFormat(
     WildcardTextFormat* format
 ) {
-  format->end_ = DetectEndString();
+  format->detected_end_str_ = DetectEndString();
   return std::nullopt;
 }
 
@@ -490,69 +516,92 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSequenceFormat(Seq
 ) {
   for (size_t i = 0; i < format->elements.size() - 1; ++i) {
     auto& element = format->elements[i];
-    auto result = VisitFormat(&element);
-    if (result.has_value() or is_unlimited(&element)) {
-      return result;
+    auto err = VisitFormat(&element);
+    if (err.has_value()) {
+      return err;
+    }
+    if (IsUnlimited(element)) {
+      return std::runtime_error(
+          "Only the last element in a sequence can be unlimited, but the " + std::to_string(i) +
+          "th element of sequence format is unlimited"
+      );
     }
   }
+
   auto& element = format->elements.back();
-  auto result = VisitFormat(&element);
-  if (result.has_value()) {
-    return result;
+  auto err = VisitFormat(&element);
+  if (err.has_value()) {
+    return err;
   }
-  format->unlimit_ = is_unlimited(&element);
+  format->is_unlimited_ = IsUnlimited(element);
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitOrFormat(OrFormat* format) {
-  bool has_limited = false;
+  bool is_any_unlimited = false;
+  bool is_all_unlimited = true;
   for (auto& element : format->elements) {
-    auto result = VisitFormat(&element);
-    if (result.has_value()) {
-      return result;
+    auto err = VisitFormat(&element);
+    if (err.has_value()) {
+      return err;
     }
-    if (!is_unlimited(&element)) {
-      has_limited = true;
-    }
+    auto is_unlimited = IsUnlimited(element);
+    is_any_unlimited |= is_unlimited;
+    is_all_unlimited &= is_unlimited;
   }
 
-  format->unlimit_ = !has_limited;
+  if (is_any_unlimited && !is_all_unlimited) {
+    return std::runtime_error(
+        "Now we only support all elements in an or format to be unlimited or all limited, but the "
+        "or format has both unlimited and limited elements"
+    );
+  }
+
+  format->is_unlimited_ = is_any_unlimited;
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagFormat(TagFormat* format) {
-  return VisitFormat(format->content.get());
+  auto err = VisitFormat(format->content.get());
+  if (err.has_value()) {
+    return err;
+  }
+  auto is_content_unlimited = IsUnlimited(*(format->content));
+  if (is_content_unlimited) {
+    if (format->end.empty()) {
+      return std::runtime_error(
+          "When the content is unlimited, the end of the tag format cannot be empty"
+      );
+    }
+    // Clear the end string because it is moved to the detected_end_str_ field.
+    format->end.clear();
+  }
+  return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTriggeredTagsFormat(
     TriggeredTagsFormat* format
 ) {
-  format->end_ = DetectEndString();
-  for (size_t i = 0; i < format->tags.size() - 1; ++i) {
-    auto& tag = format->tags[i];
-    Format tag_format = Format(std::move(tag));  // temporary move out the tag content
-    auto result = VisitFormat(&tag_format);
-    format->tags[i] = std::move(std::get<TagFormat>(tag_format));  // move back the tag content
-    if (result.has_value()) {
-      return result;
+  for (auto& tag : format->tags) {
+    auto err = VisitFormat(&tag);
+    if (err.has_value()) {
+      return err;
     }
   }
+  format->detected_end_str_ = DetectEndString();
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagsWithSeparatorFormat(
     TagsWithSeparatorFormat* format
 ) {
-  format->end_ = DetectEndString();
-  for (size_t i = 0; i < format->tags.size() - 1; ++i) {
-    auto& tag = format->tags[i];
-    Format tag_format = Format(std::move(tag));  // temporary move out the tag content
-    auto result = VisitFormat(&tag_format);
-    format->tags[i] = std::move(std::get<TagFormat>(tag_format));  // move back the tag content
-    if (result.has_value()) {
-      return result;
+  for (auto& tag : format->tags) {
+    auto err = VisitFormat(&tag);
+    if (err.has_value()) {
+      return err;
     }
   }
+  format->detected_end_str_ = DetectEndString();
   return std::nullopt;
 }
 

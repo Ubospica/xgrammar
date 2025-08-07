@@ -60,7 +60,7 @@ struct WildcardTextFormat {
 
   // For StructuralTagAnalyzer
  private:
-  std::optional<std::string> end_ = std::nullopt;
+  std::optional<std::string> detected_end_str_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
@@ -73,7 +73,7 @@ struct SequenceFormat {
 
   // For StructuralTagAnalyzer
  private:
-  bool unlimit_ = false;
+  bool is_unlimited_ = false;
   friend class StructuralTagAnalyzer;
 };
 
@@ -84,17 +84,17 @@ struct OrFormat {
 
   // For StructuralTagAnalyzer
  private:
-  bool unlimit_ = false;
+  bool is_unlimited_ = false;
   friend class StructuralTagAnalyzer;
 };
 
 struct TagFormat {
   static constexpr const char* type = "tag";
   std::string begin;
-  std::shared_ptr<Format> content;
+  std::unique_ptr<Format> content;
   std::string end;
 
-  TagFormat(std::string begin, std::shared_ptr<Format> content, std::string end)
+  TagFormat(std::string begin, std::unique_ptr<Format> content, std::string end)
       : begin(std::move(begin)), content(std::move(content)), end(std::move(end)) {}
 
   // For StructuralTagAnalyzer
@@ -122,7 +122,7 @@ struct TriggeredTagsFormat {
 
   // For StructuralTagAnalyzer
  private:
-  std::optional<std::string> end_ = std::nullopt;
+  std::optional<std::string> detected_end_str_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
@@ -143,7 +143,7 @@ struct TagsWithSeparatorFormat {
 
   // For StructuralTagAnalyzer
  private:
-  std::optional<std::string> end_ = std::nullopt;
+  std::optional<std::string> detected_end_str_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 

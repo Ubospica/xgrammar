@@ -71,19 +71,64 @@ struct PartialResult {
   T value;
 };
 
-template <typename E = std::runtime_error, typename... Args>
-inline PartialResult<E, false> ResultErr(Args&&... args) {
-  return PartialResult<E, false>{std::forward<Args>(args)...};
-}
-
+/*!
+ * \brief Construct a success result with the arguments to construct a T.
+ * \tparam T The type of the success value
+ * \tparam Args The types of the arguments to construct a T
+ * \param args The arguments to construct a T
+ * \return A PartialResult with the arguments to construct a T
+ * \example
+ * \code
+ * // Call the constructor of T with the arguments
+ * return ResultOk<T>(1, 2, 3);
+ * \endcode
+ */
 template <typename T, typename... Args>
 inline PartialResult<T, true> ResultOk(Args&&... args) {
   return PartialResult<T, true>{std::forward<Args>(args)...};
 }
 
+/*!
+ * \brief Construct a success result with a universal reference (both lvalue and rvalue)
+ * \tparam T The type of the success value
+ * \param value The universal reference to the success value
+ * \return A PartialResult with the universal reference to the success value
+ * \example
+ * \code
+ * T value = T(1, 2, 3);
+ * // Move the value to the PartialResult
+ * return ResultOk(std::move(value));
+ * \endcode
+ */
 template <typename T>
 inline PartialResult<T&&, true> ResultOk(T&& value) {
   return PartialResult<T&&, true>{std::forward<T>(value)};
+}
+
+/*!
+ * \brief Construct a error result with the arguments to construct a E.
+ * \tparam E The type of the error value. Default to std::runtime_error.
+ * \tparam Args The types of the arguments to construct a E
+ * \param args The arguments to construct a E
+ * \return A PartialResult with the arguments to construct a E
+ * \example
+ * \code
+ * // Construct a std::runtime_error with a error
+ * std::runtime_error error("Message");
+ * return ResultErr(std::move(error));
+ * \endcode
+ * \code
+ * // Construct a std::runtime_error with its argument
+ * return ResultErr("Error");
+ * \endcode
+ * \code
+ * // Construct an E error with its argument
+ * return ResultErr<E>("Error");
+ * \endcode
+ */
+template <typename E = std::runtime_error, typename... Args>
+inline PartialResult<E, false> ResultErr(Args&&... args) {
+  return PartialResult<E, false>{std::forward<Args>(args)...};
 }
 
 /*!
