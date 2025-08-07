@@ -36,16 +36,6 @@ using Format = std::variant<
     TriggeredTagsFormat,
     TagsWithSeparatorFormat>;
 
-using FormatPtr = std::variant<
-    LiteralFormat*,
-    JSONSchemaFormat*,
-    WildcardTextFormat*,
-    SequenceFormat*,
-    OrFormat*,
-    TagFormat*,
-    TriggeredTagsFormat*,
-    TagsWithSeparatorFormat*>;
-
 /******************** Basic Formats ********************/
 
 struct LiteralFormat {
@@ -55,7 +45,6 @@ struct LiteralFormat {
 
   // For StructuralTagAnalyzer
  private:
-  std::optional<std::vector<std::string>> end_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
@@ -71,7 +60,7 @@ struct WildcardTextFormat {
 
   // For StructuralTagAnalyzer
  private:
-  std::optional<std::vector<std::string>> end_ = std::nullopt;
+  std::optional<std::string> end_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
@@ -81,12 +70,22 @@ struct SequenceFormat {
   static constexpr const char* type = "sequence";
   std::vector<Format> elements;
   SequenceFormat(std::vector<Format> elements) : elements(std::move(elements)) {}
+
+  // For StructuralTagAnalyzer
+ private:
+  bool unlimit_ = false;
+  friend class StructuralTagAnalyzer;
 };
 
 struct OrFormat {
   static constexpr const char* type = "or";
   std::vector<Format> elements;
   OrFormat(std::vector<Format> elements) : elements(std::move(elements)) {}
+
+  // For StructuralTagAnalyzer
+ private:
+  bool unlimit_ = false;
+  friend class StructuralTagAnalyzer;
 };
 
 struct TagFormat {
@@ -123,6 +122,7 @@ struct TriggeredTagsFormat {
 
   // For StructuralTagAnalyzer
  private:
+  std::optional<std::string> end_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 
@@ -143,6 +143,7 @@ struct TagsWithSeparatorFormat {
 
   // For StructuralTagAnalyzer
  private:
+  std::optional<std::string> end_ = std::nullopt;
   friend class StructuralTagAnalyzer;
 };
 

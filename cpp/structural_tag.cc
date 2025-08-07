@@ -383,13 +383,11 @@ class StructuralTagAnalyzer {
   std::optional<std::runtime_error> VisitTagFormat(TagFormat* format);
   std::optional<std::runtime_error> VisitTriggeredTagsFormat(TriggeredTagsFormat* format);
   std::optional<std::runtime_error> VisitTagsWithSeparatorFormat(TagsWithSeparatorFormat* format);
+  std::optional<std::string> DetectEndString();
+  bool is_unlimited(Format* format);
 
-  std::optional<std::runtime_error> CheckLastLeaf();
-  void UpdateLastLeafEnd(const std::string& end);
-
-  std::optional<FormatPtr> last_leaf = std::nullopt;
-  std::optional<std::string> first = std::nullopt;
   int visit_format_recursion_depth_ = 0;
+  std::vector<Format*> stack_;
 };
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
@@ -398,48 +396,42 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
   return VisitFormat(&structural_tag->format);
 }
 
-std::optional<std::runtime_error> StructuralTagAnalyzer::CheckLastLeaf() {
-  if (last_leaf.has_value()) {
-    auto result = std::visit(
-        [&](auto&& arg) -> std::optional<std::runtime_error> {
-          using T = std::decay_t<decltype(*arg)>;
-          if constexpr (std::is_same_v<T, LiteralFormat*>) {
-            return std::runtime_error("Bad form: LiteralFormat is in the middle of strunctural tag"
-            );
-          } else if constexpr (std::is_same_v<T, WildcardTextFormat*>) {
-            return std::runtime_error(
-                "Bad form: WildcardTextFormat is in the middle of strunctural tag"
-            );
-          } else {
-            return std::nullopt;
-          }
-        },
-        last_leaf.value()
-    );
-    return result;
+std::optional<std::string> StructuralTagAnalyzer::DetectEndString() {
+  for (int i = static_cast<int>(stack_.size()) - 1; i >= 0; --i) {
+    auto& frame = stack_[i];
+
+    if (frame.format->type == "tag") {
+      return frame.format->end;
+    }
   }
   return std::nullopt;
 }
 
-void StructuralTagAnalyzer::UpdateLastLeafEnd(const std::string& end) {
-  if (last_leaf.has_value()) {
-    std::visit(
-        [&](auto&& arg) {
-          using T = std::decay_t<decltype(*arg)>;
-          if constexpr (std::is_same_v<T, LiteralFormat*>) {
-            arg->end_ = end;
-          } else if constexpr (std::is_same_v<T, WildcardTextFormat*>) {
-            arg->end_ = end;
-          }
-        },
-        last_leaf.value()
-    );
-  }
-  last_leaf = std::nullopt;
+bool StructuralTagAnalyzer::is_unlimited(Format* format) {
+  return std::visit(
+      [&](auto&& arg) -> bool {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, WildcardTextFormat>) {
+          return !(format->end_.has_value());
+        } else if constexpr (std::is_same_v<T, TriggeredTagsFormat>) {
+          return !(format->end_.has_value());
+        } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormat>) {
+          return !(format->end_.has_value());
+        } else if constexpr (std::is_same_v<T, SequenceFormat>) {
+          return format->unlimit_;
+        } else if constexpr (std::is_same_v<T, OrFormat>) {
+          return format->unlimit_;
+        } else {
+          return false;
+        }
+      },
+      *format
+  );
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* format) {
   RecursionGuard guard(&visit_format_recursion_depth_);
+  stack_.push_back(format);
   auto result = std::visit(
       [&](auto&& arg) -> std::optional<std::runtime_error> {
         using T = std::decay_t<decltype(arg)>;
@@ -465,67 +457,90 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitFormat(Format* for
       },
       *format
   );
+  stack_.pop_back();
   return result;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitLiteralFormat(LiteralFormat* format) {
-  auto result = CheckLastLeaf();
-  last_leaf = format;
-  return result;
+  return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitJSONSchemaFormat(
     JSONSchemaFormat* format
 ) {
-  auto result = CheckLastLeaf();
-  last_leaf = format;
-  return result;
+  return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitWildcardTextFormat(
     WildcardTextFormat* format
 ) {
-  auto result = CheckLastLeaf();
-  last_leaf = format;
-  return result;
+  format->end_ = DetectEndString();
+  return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSequenceFormat(SequenceFormat* format
 ) {
-  for (auto& element : format->elements) {
+  for (size_t i = 0; i < format->elements.size() - 1; ++i) {
+    auto& element = format->elements[i];
     auto result = VisitFormat(&element);
-    if (result.has_value()) {
+    if (result.has_value() or is_unlimited(&element)) {
       return result;
     }
   }
+  auto& element = format->elements.back();
+  auto result = VisitFormat(&element);
+  if (result.has_value()) {
+    return result;
+  }
+  format->unlimit_ = is_unlimited(&element);
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitOrFormat(OrFormat* format) {
+  bool has_limited = false;
   for (auto& element : format->elements) {
     auto result = VisitFormat(&element);
     if (result.has_value()) {
       return result;
     }
+    if (!is_unlimited(&element)) {
+      has_limited = true;
+    }
   }
-  // TODO
+
+  format->unlimit_ = !has_limited;
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagFormat(TagFormat* format) {
-  UpdateLastLeafEnd(format->begin);
-  auto result = VisitFormat(format->content.get());
+  return VisitFormat(format->content.get());
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTriggeredTagsFormat(
     TriggeredTagsFormat* format
 ) {
+  format->end_ = DetectEndString();
+  bool has_limited = false;
+  for (auto& tag : format->tags) {
+    auto result = VisitFormat(&tag);
+    if (result.has_value()) {
+      return result;
+    }
+  }
   return std::nullopt;
 }
 
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagsWithSeparatorFormat(
     TagsWithSeparatorFormat* format
 ) {
+  format->end_ = DetectEndString();
+  bool has_limited = false;
+  for (auto& tag : format->tags) {
+    auto result = VisitFormat(&tag);
+    if (result.has_value()) {
+      return result;
+    }
+  }
   return std::nullopt;
 }
 
