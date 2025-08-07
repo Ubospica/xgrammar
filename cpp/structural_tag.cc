@@ -22,7 +22,7 @@ namespace xgrammar {
 
 class StructuralTagImpl {
  public:
-  Result<StructuralTag> FromJSON(const std::string& json);
+  static Result<StructuralTag> FromJSON(const std::string& json);
 
  private:
   Result<StructuralTag> ParseStructuralTag(const picojson::value& value);
@@ -55,7 +55,7 @@ Result<StructuralTag> StructuralTagImpl::FromJSON(const std::string& json) {
   if (!err.empty()) {
     return ResultErr("Failed to parse JSON: " + err);
   }
-  return ParseStructuralTag(value);
+  return StructuralTagImpl().ParseStructuralTag(value);
 }
 
 Result<StructuralTag> StructuralTagImpl::ParseStructuralTag(const picojson::value& value) {
@@ -363,7 +363,7 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
 /************** StructuralTag Methods **************/
 
 std::variant<StructuralTag, std::runtime_error> StructuralTag::FromJSON(const std::string& json) {
-  return StructuralTagImpl().FromJSON(json).ToVariant();
+  return StructuralTagImpl::FromJSON(json).ToVariant();
 }
 
 /************** StructuralTag Analyzer **************/
@@ -373,7 +373,7 @@ std::variant<StructuralTag, std::runtime_error> StructuralTag::FromJSON(const st
  */
 class StructuralTagAnalyzer {
  public:
-  std::optional<std::runtime_error> AnalyzeStructuralTag(StructuralTag* structural_tag);
+  static std::optional<std::runtime_error> Analyze(StructuralTag* structural_tag);
 
  private:
   /*! \brief A variant that can hold the pointer of any Format types. */
@@ -410,10 +410,8 @@ class StructuralTagAnalyzer {
   std::vector<FormatPtrVariant> stack_;
 };
 
-std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
-    StructuralTag* structural_tag
-) {
-  return VisitFormat(&structural_tag->format);
+std::optional<std::runtime_error> StructuralTagAnalyzer::Analyze(StructuralTag* structural_tag) {
+  return StructuralTagAnalyzer().VisitFormat(&structural_tag->format);
 }
 
 std::optional<std::string> StructuralTagAnalyzer::DetectEndString() {
@@ -609,44 +607,49 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagsWithSeparatorF
 
 class StructuralTagGrammarConverter {
  public:
-  // using StructuralTagInternal = STIIR::StructuralTagInternal;
+  static Result<Grammar> Convert(const StructuralTag& structural_tag);
 
-  Result<Grammar> Convert(const std::string& structural_tag_json);
-  Result<Grammar> Convert(const StructuralTag& structural_tag);
-  // Result<Grammar> Convert(const StructuralTagInternal& structural_tag_internal);
+ private:
+  std::optional<std::runtime_error> Convert(const Format& format);
+  std::optional<std::runtime_error> Convert(const LiteralFormat& format);
+  std::optional<std::runtime_error> Convert(const JSONSchemaFormat& format);
+  std::optional<std::runtime_error> Convert(const WildcardTextFormat& format);
+  std::optional<std::runtime_error> Convert(const SequenceFormat& format);
+  std::optional<std::runtime_error> Convert(const OrFormat& format);
+  std::optional<std::runtime_error> Convert(const TagFormat& format);
+  std::optional<std::runtime_error> Convert(const TriggeredTagsFormat& format);
+  std::optional<std::runtime_error> Convert(const TagsWithSeparatorFormat& format);
+
+  GrammarBuilder grammar_builder_;
 };
 
-Result<Grammar> StructuralTagGrammarConverter::Convert(const std::string& structural_tag_json) {
-  auto structural_tag = StructuralTagImpl().FromJSON(structural_tag_json);
-  if (structural_tag.IsErr()) {
-    throw std::runtime_error(std::move(structural_tag).UnwrapErr());
-  }
-  return Convert(std::move(structural_tag).Unwrap());
-}
-
 Result<Grammar> StructuralTagGrammarConverter::Convert(const StructuralTag& structural_tag) {
-  return ResultErr("Not implemented");
-  // auto structural_tag_internal = STIIR::FromStructuralTag(structural_tag);
-  // if (structural_tag_internal.IsErr()) {
-  //   return ResultErr(std::move(structural_tag_internal).UnwrapErr());
-  // }
-  // return Convert(std::move(structural_tag_internal).Unwrap());
+  auto converter = StructuralTagGrammarConverter();
+  auto err = converter.Convert(structural_tag.format);
+  if (err.has_value()) {
+    return ResultErr(std::move(err).value());
+  }
+  auto grammar = converter.grammar_builder_.Get();
+  return ResultOk(std::move(grammar));
 }
-
-// Result<Grammar> StructuralTagGrammarConverter::Convert(
-//     const StructuralTagInternal& structural_tag_internal
-// ) {
-//   return ResultErr("Not implemented");
-// }
 
 /************** StructuralTag to Grammar Public API **************/
 
 Result<Grammar> StructuralTagToGrammar(const std::string& structural_tag_json) {
-  return StructuralTagGrammarConverter().Convert(structural_tag_json);
+  auto structural_tag_result = StructuralTagImpl().FromJSON(structural_tag_json);
+  if (structural_tag_result.IsErr()) {
+    return ResultErr(std::move(structural_tag_result).UnwrapErr());
+  }
+  auto structural_tag = std::move(structural_tag_result).Unwrap();
+  return StructuralTagToGrammar(&structural_tag);
 }
 
-Result<Grammar> StructuralTagToGrammar(const StructuralTag& structural_tag) {
-  return StructuralTagGrammarConverter().Convert(structural_tag);
+Result<Grammar> StructuralTagToGrammar(StructuralTag* structural_tag) {
+  auto err = StructuralTagAnalyzer().Analyze(structural_tag);
+  if (err.has_value()) {
+    return ResultErr(std::move(err).value());
+  }
+  return StructuralTagGrammarConverter().Convert(*structural_tag);
 }
 
 // Grammar StructuralTagToGrammar(

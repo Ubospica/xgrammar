@@ -15,7 +15,7 @@ namespace xgrammar {
 //     const std::vector<StructuralTagItem>& tags, const std::vector<std::string>& triggers
 // );
 
-Result<Grammar> StructuralTagToGrammar(const StructuralTag& structural_tag);
+Result<Grammar> StructuralTagToGrammar(StructuralTag* structural_tag);
 
 Result<Grammar> StructuralTagToGrammar(const std::string& structural_tag_json);
 
