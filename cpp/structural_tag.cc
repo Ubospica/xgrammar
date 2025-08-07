@@ -364,6 +364,11 @@ std::variant<StructuralTag, std::runtime_error> StructuralTag::FromJSON(const st
   return StructuralTagImpl().FromJSON(json).ToVariant();
 }
 
+/************** Utils Methods **************/
+const std::string get_format_type(const Format* format) {
+  return std::visit([](const auto& f) -> std::string { return f.type; }, *format);
+}
+
 /************** StructuralTag Analyzer **************/
 
 /*!
@@ -398,10 +403,11 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::AnalyzeStructuralTag(
 
 std::optional<std::string> StructuralTagAnalyzer::DetectEndString() {
   for (int i = static_cast<int>(stack_.size()) - 1; i >= 0; --i) {
-    auto& frame = stack_[i];
+    auto& format = stack_[i];
 
-    if (frame.format->type == "tag") {
-      return frame.format->end;
+    if (get_format_type(format) == "tag") {
+      TagFormat& tag = std::get<TagFormat>(*format);
+      return tag.end;
     }
   }
   return std::nullopt;
@@ -412,15 +418,15 @@ bool StructuralTagAnalyzer::is_unlimited(Format* format) {
       [&](auto&& arg) -> bool {
         using T = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<T, WildcardTextFormat>) {
-          return !(format->end_.has_value());
+          return !(arg.end_.has_value());
         } else if constexpr (std::is_same_v<T, TriggeredTagsFormat>) {
-          return !(format->end_.has_value());
+          return !(arg.end_.has_value());
         } else if constexpr (std::is_same_v<T, TagsWithSeparatorFormat>) {
-          return !(format->end_.has_value());
+          return !(arg.end_.has_value());
         } else if constexpr (std::is_same_v<T, SequenceFormat>) {
-          return format->unlimit_;
+          return arg.unlimit_;
         } else if constexpr (std::is_same_v<T, OrFormat>) {
-          return format->unlimit_;
+          return arg.unlimit_;
         } else {
           return false;
         }
@@ -520,9 +526,11 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTriggeredTagsForma
     TriggeredTagsFormat* format
 ) {
   format->end_ = DetectEndString();
-  bool has_limited = false;
-  for (auto& tag : format->tags) {
-    auto result = VisitFormat(&tag);
+  for (size_t i = 0; i < format->tags.size() - 1; ++i) {
+    auto& tag = format->tags[i];
+    Format tag_format = Format(std::move(tag));  // temporary move out the tag content
+    auto result = VisitFormat(&tag_format);
+    format->tags[i] = std::move(std::get<TagFormat>(tag_format));  // move back the tag content
     if (result.has_value()) {
       return result;
     }
@@ -534,9 +542,11 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagsWithSeparatorF
     TagsWithSeparatorFormat* format
 ) {
   format->end_ = DetectEndString();
-  bool has_limited = false;
-  for (auto& tag : format->tags) {
-    auto result = VisitFormat(&tag);
+  for (size_t i = 0; i < format->tags.size() - 1; ++i) {
+    auto& tag = format->tags[i];
+    Format tag_format = Format(std::move(tag));  // temporary move out the tag content
+    auto result = VisitFormat(&tag_format);
+    format->tags[i] = std::move(std::get<TagFormat>(tag_format));  // move back the tag content
     if (result.has_value()) {
       return result;
     }
@@ -548,11 +558,11 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitTagsWithSeparatorF
 
 class StructuralTagGrammarConverter {
  public:
-  using StructuralTagInternal = STIIR::StructuralTagInternal;
+  // using StructuralTagInternal = STIIR::StructuralTagInternal;
 
   Result<Grammar> Convert(const std::string& structural_tag_json);
   Result<Grammar> Convert(const StructuralTag& structural_tag);
-  Result<Grammar> Convert(const StructuralTagInternal& structural_tag_internal);
+  // Result<Grammar> Convert(const StructuralTagInternal& structural_tag_internal);
 };
 
 Result<Grammar> StructuralTagGrammarConverter::Convert(const std::string& structural_tag_json) {
@@ -564,18 +574,19 @@ Result<Grammar> StructuralTagGrammarConverter::Convert(const std::string& struct
 }
 
 Result<Grammar> StructuralTagGrammarConverter::Convert(const StructuralTag& structural_tag) {
-  auto structural_tag_internal = STIIR::FromStructuralTag(structural_tag);
-  if (structural_tag_internal.IsErr()) {
-    return ResultErr(std::move(structural_tag_internal).UnwrapErr());
-  }
-  return Convert(std::move(structural_tag_internal).Unwrap());
+  return ResultErr("Not implemented");
+  // auto structural_tag_internal = STIIR::FromStructuralTag(structural_tag);
+  // if (structural_tag_internal.IsErr()) {
+  //   return ResultErr(std::move(structural_tag_internal).UnwrapErr());
+  // }
+  // return Convert(std::move(structural_tag_internal).Unwrap());
 }
 
-Result<Grammar> StructuralTagGrammarConverter::Convert(
-    const StructuralTagInternal& structural_tag_internal
-) {
-  return ResultErr("Not implemented");
-}
+// Result<Grammar> StructuralTagGrammarConverter::Convert(
+//     const StructuralTagInternal& structural_tag_internal
+// ) {
+//   return ResultErr("Not implemented");
+// }
 
 /************** StructuralTag to Grammar Public API **************/
 
