@@ -58,6 +58,7 @@ struct WildcardTextFormat {
   // Detected in StructuralTagAnalyzer
   std::optional<std::string> detected_end_str_ = std::nullopt;
   friend class StructuralTagAnalyzer;
+  friend class StructuralTagGrammarConverter;
 };
 
 /******************** Combinatorial Formats ********************/
@@ -71,6 +72,7 @@ struct SequenceFormat {
   // Detected in StructuralTagAnalyzer
   bool is_unlimited_ = false;
   friend class StructuralTagAnalyzer;
+  friend class StructuralTagGrammarConverter;
 };
 
 struct OrFormat {
@@ -82,15 +84,16 @@ struct OrFormat {
   // Detected in StructuralTagAnalyzer
   bool is_unlimited_ = false;
   friend class StructuralTagAnalyzer;
+  friend class StructuralTagGrammarConverter;
 };
 
 struct TagFormat {
   static constexpr const char* type = "tag";
   std::string begin;
-  std::unique_ptr<Format> content;
+  std::shared_ptr<Format> content;
   std::string end;
 
-  TagFormat(std::string begin, std::unique_ptr<Format> content, std::string end)
+  TagFormat(std::string begin, std::shared_ptr<Format> content, std::string end)
       : begin(std::move(begin)), content(std::move(content)), end(std::move(end)) {}
 };
 
@@ -116,6 +119,7 @@ struct TriggeredTagsFormat {
   // Detected in StructuralTagAnalyzer
   std::optional<std::string> detected_end_str_ = std::nullopt;
   friend class StructuralTagAnalyzer;
+  friend class StructuralTagGrammarConverter;
 };
 
 struct TagsWithSeparatorFormat {
@@ -137,6 +141,7 @@ struct TagsWithSeparatorFormat {
   // Detected in StructuralTagAnalyzer
   std::optional<std::string> detected_end_str_ = std::nullopt;
   friend class StructuralTagAnalyzer;
+  friend class StructuralTagGrammarConverter;
 };
 
 /******************** Top Level ********************/

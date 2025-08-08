@@ -12,6 +12,7 @@
 #include <typeinfo>
 
 #include "grammar_functor.h"
+#include "grammar_impl.h"
 #include "structural_tag_impl.h"
 #include "support/logging.h"
 #include "support/recursion_guard.h"
@@ -252,7 +253,7 @@ Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::object& obj)
   }
   return ResultOk<TagFormat>(
       begin_it->second.get<std::string>(),
-      std::make_unique<Format>(std::move(content).Unwrap()),
+      std::make_shared<Format>(std::move(content).Unwrap()),
       detected_end_str_it->second.get<std::string>()
   );
 }
@@ -405,7 +406,6 @@ class StructuralTagAnalyzer {
 
   std::optional<std::string> DetectEndString();
   bool IsUnlimited(const Format& format);
-  bool IsPrefix(const std::string& str1, const std::string& str2);
 
   int visit_format_recursion_depth_ = 0;
   std::vector<FormatPtrVariant> stack_;
@@ -551,23 +551,8 @@ std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSub(TagFormat* for
   return std::nullopt;
 }
 
-bool StructuralTagAnalyzer::IsPrefix(const std::string& str1, const std::string& str2) {
-  return str1.size() <= str2.size() && std::string_view(str2).substr(0, str1.size()) == str1;
-}
-
 std::optional<std::runtime_error> StructuralTagAnalyzer::VisitSub(TriggeredTagsFormat* format) {
   for (auto& tag : format->tags) {
-    if (!std::any_of(
-            format->triggers.begin(),
-            format->triggers.end(),
-            [&](const std::string& trigger) { return IsPrefix(trigger, tag.begin); }
-        )) {
-      return std::runtime_error(
-          "The begin of each tag in a triggered tags format must start with one of the triggers, "
-          "but the begin of tag " +
-          tag.begin + " does not start with any trigger"
-      );
-    }
     auto err = Visit(&tag);
     if (err.has_value()) {
       return err;
@@ -606,8 +591,17 @@ class StructuralTagGrammarConverter {
   Result<int> VisitSub(const TagsWithSeparatorFormat& format);
   Grammar AddRootRuleAndGetGrammar(int ref_rule_id);
 
+  bool IsPrefix(const std::string& prefix, const std::string& full_str);
+
   GrammarBuilder grammar_builder_;
 };
+
+bool StructuralTagGrammarConverter::IsPrefix(
+    const std::string& prefix, const std::string& full_str
+) {
+  return prefix.size() <= full_str.size() &&
+         std::string_view(full_str).substr(0, prefix.size()) == prefix;
+}
 
 Result<Grammar> StructuralTagGrammarConverter::Convert(const StructuralTag& structural_tag) {
   auto converter = StructuralTagGrammarConverter();
@@ -640,13 +634,25 @@ Result<int> StructuralTagGrammarConverter::VisitSub(const JSONSchemaFormat& form
 }
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const WildcardTextFormat& format) {
-  // TODO
-  return ResultOk(grammar_builder_.AddRuleWithHint("wildcard_text", expr));
+  if (format.detected_end_str_.has_value()) {
+    XGRAMMAR_DCHECK(!format.detected_end_str_.value().empty())
+        << "The detected end string cannot be empty";
+    auto tag_dispatch_expr = grammar_builder_.AddTagDispatch(
+        Grammar::Impl::TagDispatch{{}, false, {format.detected_end_str_.value()}, false}
+    );
+    return ResultOk(grammar_builder_.AddRuleWithHint("wildcard_text", tag_dispatch_expr));
+  } else {
+    auto wildcard_expr = grammar_builder_.AddCharacterClassStar({{0, 0x10FFFF}}, false);
+    auto sequence_expr = grammar_builder_.AddSequence({wildcard_expr});
+    auto choices_expr = grammar_builder_.AddChoices({sequence_expr});
+    return ResultOk(grammar_builder_.AddRuleWithHint("wildcard_text", choices_expr));
+  }
 }
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const SequenceFormat& format) {
   std::vector<int> rule_ref_ids;
-  for (auto& element : format.elements) {
+  rule_ref_ids.reserve(format.elements.size());
+  for (const auto& element : format.elements) {
     auto result = Visit(element);
     if (result.IsErr()) {
       return result;
@@ -660,7 +666,8 @@ Result<int> StructuralTagGrammarConverter::VisitSub(const SequenceFormat& format
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const OrFormat& format) {
   std::vector<int> sequence_ids;
-  for (auto& element : format.elements) {
+  sequence_ids.reserve(format.elements.size());
+  for (const auto& element : format.elements) {
     auto result = Visit(element);
     if (result.IsErr()) {
       return result;
@@ -688,6 +695,36 @@ Result<int> StructuralTagGrammarConverter::VisitSub(const TagFormat& format) {
 }
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const TriggeredTagsFormat& format) {
+  std::vector<int> matched_trigger_ids;
+  std::vector<int> tag_rule_ids;
+  matched_trigger_ids.reserve(format.tags.size());
+  tag_rule_ids.reserve(format.tags.size());
+
+  for (const auto& tag : format.tags) {
+    // Find matched triggers
+    int matched_trigger_id = -1;
+    for (int it_trigger = 0; it_trigger < static_cast<int>(format.triggers.size()); ++it_trigger) {
+      const auto& trigger = format.triggers[it_trigger];
+      if (IsPrefix(trigger, tag.begin)) {
+        if (matched_trigger_id != -1) {
+          return std::runtime_error("One tag matches multiple triggers in a triggered tags format");
+        }
+        matched_trigger_id = it_trigger;
+        break;
+      }
+    }
+    if (matched_trigger_id == -1) {
+      return std::runtime_error("One tag does not match any trigger in a triggered tags format");
+    }
+    matched_trigger_ids.push_back(matched_trigger_id);
+
+    auto result = Visit(tag);
+    if (result.IsErr()) {
+      return result;
+    }
+    tag_rule_ids.push_back(std::move(result).Unwrap());
+  }
+
   return ResultOk(0);
 }
 
