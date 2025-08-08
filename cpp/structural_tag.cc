@@ -195,6 +195,9 @@ Result<SequenceFormat> StructuralTagImpl::ParseSequenceFormat(const picojson::ob
     }
     elements.push_back(std::move(format).Unwrap());
   }
+  if (elements.size() == 0) {
+    return ResultErr("Sequence format must have at least one element");
+  }
   return ResultOk<SequenceFormat>(std::move(elements));
 }
 
@@ -214,6 +217,9 @@ Result<OrFormat> StructuralTagImpl::ParseOrFormat(const picojson::object& obj) {
     }
     elements.push_back(std::move(format).Unwrap());
   }
+  if (elements.size() == 0) {
+    return ResultErr("Or format must have at least one element");
+  }
   return ResultOk<OrFormat>(std::move(elements));
 }
 
@@ -232,9 +238,8 @@ Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::value& value
 Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::object& obj) {
   // begin is required.
   auto begin_it = obj.find("begin");
-  if (begin_it == obj.end() || !begin_it->second.is<std::string>() ||
-      begin_it->second.get<std::string>().empty()) {
-    return ResultErr("Tag format must have a begin field with a non-empty string");
+  if (begin_it == obj.end() || !begin_it->second.is<std::string>()) {
+    return ResultErr("Tag format's begin field must be a string");
   }
   // content is required.
   auto content_it = obj.find("content");
@@ -246,15 +251,14 @@ Result<TagFormat> StructuralTagImpl::ParseTagFormat(const picojson::object& obj)
     return ResultErr(std::move(content).UnwrapErr());
   }
   // end is required.
-  auto detected_end_str_it = obj.find("end");
-  if (detected_end_str_it == obj.end() || !detected_end_str_it->second.is<std::string>() ||
-      detected_end_str_it->second.get<std::string>().empty()) {
-    return ResultErr("Tag format must have an end field with a non-empty string");
+  auto end_it = obj.find("end");
+  if (end_it == obj.end() || !end_it->second.is<std::string>()) {
+    return ResultErr("Tag format's end field must be a string");
   }
   return ResultOk<TagFormat>(
       begin_it->second.get<std::string>(),
       std::make_shared<Format>(std::move(content).Unwrap()),
-      detected_end_str_it->second.get<std::string>()
+      end_it->second.get<std::string>()
   );
 }
 
@@ -270,9 +274,12 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
   triggers.reserve(triggers_array.size());
   for (const auto& trigger : triggers_array) {
     if (!trigger.is<std::string>() || trigger.get<std::string>().empty()) {
-      return ResultErr("Triggers must be non-empty strings");
+      return ResultErr("Triggered tags format's triggers must be non-empty strings");
     }
     triggers.push_back(trigger.get<std::string>());
+  }
+  if (triggers.size() == 0) {
+    return ResultErr("Triggered tags format's triggers must be non-empty");
   }
   // tags is required.
   auto tags_it = obj.find("tags");
@@ -288,6 +295,9 @@ Result<TriggeredTagsFormat> StructuralTagImpl::ParseTriggeredTagsFormat(const pi
       return ResultErr(std::move(tag_format).UnwrapErr());
     }
     tags.push_back(std::move(tag_format).Unwrap());
+  }
+  if (tags.size() == 0) {
+    return ResultErr("Triggered tags format's tags must be non-empty");
   }
   // at_least_one is optional.
   bool at_least_one = false;
@@ -330,13 +340,14 @@ Result<TagsWithSeparatorFormat> StructuralTagImpl::ParseTagsWithSeparatorFormat(
     }
     tags.push_back(std::move(tag_format).Unwrap());
   }
+  if (tags.size() == 0) {
+    return ResultErr("Tags with separator format's tags must be non-empty");
+  }
   // separator is required.
   auto separator_it = obj.find("separator");
   if (separator_it == obj.end() || !separator_it->second.is<std::string>() ||
       separator_it->second.get<std::string>().empty()) {
-    return ResultErr(
-        "Tags with separator format must have a separator field with a non-empty string"
-    );
+    return ResultErr("Tags with separator format's separator field must be a non-empty string");
   }
   // at_least_one is optional.
   bool at_least_one = false;
@@ -630,7 +641,8 @@ Result<int> StructuralTagGrammarConverter::VisitSub(const LiteralFormat& format)
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const JSONSchemaFormat& format) {
   auto sub_grammar = Grammar::FromJSONSchema(format.json_schema);
-  return ResultOk(SubGrammarAdder().Apply(&grammar_builder_, sub_grammar));
+  auto added_root_rule_id = SubGrammarAdder().Apply(&grammar_builder_, sub_grammar);
+  return ResultOk(added_root_rule_id);
 }
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const WildcardTextFormat& format) {
@@ -695,37 +707,125 @@ Result<int> StructuralTagGrammarConverter::VisitSub(const TagFormat& format) {
 }
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const TriggeredTagsFormat& format) {
-  std::vector<int> matched_trigger_ids;
-  std::vector<int> tag_rule_ids;
-  matched_trigger_ids.reserve(format.tags.size());
-  tag_rule_ids.reserve(format.tags.size());
+  // Step 1. Visit all tags and add to grammar
+  std::vector<std::vector<int>> trigger_to_tag_ids(format.triggers.size());
+  std::vector<int> tag_content_rule_ids;
+  tag_content_rule_ids.reserve(format.tags.size());
 
-  for (const auto& tag : format.tags) {
+  for (int it_tag = 0; it_tag < static_cast<int>(format.tags.size()); ++it_tag) {
+    const auto& tag = format.tags[it_tag];
     // Find matched triggers
     int matched_trigger_id = -1;
     for (int it_trigger = 0; it_trigger < static_cast<int>(format.triggers.size()); ++it_trigger) {
       const auto& trigger = format.triggers[it_trigger];
       if (IsPrefix(trigger, tag.begin)) {
         if (matched_trigger_id != -1) {
-          return std::runtime_error("One tag matches multiple triggers in a triggered tags format");
+          return ResultErr("One tag matches multiple triggers in a triggered tags format");
         }
         matched_trigger_id = it_trigger;
         break;
       }
     }
     if (matched_trigger_id == -1) {
-      return std::runtime_error("One tag does not match any trigger in a triggered tags format");
+      return ResultErr("One tag does not match any trigger in a triggered tags format");
     }
-    matched_trigger_ids.push_back(matched_trigger_id);
+    trigger_to_tag_ids[matched_trigger_id].push_back(it_tag);
 
-    auto result = Visit(tag);
+    // Add the tag content to grammar
+    auto result = Visit(*tag.content);
     if (result.IsErr()) {
       return result;
     }
-    tag_rule_ids.push_back(std::move(result).Unwrap());
+    tag_content_rule_ids.push_back(std::move(result).Unwrap());
   }
 
-  return ResultOk(0);
+  // at_least_one is implemented as generating any one of the tags first, then do optional
+  // triggered tags generation. That means we don't generate any text before the first tag.
+
+  // Step 2. Special Case: at_least_one && stop_after_first.
+  // Then we will generate exactly one tag without text. We just do a selection between all tags.
+  if (format.at_least_one && format.stop_after_first) {
+    std::vector<int> choice_elements;
+    for (int it_tag = 0; it_tag < static_cast<int>(format.tags.size()); ++it_tag) {
+      const auto& tag = format.tags[it_tag];
+      auto begin_expr_id = grammar_builder_.AddByteString(tag.begin);
+      auto end_expr_id = grammar_builder_.AddByteString(tag.end);
+      auto rule_ref_expr_id = grammar_builder_.AddRuleRef(tag_content_rule_ids[it_tag]);
+      choice_elements.push_back(
+          grammar_builder_.AddSequence({begin_expr_id, rule_ref_expr_id, end_expr_id})
+      );
+    }
+    auto choice_expr_id = grammar_builder_.AddChoices(choice_elements);
+    return ResultOk(grammar_builder_.AddRuleWithHint("triggered_tags", choice_expr_id));
+  }
+
+  // Step 3. Normal Case. We generate mixture of text and triggered tags.
+  // - When at_least_one is true, one tag is generated first, then we do triggered tags generation.
+  // - When stop_after_first is true, we set loop_after_dispatch of the tag dispatch to false.
+  // - When detected_end_str_ is not empty, we use that as the stop_str of the tag dispatch.
+  //   Otherwise, we set stop_eos to true to generate until EOS.
+
+  // Step 3.1 Get tag_rule_pairs.
+  std::vector<std::pair<std::string, int32_t>> tag_rule_pairs;
+  for (int it_trigger = 0; it_trigger < static_cast<int>(format.triggers.size()); ++it_trigger) {
+    const auto& trigger = format.triggers[it_trigger];
+    std::vector<int> choice_elements;
+    for (const auto& tag_id : trigger_to_tag_ids[it_trigger]) {
+      const auto& tag = format.tags[tag_id];
+      int begin_expr_id = grammar_builder_.AddByteString(tag.begin.substr(trigger.size()));
+      int end_expr_id = grammar_builder_.AddByteString(tag.end);
+      int rule_ref_expr_id = grammar_builder_.AddRuleRef(tag_content_rule_ids[tag_id]);
+      choice_elements.push_back(
+          grammar_builder_.AddSequence({begin_expr_id, rule_ref_expr_id, end_expr_id})
+      );
+    }
+    auto choice_expr_id = grammar_builder_.AddChoices(choice_elements);
+    auto sub_rule_id = grammar_builder_.AddRuleWithHint("triggered_tags_group", choice_expr_id);
+    tag_rule_pairs.push_back(std::make_pair(trigger, sub_rule_id));
+  }
+
+  // Step 3.2 Add TagDispatch.
+  int32_t rule_expr_id;
+  bool loop_after_dispatch = !format.stop_after_first;
+  if (format.detected_end_str_.has_value()) {
+    rule_expr_id = grammar_builder_.AddTagDispatch(Grammar::Impl::TagDispatch{
+        tag_rule_pairs, false, {format.detected_end_str_.value()}, loop_after_dispatch
+    });
+  } else {
+    rule_expr_id = grammar_builder_.AddTagDispatch(
+        Grammar::Impl::TagDispatch{tag_rule_pairs, true, {}, loop_after_dispatch}
+    );
+  }
+
+  // Step 3.3 Consider at_least_one
+  if (format.at_least_one) {
+    // Construct the first rule
+    std::vector<int> first_choice_elements;
+    for (int it_tag = 0; it_tag < static_cast<int>(format.tags.size()); ++it_tag) {
+      const auto& tag = format.tags[it_tag];
+      auto begin_expr_id = grammar_builder_.AddByteString(tag.begin);
+      auto end_expr_id = grammar_builder_.AddByteString(tag.end);
+      auto rule_ref_expr_id = grammar_builder_.AddRuleRef(tag_content_rule_ids[it_tag]);
+      first_choice_elements.push_back(
+          grammar_builder_.AddSequence({begin_expr_id, rule_ref_expr_id, end_expr_id})
+      );
+    }
+    auto first_choice_expr_id = grammar_builder_.AddChoices(first_choice_elements);
+    auto first_rule_id =
+        grammar_builder_.AddRuleWithHint("triggered_tags_first", first_choice_expr_id);
+
+    // Construct the full rule
+    auto tag_dispatch_rule_id =
+        grammar_builder_.AddRuleWithHint("triggered_tags_sub", rule_expr_id);
+    auto ref_first_rule_expr_id = grammar_builder_.AddRuleRef(first_rule_id);
+    auto ref_tag_dispatch_rule_expr_id = grammar_builder_.AddRuleRef(rule_expr_id);
+    auto sequence_expr_id =
+        grammar_builder_.AddSequence({ref_first_rule_expr_id, ref_tag_dispatch_rule_expr_id});
+    rule_expr_id = grammar_builder_.AddChoices({sequence_expr_id});
+  }
+
+  auto rule_id = grammar_builder_.AddRuleWithHint("triggered_tags", rule_expr_id);
+  return ResultOk(rule_id);
 }
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const TagsWithSeparatorFormat& format) {

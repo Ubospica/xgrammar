@@ -985,37 +985,37 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
 //         if (tag.begin.size() > triggers[i].size()) {
 //           seq_elements.push_back(builder_->AddByteString(tag.begin.substr(triggers[i].size())));
 //         }
-q
-    //         // Create and visit schema grammar for this tag
-    //         auto schema_rule_id = SubGrammarAdderImpl().ApplyWithBuilder(builder_,
-    //         schema_grammar); seq_elements.push_back(builder_->AddRuleRef(schema_rule_id));
 
-    //         // Add end string
-    //         if (!tag.end.empty()) {
-    //           seq_elements.push_back(builder_->AddByteString(tag.end));
-    //         }
+//         // Create and visit schema grammar for this tag
+//         auto schema_rule_id = SubGrammarAdderImpl().ApplyWithBuilder(builder_,
+//         schema_grammar); seq_elements.push_back(builder_->AddRuleRef(schema_rule_id));
 
-    //         choices.push_back(builder_->AddSequence(seq_elements));
-    //       }
+//         // Add end string
+//         if (!tag.end.empty()) {
+//           seq_elements.push_back(builder_->AddByteString(tag.end));
+//         }
 
-    //       builder_->UpdateRuleBody(rule_id, builder_->AddChoices(choices));
-    //       tag_dispatch.tag_rule_pairs.emplace_back(triggers[i], rule_id);
-    //     }
+//         choices.push_back(builder_->AddSequence(seq_elements));
+//       }
 
-    //     // Create root TagDispatch rule
-    //     auto tag_dispatch_id = builder_->AddTagDispatch(tag_dispatch);
-    //     builder_->UpdateRuleBody(root_rule_id, tag_dispatch_id);
-    //     return builder_->Get(root_rule_id);
-    //   }
+//       builder_->UpdateRuleBody(rule_id, builder_->AddChoices(choices));
+//       tag_dispatch.tag_rule_pairs.emplace_back(triggers[i], rule_id);
+//     }
 
-    //   // Avoid hiding the original Apply(const Grammar&)
-    //   Grammar Apply(const Grammar& grammar) final {
-    //     XGRAMMAR_LOG(FATAL) << "Should not be called";
-    //     XGRAMMAR_UNREACHABLE();
-    //   }
-    // };
+//     // Create root TagDispatch rule
+//     auto tag_dispatch_id = builder_->AddTagDispatch(tag_dispatch);
+//     builder_->UpdateRuleBody(root_rule_id, tag_dispatch_id);
+//     return builder_->Get(root_rule_id);
+//   }
 
-    class GrammarFSMBuilderImpl {
+//   // Avoid hiding the original Apply(const Grammar&)
+//   Grammar Apply(const Grammar& grammar) final {
+//     XGRAMMAR_LOG(FATAL) << "Should not be called";
+//     XGRAMMAR_UNREACHABLE();
+//   }
+// };
+
+class GrammarFSMBuilderImpl {
  public:
   void Apply(Grammar* grammar) {
     FSM complete_fsm;
