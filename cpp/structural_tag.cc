@@ -818,7 +818,7 @@ Result<int> StructuralTagGrammarConverter::VisitSub(const TriggeredTagsFormat& f
     auto tag_dispatch_rule_id =
         grammar_builder_.AddRuleWithHint("triggered_tags_sub", rule_expr_id);
     auto ref_first_rule_expr_id = grammar_builder_.AddRuleRef(first_rule_id);
-    auto ref_tag_dispatch_rule_expr_id = grammar_builder_.AddRuleRef(rule_expr_id);
+    auto ref_tag_dispatch_rule_expr_id = grammar_builder_.AddRuleRef(tag_dispatch_rule_id);
     auto sequence_expr_id =
         grammar_builder_.AddSequence({ref_first_rule_expr_id, ref_tag_dispatch_rule_expr_id});
     rule_expr_id = grammar_builder_.AddChoices({sequence_expr_id});
@@ -829,7 +829,14 @@ Result<int> StructuralTagGrammarConverter::VisitSub(const TriggeredTagsFormat& f
 }
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const TagsWithSeparatorFormat& format) {
-  return ResultOk(0);
+  // Step 1. Construct a rule representing any tag
+  std::vector<int> choice_elements;
+  for (int it_tag = 0; it_tag < static_cast<int>(format.tags.size()); ++it_tag) {
+    const auto& tag = format.tags[it_tag];
+    auto defrs
+  }
+  auto choice_expr_id = grammar_builder_.AddChoices(choice_elements);
+  auto tags_rule_id = grammar_builder_.AddRuleWithHint("tags_with_separator_tags", choice_expr_id);
 }
 
 /************** StructuralTag to Grammar Public API **************/
