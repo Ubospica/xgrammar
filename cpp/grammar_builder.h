@@ -246,6 +246,10 @@ class GrammarBuilder {
    */
   int32_t AddEmptyRule(const std::string& name) { return AddRule({name, -1}); }
 
+  int32_t AddEmptyRuleWithHint(const std::string& name_hint) {
+    return AddRule({GetNewRuleName(name_hint), -1});
+  }
+
   /*!
    * \brief Update the rule body of the given rule, specified by rule id. Can be used to set the
    * rule body of a rule inserted by GrammarBuilder::AddEmptyRule.

@@ -829,14 +829,91 @@ Result<int> StructuralTagGrammarConverter::VisitSub(const TriggeredTagsFormat& f
 }
 
 Result<int> StructuralTagGrammarConverter::VisitSub(const TagsWithSeparatorFormat& format) {
+  // The grammar:
+  // 1. tags_rule: all tags
+  //   tags_rule ::= tag1 | tag2 | ... | tagN
+  // 2. end str handling:
+  //   end_str = format.detected_end_str_ (if end str is not empty)
+  //   end_str = "" (if end str is empty)
+  // 3. Special handling: if stop_after_first is true:
+  //   root ::= tags_rule | end_str (if at_least_one is false)
+  //   root ::= tags_rule (if at_least_one is true)
+  // 4. Normal handling: if stop_after_first is false:
+  //   root ::= tags_rule helper | end_str (if at_least_one is false)
+  //   root ::= tags_rule helper (if at_least_one is true)
+  //   helper ::= sep tags_rule helper | end_str
+
   // Step 1. Construct a rule representing any tag
-  std::vector<int> choice_elements;
+  std::vector<int> choice_ids;
   for (int it_tag = 0; it_tag < static_cast<int>(format.tags.size()); ++it_tag) {
     const auto& tag = format.tags[it_tag];
-    auto defrs
+    auto tag_rule_id = Visit(*tag.content);
+    if (tag_rule_id.IsErr()) {
+      return tag_rule_id;
+    }
+    auto tag_rule_ref_id = grammar_builder_.AddRuleRef(std::move(tag_rule_id).Unwrap());
+    auto sequence_expr_id = grammar_builder_.AddSequence({tag_rule_ref_id});
+    choice_ids.push_back(sequence_expr_id);
   }
-  auto choice_expr_id = grammar_builder_.AddChoices(choice_elements);
-  auto tags_rule_id = grammar_builder_.AddRuleWithHint("tags_with_separator_tags", choice_expr_id);
+  auto choice_expr_id = grammar_builder_.AddChoices(choice_ids);
+  auto all_tags_rule_id =
+      grammar_builder_.AddRuleWithHint("tags_with_separator_tags", choice_expr_id);
+
+  auto all_tags_rule_ref_id = grammar_builder_.AddRuleRef(all_tags_rule_id);
+
+  // Step 2 Construct end str sequence
+  int32_t end_str_sequence_id = -1;
+  if (format.detected_end_str_.has_value()) {
+    end_str_sequence_id = grammar_builder_.AddSequence(
+        {grammar_builder_.AddByteString(format.detected_end_str_.value())}
+    );
+  } else {
+    end_str_sequence_id = grammar_builder_.AddEmptyStr();
+  }
+
+  // Step 3. Special case: stop_after_first is true
+  if (format.stop_after_first) {
+    int32_t rule_body_expr_id;
+    if (format.at_least_one) {
+      // root ::= tags_rule
+      rule_body_expr_id =
+          grammar_builder_.AddChoices({grammar_builder_.AddSequence({all_tags_rule_ref_id})});
+    } else {
+      // root ::= tags_rule | ""
+      rule_body_expr_id = grammar_builder_.AddChoices(
+          {grammar_builder_.AddSequence({all_tags_rule_ref_id}), end_str_sequence_id}
+      );
+    }
+    auto rule_id = grammar_builder_.AddRuleWithHint("tags_with_separator", rule_body_expr_id);
+    return ResultOk(rule_id);
+  }
+
+  // Step 4. Normal handling: if stop_after_first is false:
+
+  // Step 4.1 Construct helper rule
+  auto rule_helper_body_id = grammar_builder_.AddEmptyRuleWithHint("tags_with_separator_helper");
+  auto rule_helper_body_expr_id = grammar_builder_.AddChoices(
+      {grammar_builder_.AddSequence(
+           {grammar_builder_.AddByteString(format.separator),
+            all_tags_rule_ref_id,
+            grammar_builder_.AddRuleRef(rule_helper_body_id)}
+       ),
+       end_str_sequence_id}
+  );
+  grammar_builder_.UpdateRuleBody(rule_helper_body_id, rule_helper_body_expr_id);
+
+  // Step 4.2 Construct root rule
+  std::vector<int> choices = {
+      grammar_builder_.AddSequence(
+          {all_tags_rule_ref_id, grammar_builder_.AddRuleRef(rule_helper_body_id)}
+      ),
+  };
+  if (!format.at_least_one) {
+    choices.push_back(end_str_sequence_id);
+  }
+  auto rule_body_expr_id = grammar_builder_.AddChoices(choices);
+  auto rule_id = grammar_builder_.AddRuleWithHint("tags_with_separator", rule_body_expr_id);
+  return ResultOk(rule_id);
 }
 
 /************** StructuralTag to Grammar Public API **************/
@@ -857,60 +934,5 @@ Result<Grammar> StructuralTagToGrammar(StructuralTag* structural_tag) {
   }
   return StructuralTagGrammarConverter().Convert(*structural_tag);
 }
-
-// Grammar StructuralTagToGrammar(
-//     const std::vector<StructuralTagItem>& tags, const std::vector<std::string>& triggers
-// ) {
-//   // Step 1: handle triggers. Triggers should not be mutually inclusive
-//   std::vector<std::string> sorted_triggers(triggers.begin(), triggers.end());
-//   std::sort(sorted_triggers.begin(), sorted_triggers.end());
-//   for (int i = 0; i < static_cast<int>(sorted_triggers.size()) - 1; ++i) {
-//     XGRAMMAR_CHECK(
-//         sorted_triggers[i + 1].size() < sorted_triggers[i].size() ||
-//         std::string_view(sorted_triggers[i + 1]).substr(0, sorted_triggers[i].size()) !=
-//             sorted_triggers[i]
-//     ) << "Triggers should not be mutually inclusive, but "
-//       << sorted_triggers[i] << " is a prefix of " << sorted_triggers[i + 1];
-//   }
-
-//   // Step 2: For each tag, find the trigger that is a prefix of the tag.begin
-//   // Convert the schema to grammar at the same time
-//   std::vector<Grammar> schema_grammars;
-//   schema_grammars.reserve(tags.size());
-//   for (const auto& tag : tags) {
-//     auto schema_grammar = Grammar::FromJSONSchema(tag.schema, true);
-//     schema_grammars.push_back(schema_grammar);
-//   }
-
-//   std::vector<std::vector<std::pair<StructuralTagItem, Grammar>>> tag_groups(triggers.size());
-//   for (int it_tag = 0; it_tag < static_cast<int>(tags.size()); ++it_tag) {
-//     const auto& tag = tags[it_tag];
-//     bool found = false;
-//     for (int it_trigger = 0; it_trigger < static_cast<int>(sorted_triggers.size());
-//     ++it_trigger)
-//     {
-//       const auto& trigger = sorted_triggers[it_trigger];
-//       if (trigger.size() <= tag.begin.size() &&
-//           std::string_view(tag.begin).substr(0, trigger.size()) == trigger) {
-//         tag_groups[it_trigger].push_back(std::make_pair(tag, schema_grammars[it_tag]));
-//         found = true;
-//         break;
-//       }
-//     }
-//     XGRAMMAR_CHECK(found) << "Tag " << tag.begin << " does not match any trigger";
-//   }
-
-//   // Step 3: Combine the tags to form a grammar
-//   // root ::= TagDispatch((trigger1, rule1), (trigger2, rule2), ...)
-//   // Suppose tag1 and tag2 matches trigger1, then
-//   // rule1 ::= (tag1.begin[trigger1.size():] + ToEBNF(tag1.schema) + tag1.end) |
-//   //            (tag2.begin[trigger1.size():] + ToEBNF(tag2.schema) + tag2.end) | ...
-//   //
-//   // Suppose tag3 matches trigger2, then
-//   // rule2 ::= (tag3.begin[trigger2.size():] + ToEBNF(tag3.schema) + tag3.end)
-//   //
-//   // ...
-//   return StructuralTagGrammarCreator::Apply(sorted_triggers, tag_groups);
-// }
 
 }  // namespace xgrammar
