@@ -531,25 +531,64 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
   }
 
   const auto& token = tokenizer_info_.GetDecodedVocab()[token_id];
+
+  // Phase 1: Try token path (AdvanceToken for kTokenSet edges)
+  std::vector<ParserState> token_path_states;
+  bool token_path_completed = false;
+  bool token_path_success = AdvanceToken(token_id, debug_print);
+  if (token_path_success) {
+    token_path_states = GetLatestScanableStates();
+    token_path_completed = is_completed_.back();
+    PopLastStates(1);
+  }
+
+  // Phase 2: Try byte-by-byte path
   int pos = 0;
+  bool byte_path_success = true;
   for (auto char_value : token) {
     if (!Advance(char_value, debug_print)) {
-      if (debug_print) {
-        XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token)
-                           << "> rejected at position " << pos << ", char "
-                           << EscapeString(char_value);
-      }
-      PopLastStates(pos);
-      return false;
+      byte_path_success = false;
+      break;
     }
     ++pos;
   }
-  token_length_history.push_back(token.size());
+
+  // Phase 3: Combine results
+  if (!byte_path_success && !token_path_success) {
+    if (debug_print) {
+      XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token)
+                         << "> rejected at position " << pos;
+    }
+    PopLastStates(pos);
+    return false;
+  }
+
+  if (!byte_path_success) {
+    PopLastStates(pos);
+    AdvanceToken(token_id, debug_print);
+    token_length_history.push_back(1);
+  } else {
+    if (!token_path_states.empty()) {
+      std::vector<ParserState> merged;
+      for (const auto& s : GetLatestScanableStates()) {
+        merged.push_back(s);
+      }
+      for (const auto& s : token_path_states) {
+        if (std::find(merged.begin(), merged.end(), s) == merged.end()) {
+          merged.push_back(s);
+        }
+      }
+      bool prev_completed = is_completed_.back();
+      PopLastStates(1);
+      scanable_state_history_.PushBack(merged);
+      rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
+      is_completed_.push_back(prev_completed || token_path_completed);
+    }
+    token_length_history.push_back(token.size());
+  }
 
   if (debug_print) {
-    XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<"
-                       << EscapeString(tokenizer_info_.GetDecodedVocab()[token_id])
-                       << "> accepted.";
+    XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token) << "> accepted.";
   }
   return true;
 }
@@ -762,6 +801,24 @@ bool GrammarMatcher::Impl::FillNextTokenBitmask(
       //     adaptive_token_mask.rejected_indices + rejected_indices_delta)
       IntsetUnion(&tmp_rejected_indices_delta_, adaptive_token_mask.rejected_indices);
       IntsetIntersection(&tmp_rejected_indices_, tmp_rejected_indices_delta_);
+    }
+  }
+
+  // Handle kTokenSet edges: add token IDs accepted by kTokenSet edges to the accepted bitset
+  for (const auto& state : latest_states) {
+    if (state.rule_id == -1) continue;
+    if (!grammar_->per_rule_fsms[state.rule_id].has_value()) continue;
+    const auto& fsm = grammar_->per_rule_fsms[state.rule_id].value();
+    for (const auto& edge : fsm.GetFsm().GetEdges(state.element_id)) {
+      if (edge.IsTokenSet()) {
+        auto info = fsm.GetFsm().GetTokenSetEdgeInfo(edge.GetAuxIndex());
+        for (int32_t i = 0; i < info.Count(); ++i) {
+          int32_t tid = info.TokenIds()[i];
+          if (tid >= 0 && tid < tokenizer_info_.GetVocabSize()) {
+            tmp_accepted_bitset_.Set(tid, true);
+          }
+        }
+      }
     }
   }
 

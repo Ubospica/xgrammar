@@ -378,6 +378,19 @@ class EarleyParser {
   void AdvanceFsm(const ParserState& state, const uint8_t ch);
 
   /*!
+   * \brief Scan a token set edge: check if token_id matches any kTokenSet edge from state.
+   */
+  void ScanAtomicToken(const ParserState& state, int32_t token_id);
+
+  /*!
+   * \brief Advance the parser by accepting a whole token via kTokenSet edges.
+   * \param token_id The token ID to accept.
+   * \param debug_print Whether to print debug info.
+   * \return True if any state advanced, false otherwise.
+   */
+  bool AdvanceToken(int32_t token_id, bool debug_print = false);
+
+  /*!
    * \brief Enqueue the state into the queue.
    * \param state The state to be enqueued.
    * \details The state is enqueued if it is not visited in the queue.

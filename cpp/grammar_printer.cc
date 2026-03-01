@@ -44,6 +44,8 @@ std::string GrammarPrinter::PrintGrammarExpr(const GrammarExpr& grammar_expr) {
       return PrintTagDispatch(grammar_expr);
     case GrammarExprType::kRepeat:
       return PrintRepeat(grammar_expr);
+    case GrammarExprType::kTokenSet:
+      return PrintTokenSet(grammar_expr);
     default:
       XGRAMMAR_LOG(FATAL) << "Unexpected GrammarExpr type: " << static_cast<int>(grammar_expr.type);
       XGRAMMAR_UNREACHABLE();
@@ -164,6 +166,16 @@ std::string GrammarPrinter::PrintRepeat(const GrammarExpr& grammar_expr) {
   result += ", ";
   result += std::to_string(upper_bound);
   result += "}";
+  return result;
+}
+
+std::string GrammarPrinter::PrintTokenSet(const GrammarExpr& grammar_expr) {
+  std::string result = "Token(";
+  for (int i = 0; i < grammar_expr.data_len; ++i) {
+    if (i > 0) result += ", ";
+    result += std::to_string(grammar_expr[i]);
+  }
+  result += ")";
   return result;
 }
 

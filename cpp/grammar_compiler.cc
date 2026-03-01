@@ -740,7 +740,18 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   std::bitset<256> first_character_mask;
   GetFirstCharacterMask(first_character_mask);
 
-  bool rejected_filled = GetTokenMaskWithFirstCharacterCheck(first_character_mask, is_root_rule);
+  bool rejected_filled;
+  if (first_character_mask.none()) {
+    // Token-set-only state: no char edges, so all tokens are rejected from char-based perspective.
+    // kTokenSet contributions are handled in FillNextTokenBitmask at runtime.
+    const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
+    for (int i = 0; i < static_cast<int>(sorted_decoded_vocab.size()); ++i) {
+      tmp_rejected_indices_.push_back(i);
+    }
+    rejected_filled = true;
+  } else {
+    rejected_filled = GetTokenMaskWithFirstCharacterCheck(first_character_mask, is_root_rule);
+  }
   if (rejected_filled) {
     auto return_value = AdaptiveTokenMask(
         tokenizer_info_.GetVocabSize(),

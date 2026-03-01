@@ -127,6 +127,8 @@ class Grammar::Impl {
     kTagDispatch,
     // data format: [rule_id, min_repeat_count, max_repeat_count]
     kRepeat,
+    // data format: [token_id_0, token_id_1, ...]
+    kTokenSet,
   };
 
   /*! \brief The object representing a grammar expr. */

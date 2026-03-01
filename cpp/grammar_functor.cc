@@ -288,6 +288,7 @@ class StructureNormalizerImpl : public GrammarMutator {
       case GrammarExprType::kCharacterClassStar:
       case GrammarExprType::kRuleRef:
       case GrammarExprType::kRepeat:
+      case GrammarExprType::kTokenSet:
         return builder_->AddSequence({builder_->AddGrammarExpr(assertion_expr)});
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected lookahead assertion type: "
@@ -310,6 +311,7 @@ class StructureNormalizerImpl : public GrammarMutator {
       case GrammarExprType::kCharacterClassStar:
       case GrammarExprType::kRuleRef:
       case GrammarExprType::kRepeat:
+      case GrammarExprType::kTokenSet:
         return builder_->AddChoices({builder_->AddSequence({builder_->AddGrammarExpr(grammar_expr)})
         });
       case GrammarExprType::kTagDispatch:
@@ -344,6 +346,7 @@ class StructureNormalizerImpl : public GrammarMutator {
         case GrammarExprType::kCharacterClassStar:
         case GrammarExprType::kRuleRef:
         case GrammarExprType::kRepeat:
+        case GrammarExprType::kTokenSet:
           VisitElementInChoices(choice_expr, &new_choice_ids);
           break;
         case GrammarExprType::kTagDispatch: {
@@ -423,6 +426,7 @@ class StructureNormalizerImpl : public GrammarMutator {
         case GrammarExprType::kCharacterClassStar:
         case GrammarExprType::kRuleRef:
         case GrammarExprType::kRepeat:
+        case GrammarExprType::kTokenSet:
           VisitElementInSequence(element_expr, &new_sequence_ids);
           break;
         case GrammarExprType::kTagDispatch: {
@@ -1054,6 +1058,7 @@ class GrammarFSMBuilderImpl {
   static FSMWithStartEnd CharacterClass(const GrammarExpr& expr);
   static FSMWithStartEnd ByteString(const GrammarExpr& expr);
   static FSMWithStartEnd Repeat(const GrammarExpr& expr);
+  static FSMWithStartEnd TokenSet(const GrammarExpr& expr);
   static std::optional<FSMWithStartEnd> Sequence(const GrammarExpr& expr, const Grammar& grammar);
   static std::optional<FSMWithStartEnd> Choices(const GrammarExpr& expr, const Grammar& grammar);
   static std::optional<FSMWithStartEnd> TagDispatch(const Grammar::Impl::TagDispatch& tag_dispatch);
@@ -1379,6 +1384,20 @@ FSMWithStartEnd GrammarFSMBuilderImpl::Repeat(const GrammarExpr& expr) {
   return repeat_fsm;
 }
 
+FSMWithStartEnd GrammarFSMBuilderImpl::TokenSet(const GrammarExpr& expr) {
+  std::vector<int32_t> token_ids;
+  for (int i = 0; i < expr.data_len; ++i) {
+    token_ids.push_back(expr[i]);
+  }
+  FSMWithStartEnd result_fsm;
+  result_fsm.AddState();
+  result_fsm.AddState();
+  result_fsm.SetStartState(0);
+  result_fsm.AddEndState(1);
+  result_fsm.GetFsm().AddTokenSetEdge(0, 1, token_ids);
+  return result_fsm;
+}
+
 std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::Sequence(
     const GrammarExpr& expr, const Grammar& grammar
 ) {
@@ -1403,6 +1422,10 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::Sequence(
       }
       case (ExprType::kRepeat): {
         fsm_lists.push_back(Repeat(sequence_expr));
+        break;
+      }
+      case (ExprType::kTokenSet): {
+        fsm_lists.push_back(TokenSet(sequence_expr));
         break;
       }
       default: {
@@ -2242,6 +2265,12 @@ std::optional<uint64_t> GrammarFSMHasherImpl::HashSequence(
       case (GrammarExprType::kTagDispatch): {
         return std::nullopt;
       }
+      case (GrammarExprType::kTokenSet): {
+        for (const auto& element : expr) {
+          hash_result = HashCombine(hash_result, element);
+        }
+        break;
+      }
     }
   }
   return hash_result;
@@ -2461,6 +2490,10 @@ FSMWithStartEnd GrammarFSMBuilder::CharacterClass(const GrammarExpr& expr) {
 
 FSMWithStartEnd GrammarFSMBuilder::ByteString(const GrammarExpr& expr) {
   return GrammarFSMBuilderImpl::ByteString(expr);
+}
+
+FSMWithStartEnd GrammarFSMBuilder::TokenSet(const GrammarExpr& expr) {
+  return GrammarFSMBuilderImpl::TokenSet(expr);
 }
 
 std::optional<FSMWithStartEnd> GrammarFSMBuilder::Sequence(

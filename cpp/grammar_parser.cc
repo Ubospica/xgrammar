@@ -7,6 +7,7 @@
 
 #include <picojson.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -490,6 +491,7 @@ class EBNFParser {
   MacroIR::NodePtr ParseMacroValue();
 
   int32_t ParseTagDispatch();
+  int32_t ParseTokenSet();
 
   // Helper functions
 
@@ -540,6 +542,7 @@ class EBNFParser {
 const std::unordered_map<std::string, std::function<int32_t(EBNFParser*)>>
     EBNFParser::kMacroFunctions = {
         {"TagDispatch", [](EBNFParser* parser) { return parser->ParseTagDispatch(); }},
+        {"Token", [](EBNFParser* parser) { return parser->ParseTokenSet(); }},
 };
 
 const EBNFParser::Token& EBNFParser::Peek(int delta) const { return *(current_token_ + delta); }
@@ -1152,6 +1155,37 @@ int32_t EBNFParser::ParseTagDispatch() {
   }
 
   return builder_.AddTagDispatch(tag_dispatch);
+}
+
+int32_t EBNFParser::ParseTokenSet() {
+  Consume();  // Consume Token identifier
+  auto start = current_token_;
+  auto args = ParseMacroArguments();
+  auto delta_element = start - current_token_;
+
+  if (!args.named_arguments.empty()) {
+    ReportParseError("Token() does not accept named arguments", delta_element);
+  }
+
+  if (args.arguments.empty()) {
+    ReportParseError("Token() requires at least one integer argument", delta_element);
+  }
+
+  std::vector<int32_t> token_ids;
+  for (const auto& arg : args.arguments) {
+    auto int_node = std::get_if<MacroIR::IntegerNode>(arg.get());
+    if (int_node == nullptr || int_node->value < 0) {
+      ReportParseError("Token() arguments must be non-negative integers", delta_element);
+    }
+    token_ids.push_back(static_cast<int32_t>(int_node->value));
+  }
+
+  std::sort(token_ids.begin(), token_ids.end());
+  token_ids.erase(std::unique(token_ids.begin(), token_ids.end()), token_ids.end());
+
+  return builder_.AddGrammarExpr(
+      {GrammarExprType::kTokenSet, token_ids.data(), static_cast<int32_t>(token_ids.size())}
+  );
 }
 
 int32_t EBNFParser::ParseLookaheadAssertion() {
