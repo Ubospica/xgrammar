@@ -119,13 +119,16 @@ class Grammar::Impl {
     kSequence,
     // data format: [grammar_expr_id0, grammar_expr_id1, ...]
     kChoices,
-    // data format: [tag_expr0, rule_id0, tag_expr1, rule_id1, ..., loop_after_dispatch,
-    // excluded_str_expr_id]
-    // tag_expr should be a byte string, and rule_id should be a rule id.
-    // loop_after_dispatch is a bool. excluded_str_expr_id is a choices GrammarExpr id.
+    // data format: [str_trigger_cnt, (str_expr_id, rule_id) × N,
+    //               tok_trigger_cnt, (token_id, rule_id) × M,
+    //               loop_after_dispatch,
+    //               str_excludes_cnt, str_expr_id × P,
+    //               tok_excludes_cnt, token_id × Q]
     kTagDispatch,
     // data format: [rule_id, min_repeat_count, max_repeat_count]
     kRepeat,
+    // data format: [token_id_0, token_id_1, ...]
+    kTokenSet,
   };
 
   /*! \brief The object representing a grammar expr. */
@@ -185,44 +188,59 @@ class Grammar::Impl {
 
   /*! \brief The object representing a tag dispatch. */
   struct TagDispatch {
-    /*! \brief The tag and rule id pairs. */
-    std::vector<std::pair<std::string, int32_t>> tag_rule_pairs;
+    /*! \brief String trigger → rule pairs. */
+    std::vector<std::pair<std::string, int32_t>> trigger_rule_pairs;
+    /*! \brief Token trigger → rule pairs. */
+    std::vector<std::pair<int32_t, int32_t>> token_trigger_rule_pairs;
     /*! \brief If true, the tag dispatch will loop after dispatching. */
     bool loop_after_dispatch;
-    /*! \brief The strings that are excluded by the tag dispatch. */
-    std::vector<std::string> excluded_str;
-    static const int kTagDispatchExtraParameter = 2;
+    /*! \brief Excluded substrings. */
+    std::vector<std::string> excludes;
+    /*! \brief Excluded token IDs. */
+    std::vector<int32_t> token_excludes;
   };
 
-  /*! \brief Get the tag dispatch from the grammar expr. */
+  /*! \brief Decode a kTagDispatch expr into the TagDispatch struct. */
   TagDispatch GetTagDispatch(const GrammarExpr& grammar_expr) {
     XGRAMMAR_DCHECK(grammar_expr.type == GrammarExprType::kTagDispatch)
         << "GrammarExpr is not a tag dispatch";
 
     TagDispatch result;
-    XGRAMMAR_DCHECK(grammar_expr.size() >= TagDispatch::kTagDispatchExtraParameter);
-    result.tag_rule_pairs.reserve(
-        (grammar_expr.size() - TagDispatch::kTagDispatchExtraParameter) / 2
-    );
+    int pos = 0;
 
-    for (int i = 0; i < grammar_expr.size() - TagDispatch::kTagDispatchExtraParameter; i += 2) {
-      auto tag_expr_id = grammar_expr[i];
-      auto rule_id = grammar_expr[i + 1];
-      result.tag_rule_pairs.push_back({GetByteString(tag_expr_id), rule_id});
+    // String triggers
+    int32_t string_trigger_count = grammar_expr[pos++];
+    for (int i = 0; i < string_trigger_count; ++i) {
+      auto str_expr_id = grammar_expr[pos++];
+      auto rule_id = grammar_expr[pos++];
+      result.trigger_rule_pairs.push_back({GetByteString(str_expr_id), rule_id});
     }
 
-    result.loop_after_dispatch = static_cast<bool>(
-        grammar_expr[grammar_expr.size() - TagDispatch::kTagDispatchExtraParameter]
-    );
-
-    auto exclude_str_expr = GetGrammarExpr(
-        grammar_expr[grammar_expr.size() - TagDispatch::kTagDispatchExtraParameter + 1]
-    );
-    XGRAMMAR_DCHECK(exclude_str_expr.type == GrammarExprType::kChoices);
-    result.excluded_str.reserve(exclude_str_expr.size());
-    for (int j = 0; j < exclude_str_expr.size(); j++) {
-      result.excluded_str.push_back(GetByteString(exclude_str_expr[j]));
+    // Token triggers
+    int32_t token_trigger_count = grammar_expr[pos++];
+    for (int i = 0; i < token_trigger_count; ++i) {
+      auto token_id = grammar_expr[pos++];
+      auto rule_id = grammar_expr[pos++];
+      result.token_trigger_rule_pairs.push_back({token_id, rule_id});
     }
+
+    // loop_after_dispatch
+    result.loop_after_dispatch = static_cast<bool>(grammar_expr[pos++]);
+
+    // String excludes
+    int32_t string_excludes_count = grammar_expr[pos++];
+    for (int i = 0; i < string_excludes_count; ++i) {
+      result.excludes.push_back(GetByteString(grammar_expr[pos++]));
+    }
+
+    // Token excludes
+    int32_t token_excludes_count = grammar_expr[pos++];
+    for (int i = 0; i < token_excludes_count; ++i) {
+      result.token_excludes.push_back(grammar_expr[pos++]);
+    }
+
+    XGRAMMAR_DCHECK(pos == grammar_expr.size()) << "TagDispatch packed data size mismatch: read "
+                                                << pos << " but expected " << grammar_expr.size();
     return result;
   }
 

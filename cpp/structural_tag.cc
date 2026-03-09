@@ -850,7 +850,8 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const AnyTextForma
   }
   if (!all_excludes.empty()) {
     auto tag_dispatch_expr =
-        grammar_builder_.AddTagDispatch(Grammar::Impl::TagDispatch{{}, false, all_excludes});
+        grammar_builder_.AddTagDispatch(Grammar::Impl::TagDispatch{{}, {}, false, all_excludes, {}}
+        );
     return ResultOk(grammar_builder_.AddRuleWithHint("any_text", tag_dispatch_expr));
   } else {
     auto any_text_expr = grammar_builder_.AddCharacterClassStar({{0, 0x10FFFF}}, false);
@@ -1057,7 +1058,7 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const TriggeredTag
     }
   }
   rule_expr_id = grammar_builder_.AddTagDispatch(
-      Grammar::Impl::TagDispatch{tag_rule_pairs, loop_after_dispatch, all_excludes}
+      Grammar::Impl::TagDispatch{tag_rule_pairs, {}, loop_after_dispatch, all_excludes, {}}
   );
 
   // Step 3.3 Consider at_least_one

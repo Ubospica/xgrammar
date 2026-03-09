@@ -531,25 +531,104 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
   }
 
   const auto& token = tokenizer_info_.GetDecodedVocab()[token_id];
+
+  // Check if token is rejected at source states by kRejectTokenLabel
+  bool token_rejected_at_source = false;
+  {
+    const auto& source_states = GetLatestScanableStates();
+    token_rejected_at_source = !source_states.empty();
+    for (const auto& s : source_states) {
+      if (!IsTokenRejectedAtState(s, token_id)) {
+        token_rejected_at_source = false;
+        break;
+      }
+    }
+  }
+
+  // Phase 1: Try token path (AdvanceToken for kTokenSet edges)
+  std::vector<ParserState> token_path_states;
+  std::vector<std::pair<int32_t, ParserState>> token_path_completable_states;
+  bool token_path_completed = false;
+  bool token_path_success = AdvanceToken(token_id, debug_print);
+  if (token_path_success) {
+    token_path_states = GetLatestScanableStates();
+    auto row = rule_id_to_completable_states_.Back();
+    token_path_completable_states.assign(row.data, row.data + row.data_len);
+    token_path_completed = is_completed_.back();
+    PopLastStates(1);
+  }
+
+  // Phase 2: Try byte-by-byte path
   int pos = 0;
+  bool byte_path_success = true;
   for (auto char_value : token) {
     if (!Advance(char_value, debug_print)) {
-      if (debug_print) {
-        XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token)
-                           << "> rejected at position " << pos << ", char "
-                           << EscapeString(char_value);
-      }
-      PopLastStates(pos);
-      return false;
+      byte_path_success = false;
+      break;
     }
     ++pos;
   }
-  token_length_history.push_back(token.size());
+
+  // Phase 3: Combine results
+  if (!byte_path_success && !token_path_success) {
+    if (debug_print) {
+      XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token)
+                         << "> rejected at position " << pos;
+    }
+    PopLastStates(pos);
+    return false;
+  }
+
+  if (!byte_path_success) {
+    PopLastStates(pos);
+    AdvanceToken(token_id, debug_print);
+    token_length_history.push_back(1);
+  } else if (!token_path_success) {
+    if (token_rejected_at_source) {
+      PopLastStates(pos);
+      return false;
+    }
+    token_length_history.push_back(token.size());
+  } else {
+    // Both paths succeeded
+    if (token_rejected_at_source) {
+      // All source states reject this token — discard byte path, use token-only path
+      PopLastStates(pos);
+      AdvanceToken(token_id, debug_print);
+      token_length_history.push_back(1);
+    } else {
+      // Merge token path states into byte path
+      auto byte_states = GetLatestScanableStates();
+      std::vector<ParserState> merged = byte_states;
+      for (const auto& s : token_path_states) {
+        if (std::find(merged.begin(), merged.end(), s) == merged.end()) {
+          merged.push_back(s);
+        }
+      }
+
+      auto byte_row = rule_id_to_completable_states_.Back();
+      std::vector<std::pair<int32_t, ParserState>> byte_completable(
+          byte_row.data, byte_row.data + byte_row.data_len
+      );
+      bool byte_completed = is_completed_.back();
+      PopLastStates(1);
+
+      for (const auto& cs : token_path_completable_states) {
+        if (std::find(byte_completable.begin(), byte_completable.end(), cs) ==
+            byte_completable.end()) {
+          byte_completable.push_back(cs);
+        }
+      }
+
+      scanable_state_history_.PushBack(merged);
+      rule_id_to_completable_states_.PushBack(byte_completable);
+      is_completed_.push_back(byte_completed || token_path_completed);
+      token_length_history.push_back(token.size());
+    }
+  }
 
   if (debug_print) {
-    XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<"
-                       << EscapeString(tokenizer_info_.GetDecodedVocab()[token_id])
-                       << "> accepted.";
+    XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token) << "> accepted.";
   }
   return true;
 }

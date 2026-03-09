@@ -57,9 +57,11 @@ TEST(XGrammarFSMBuilderTest, TestTrieFSMBuilder) {
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder1) {
   // Case 1. loop_after_dispatch = true
   Grammar::Impl::TagDispatch tag_dispatch = {
-      /* tag_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* trigger_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* token_trigger_rule_pairs = */ {},
       /* loop_after_dispatch = */ true,
-      /* excluded_str = */ {}
+      /* excludes = */ {},
+      /* token_excludes = */ {}
   };
   auto fsm_result = GrammarFSMBuilder::TagDispatch(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
@@ -82,9 +84,11 @@ TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder1) {
 TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder2) {
   // Case 2. loop_after_dispatch = false
   Grammar::Impl::TagDispatch tag_dispatch = {
-      /* tag_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* trigger_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* token_trigger_rule_pairs = */ {},
       /* loop_after_dispatch = */ false,
-      /* excluded_str = */ {}
+      /* excludes = */ {},
+      /* token_excludes = */ {}
   };
   auto fsm_result = GrammarFSMBuilder::TagDispatch(tag_dispatch);
   EXPECT_TRUE(fsm_result.has_value());
@@ -108,6 +112,40 @@ TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder2) {
   EXPECT_EQ(fsm_printed, expected_fsm_printed);
 }
 
+TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder3) {
+  // Case 3. string excludes are compiled into the trie
+  Grammar::Impl::TagDispatch tag_dispatch = {
+      /* trigger_rule_pairs = */ {{"hel", 1}, {"hi", 2}, {"哈", 3}},
+      /* token_trigger_rule_pairs = */ {},
+      /* loop_after_dispatch = */ true,
+      /* excludes = */ {"hos", "eos"},
+      /* token_excludes = */ {}
+  };
+  auto fsm_result = GrammarFSMBuilder::TagDispatch(tag_dispatch);
+  EXPECT_TRUE(fsm_result.has_value());
+  auto fsm = std::move(fsm_result).value();
+  auto fsm_printed = fsm.ToString();
+  EXPECT_NE(fsm_printed.find("Rule(1)->0"), std::string::npos);
+  EXPECT_NE(fsm_printed.find("Rule(2)->0"), std::string::npos);
+  EXPECT_NE(fsm_printed.find("Rule(3)->0"), std::string::npos);
+}
+
+TEST(XGrammarFSMBuilderTest, TestTagDispatchFSMBuilder4) {
+  // Case 4. token excludes are wired on the start state
+  Grammar::Impl::TagDispatch tag_dispatch = {
+      /* trigger_rule_pairs = */ {},
+      /* token_trigger_rule_pairs = */ {{3, 1}, {5, 2}},
+      /* loop_after_dispatch = */ false,
+      /* excludes = */ {},
+      /* token_excludes = */ {7}
+  };
+  auto fsm_result = GrammarFSMBuilder::TagDispatch(tag_dispatch);
+  EXPECT_TRUE(fsm_result.has_value());
+  auto fsm = std::move(fsm_result).value();
+  auto fsm_printed = fsm.ToString();
+  EXPECT_NE(fsm_printed.find("TokenSet"), std::string::npos);
+  EXPECT_NE(fsm_printed.find("RejectTokenLabel"), std::string::npos);
+}
 using GrammarExpr = Grammar::Impl::GrammarExpr;
 using GrammarExprType = Grammar::Impl::GrammarExprType;
 

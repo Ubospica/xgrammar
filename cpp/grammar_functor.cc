@@ -16,6 +16,7 @@
 #include <set>
 #include <stack>
 #include <tuple>
+#include <variant>
 #include <vector>
 
 #include "compiled_grammar_impl.h"
@@ -83,11 +84,17 @@ class SubGrammarAdderImpl : public GrammarMutator {
   int32_t VisitTagDispatch(const GrammarExpr& grammar_expr) final {
     Grammar::Impl::TagDispatch old_tag_dispatch = base_grammar_->GetTagDispatch(grammar_expr);
     Grammar::Impl::TagDispatch new_tag_dispatch;
-    for (const auto& [tag, rule_id] : old_tag_dispatch.tag_rule_pairs) {
-      new_tag_dispatch.tag_rule_pairs.emplace_back(tag, new_rule_ids_names[rule_id].first);
+    for (const auto& [trigger, rule_id] : old_tag_dispatch.trigger_rule_pairs) {
+      new_tag_dispatch.trigger_rule_pairs.emplace_back(trigger, new_rule_ids_names[rule_id].first);
+    }
+    for (const auto& [token_id, rule_id] : old_tag_dispatch.token_trigger_rule_pairs) {
+      new_tag_dispatch.token_trigger_rule_pairs.emplace_back(
+          token_id, new_rule_ids_names[rule_id].first
+      );
     }
     new_tag_dispatch.loop_after_dispatch = old_tag_dispatch.loop_after_dispatch;
-    new_tag_dispatch.excluded_str = old_tag_dispatch.excluded_str;
+    new_tag_dispatch.excludes = old_tag_dispatch.excludes;
+    new_tag_dispatch.token_excludes = old_tag_dispatch.token_excludes;
     return builder_->AddTagDispatch(new_tag_dispatch);
   }
 
@@ -286,6 +293,7 @@ class StructureNormalizerImpl : public GrammarMutator {
       case GrammarExprType::kCharacterClassStar:
       case GrammarExprType::kRuleRef:
       case GrammarExprType::kRepeat:
+      case GrammarExprType::kTokenSet:
         return builder_->AddSequence({builder_->AddGrammarExpr(assertion_expr)});
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected lookahead assertion type: "
@@ -308,6 +316,7 @@ class StructureNormalizerImpl : public GrammarMutator {
       case GrammarExprType::kCharacterClassStar:
       case GrammarExprType::kRuleRef:
       case GrammarExprType::kRepeat:
+      case GrammarExprType::kTokenSet:
         return builder_->AddChoices({builder_->AddSequence({builder_->AddGrammarExpr(grammar_expr)})
         });
       case GrammarExprType::kTagDispatch:
@@ -342,6 +351,7 @@ class StructureNormalizerImpl : public GrammarMutator {
         case GrammarExprType::kCharacterClassStar:
         case GrammarExprType::kRuleRef:
         case GrammarExprType::kRepeat:
+        case GrammarExprType::kTokenSet:
           VisitElementInChoices(choice_expr, &new_choice_ids);
           break;
         case GrammarExprType::kTagDispatch: {
@@ -421,6 +431,7 @@ class StructureNormalizerImpl : public GrammarMutator {
         case GrammarExprType::kCharacterClassStar:
         case GrammarExprType::kRuleRef:
         case GrammarExprType::kRepeat:
+        case GrammarExprType::kTokenSet:
           VisitElementInSequence(element_expr, &new_sequence_ids);
           break;
         case GrammarExprType::kTagDispatch: {
@@ -617,10 +628,12 @@ class UsedRulesAnalyzer : public GrammarVisitor<std::vector<int32_t>> {
   }
 
   void VisitTagDispatch(const GrammarExpr& grammar_expr) {
-    for (int i = 0;
-         i < grammar_expr.size() - Grammar::Impl::TagDispatch::kTagDispatchExtraParameter;
-         i += 2) {
-      visit_queue_.push(grammar_expr[i + 1]);
+    auto tag_dispatch = base_grammar_->GetTagDispatch(grammar_expr);
+    for (const auto& [trigger, rule_id] : tag_dispatch.trigger_rule_pairs) {
+      visit_queue_.push(rule_id);
+    }
+    for (const auto& [token_id, rule_id] : tag_dispatch.token_trigger_rule_pairs) {
+      visit_queue_.push(rule_id);
     }
   }
 
@@ -659,11 +672,14 @@ class DeadCodeEliminatorImpl : public GrammarMutator {
 
   int32_t VisitTagDispatch(const GrammarExpr& grammar_expr) final {
     Grammar::Impl::TagDispatch tag_dispatch = base_grammar_->GetTagDispatch(grammar_expr);
-    for (auto& [tag, rule_id] : tag_dispatch.tag_rule_pairs) {
+    for (auto& [trigger, rule_id] : tag_dispatch.trigger_rule_pairs) {
       XGRAMMAR_DCHECK(rule_id_map_.count(rule_id) > 0);
       rule_id = rule_id_map_[rule_id];
     }
-
+    for (auto& [token_id, rule_id] : tag_dispatch.token_trigger_rule_pairs) {
+      XGRAMMAR_DCHECK(rule_id_map_.count(rule_id) > 0);
+      rule_id = rule_id_map_[rule_id];
+    }
     return builder_->AddTagDispatch(tag_dispatch);
   }
 
@@ -720,10 +736,14 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
       auto rule = base_grammar_->GetRule(i);
       auto grammar_expr = base_grammar_->GetGrammarExpr(rule.body_expr_id);
       if (grammar_expr.type == GrammarExprType::kTagDispatch) {
-        for (int j = 1;
-             j < grammar_expr.size() - Grammar::Impl::TagDispatch::kTagDispatchExtraParameter;
-             j += 2) {
-          if (grammar_expr[j] == rule_id) {
+        auto tag_dispatch = base_grammar_->GetTagDispatch(grammar_expr);
+        for (const auto& [trigger, rid] : tag_dispatch.trigger_rule_pairs) {
+          if (rid == rule_id) {
+            return false;
+          }
+        }
+        for (const auto& [token_id, rid] : tag_dispatch.token_trigger_rule_pairs) {
+          if (rid == rule_id) {
             return false;
           }
         }
@@ -763,10 +783,14 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
       auto rule = base_grammar_->GetRule(i);
       auto grammar_expr = base_grammar_->GetGrammarExpr(rule.body_expr_id);
       if (grammar_expr.type == GrammarExprType::kTagDispatch) {
-        for (int j = 1;
-             j < grammar_expr.size() - Grammar::Impl::TagDispatch::kTagDispatchExtraParameter;
-             j += 2) {
-          if (grammar_expr[j] == rule_id) {
+        auto tag_dispatch = base_grammar_->GetTagDispatch(grammar_expr);
+        for (const auto& [trigger, rid] : tag_dispatch.trigger_rule_pairs) {
+          if (rid == rule_id) {
+            return -1;
+          }
+        }
+        for (const auto& [token_id, rid] : tag_dispatch.token_trigger_rule_pairs) {
+          if (rid == rule_id) {
             return -1;
           }
         }
@@ -844,10 +868,12 @@ class RuleRefGraphFinder : public GrammarVisitor<std::vector<std::vector<int32_t
   }
 
   void VisitTagDispatch(const GrammarExpr& grammar_expr) {
-    for (int i = 1;
-         i < grammar_expr.size() - Grammar::Impl::TagDispatch::kTagDispatchExtraParameter;
-         i += 2) {
-      rule_visit_graph_[grammar_expr[i]].push_back(cur_rule_id_);
+    auto tag_dispatch = base_grammar_->GetTagDispatch(grammar_expr);
+    for (const auto& [trigger, rule_id] : tag_dispatch.trigger_rule_pairs) {
+      rule_visit_graph_[rule_id].push_back(cur_rule_id_);
+    }
+    for (const auto& [token_id, rule_id] : tag_dispatch.token_trigger_rule_pairs) {
+      rule_visit_graph_[rule_id].push_back(cur_rule_id_);
     }
   }
 
@@ -1049,15 +1075,18 @@ class GrammarFSMBuilderImpl {
   static FSMWithStartEnd CharacterClass(const GrammarExpr& expr);
   static FSMWithStartEnd ByteString(const GrammarExpr& expr);
   static FSMWithStartEnd Repeat(const GrammarExpr& expr);
+  static FSMWithStartEnd TokenSet(const GrammarExpr& expr);
   static std::optional<FSMWithStartEnd> Sequence(const GrammarExpr& expr, const Grammar& grammar);
   static std::optional<FSMWithStartEnd> Choices(const GrammarExpr& expr, const Grammar& grammar);
   static std::optional<FSMWithStartEnd> TagDispatch(const Grammar::Impl::TagDispatch& tag_dispatch);
   static void AddCharacterRange(FSMWithStartEnd& fsm, int from, int to, uint32_t min, uint32_t max);
-  /* Building tool funtions.*/
-  static std::optional<FSMWithStartEnd> BuildTagDispatchFSM(
-      const std::vector<std::pair<std::string, int>>& tag_dispatch_rules,
+  /* Building tool functions.*/
+  static std::optional<FSMWithStartEnd> BuildTagDispatch(
+      const std::vector<std::pair<std::string, int>>& string_trigger_rules,
+      const std::vector<std::pair<int32_t, int>>& token_trigger_rules,
       bool loop_after_dispatch,
-      const std::vector<std::string>& excluded_strings
+      const std::vector<std::string>& excluded_strings,
+      const std::vector<int32_t>& exclude_tokens
   );
   static FSMWithStartEnd BuildNegativeCharacterClass(const GrammarExpr& expr);
 };
@@ -1368,6 +1397,20 @@ FSMWithStartEnd GrammarFSMBuilderImpl::Repeat(const GrammarExpr& expr) {
   return repeat_fsm;
 }
 
+FSMWithStartEnd GrammarFSMBuilderImpl::TokenSet(const GrammarExpr& expr) {
+  std::vector<int32_t> token_ids;
+  for (int i = 0; i < expr.data_len; ++i) {
+    token_ids.push_back(expr[i]);
+  }
+  FSMWithStartEnd result_fsm;
+  result_fsm.AddState();
+  result_fsm.AddState();
+  result_fsm.SetStartState(0);
+  result_fsm.AddEndState(1);
+  result_fsm.GetFsm().AddTokenSetEdge(0, 1, token_ids);
+  return result_fsm;
+}
+
 std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::Sequence(
     const GrammarExpr& expr, const Grammar& grammar
 ) {
@@ -1392,6 +1435,10 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::Sequence(
       }
       case (ExprType::kRepeat): {
         fsm_lists.push_back(Repeat(sequence_expr));
+        break;
+      }
+      case (ExprType::kTokenSet): {
+        fsm_lists.push_back(TokenSet(sequence_expr));
         break;
       }
       default: {
@@ -1484,14 +1531,16 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::Choices(
   return result;
 }
 
-std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::BuildTagDispatchFSM(
-    const std::vector<std::pair<std::string, int>>& tag_dispatch_rules,
+std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::BuildTagDispatch(
+    const std::vector<std::pair<std::string, int>>& string_trigger_rules,
+    const std::vector<std::pair<int32_t, int>>& token_trigger_rules,
     bool loop_after_dispatch,
-    const std::vector<std::string>& excluded_strings
+    const std::vector<std::string>& excluded_strings,
+    const std::vector<int32_t>& exclude_tokens
 ) {
   std::vector<std::string> tag_names;
-  tag_names.reserve(tag_dispatch_rules.size());
-  for (const auto& [tag_name, tag_id] : tag_dispatch_rules) {
+  tag_names.reserve(string_trigger_rules.size());
+  for (const auto& [tag_name, tag_id] : string_trigger_rules) {
     tag_names.push_back(tag_name);
   }
   std::vector<int> end_states;
@@ -1516,8 +1565,8 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::BuildTagDispatchFSM(
     }
   }
 
-  // Add rule ref edges
-  for (int i = 0; i < static_cast<int>(tag_dispatch_rules.size()); i++) {
+  // Add rule ref edges for string triggers
+  for (int i = 0; i < static_cast<int>(string_trigger_rules.size()); i++) {
     int next_state;
     if (loop_after_dispatch) {
       next_state = start;
@@ -1525,7 +1574,42 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::BuildTagDispatchFSM(
       next_state = trie_fsm.AddState();
       ends.push_back(true);
     }
-    trie_fsm.AddRuleEdge(end_states[i], next_state, tag_dispatch_rules[i].second);
+    trie_fsm.AddRuleEdge(end_states[i], next_state, string_trigger_rules[i].second);
+  }
+
+  // Token trigger edges on S0
+  for (const auto& [token_id, rule_id] : token_trigger_rules) {
+    int dispatch_state = trie_fsm.AddState();
+    ends.push_back(false);
+    trie_fsm.AddTokenSetEdge(start, dispatch_state, {token_id});
+    int next_state;
+    if (loop_after_dispatch) {
+      next_state = start;
+    } else {
+      next_state = trie_fsm.AddState();
+      ends.push_back(true);
+    }
+    trie_fsm.AddRuleEdge(dispatch_state, next_state, rule_id);
+  }
+
+  // kRejectTokenLabel self-loop on S0
+  std::vector<int32_t> all_exclude_ids;
+  for (auto tid : exclude_tokens) {
+    all_exclude_ids.push_back(tid);
+  }
+  for (const auto& [token_id, rule_id] : token_trigger_rules) {
+    all_exclude_ids.push_back(token_id);
+  }
+  if (!all_exclude_ids.empty()) {
+    std::sort(all_exclude_ids.begin(), all_exclude_ids.end());
+    all_exclude_ids.erase(
+        std::unique(all_exclude_ids.begin(), all_exclude_ids.end()), all_exclude_ids.end()
+    );
+    for (int i = 0; i < trie_result->NumStates(); i++) {
+      if (old_ends.count(i) == 0) {
+        trie_fsm.AddRejectTokenLabelEdge(i, all_exclude_ids);
+      }
+    }
   }
 
   return FSMWithStartEnd(trie_fsm, start, ends);
@@ -1534,8 +1618,19 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::BuildTagDispatchFSM(
 std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::TagDispatch(
     const Grammar::Impl::TagDispatch& tag_dispatch
 ) {
-  return BuildTagDispatchFSM(
-      tag_dispatch.tag_rule_pairs, tag_dispatch.loop_after_dispatch, tag_dispatch.excluded_str
+  std::vector<std::pair<std::string, int>> string_trigger_rules(
+      tag_dispatch.trigger_rule_pairs.begin(), tag_dispatch.trigger_rule_pairs.end()
+  );
+  std::vector<std::pair<int32_t, int>> token_trigger_rules(
+      tag_dispatch.token_trigger_rule_pairs.begin(), tag_dispatch.token_trigger_rule_pairs.end()
+  );
+
+  return BuildTagDispatch(
+      string_trigger_rules,
+      token_trigger_rules,
+      tag_dispatch.loop_after_dispatch,
+      tag_dispatch.excludes,
+      tag_dispatch.token_excludes
   );
 }
 
@@ -2147,6 +2242,12 @@ std::optional<uint64_t> GrammarFSMHasherImpl::HashSequence(
       case (GrammarExprType::kTagDispatch): {
         return std::nullopt;
       }
+      case (GrammarExprType::kTokenSet): {
+        for (const auto& element : expr) {
+          hash_result = HashCombine(hash_result, element);
+        }
+        break;
+      }
     }
   }
   return hash_result;
@@ -2366,6 +2467,10 @@ FSMWithStartEnd GrammarFSMBuilder::CharacterClass(const GrammarExpr& expr) {
 
 FSMWithStartEnd GrammarFSMBuilder::ByteString(const GrammarExpr& expr) {
   return GrammarFSMBuilderImpl::ByteString(expr);
+}
+
+FSMWithStartEnd GrammarFSMBuilder::TokenSet(const GrammarExpr& expr) {
+  return GrammarFSMBuilderImpl::TokenSet(expr);
 }
 
 std::optional<FSMWithStartEnd> GrammarFSMBuilder::Sequence(
