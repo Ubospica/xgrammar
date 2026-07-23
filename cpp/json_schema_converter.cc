@@ -18,6 +18,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -1809,12 +1810,13 @@ class JSONSchemaConverter::Impl {
     std::string root_rule_name = AllocateRuleName("root");
     uri_to_rule_name_["#"] = root_rule_name;
 
-    auto cached_rule = GetCache(spec->cache_key);
+    bool indentation_sensitive = IsIndentationSensitive(spec);
+    auto cached_rule = GetCache(spec->cache_key, indentation_sensitive);
     if (cached_rule.has_value()) {
       AddRuleWithAllocatedName(root_rule_name, RuleRef(*cached_rule));
     } else {
       if (!spec->cache_key.empty()) {
-        AddCache(spec->cache_key, root_rule_name);
+        AddCache(spec->cache_key, root_rule_name, indentation_sensitive);
       }
       AddRuleWithAllocatedName(root_rule_name, GenerateFromSpec(spec, root_rule_name));
     }
@@ -1967,6 +1969,39 @@ class JSONSchemaConverter::Impl {
 
   bool IsOuterXML() const { return IsXML() && nested_object_level_ <= 1; }
 
+  bool IsIndentationSensitive(const SchemaSpecPtr& spec) const {
+    return std::visit(
+        [this](const auto& value) {
+          using T = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, ArraySpec> || std::is_same_v<T, ObjectSpec> ||
+                        std::is_same_v<T, RefSpec>) {
+            return true;
+          } else if constexpr (std::is_same_v<T, AnyOfSpec> || std::is_same_v<T, OneOfSpec>) {
+            return std::any_of(
+                value.options.begin(),
+                value.options.end(),
+                [this](const auto& option) { return IsIndentationSensitive(option); }
+            );
+          } else if constexpr (std::is_same_v<T, AllOfSpec>) {
+            return std::any_of(
+                value.schemas.begin(),
+                value.schemas.end(),
+                [this](const auto& schema) { return IsIndentationSensitive(schema); }
+            );
+          } else if constexpr (std::is_same_v<T, TypeArraySpec>) {
+            return std::any_of(
+                value.type_schemas.begin(),
+                value.type_schemas.end(),
+                [this](const auto& schema) { return IsIndentationSensitive(schema); }
+            );
+          } else {
+            return false;
+          }
+        },
+        spec->spec
+    );
+  }
+
   std::string WhitespacePattern() const {
     if (!max_whitespace_cnt_.has_value()) {
       return "[ \\n\\t]*";
@@ -2079,26 +2114,35 @@ class JSONSchemaConverter::Impl {
   }
 
   std::string CreateRule(const SchemaSpecPtr& spec, const std::string& rule_name_hint) {
-    auto cached = GetCache(spec->cache_key);
+    bool indentation_sensitive = IsIndentationSensitive(spec);
+    auto cached = GetCache(spec->cache_key, indentation_sensitive);
     if (cached.has_value()) {
       return *cached;
     }
     std::string rule_name = AllocateRuleName(rule_name_hint);
+    AddCache(spec->cache_key, rule_name, indentation_sensitive);
     AddRuleWithAllocatedName(rule_name, GenerateFromSpec(spec, rule_name));
     return rule_name;
   }
 
-  void AddCache(const std::string& key, const std::string& rule_name) {
+  void AddCache(
+      const std::string& key, const std::string& rule_name, bool indentation_sensitive = false
+  ) {
     if (!key.empty()) {
-      rule_cache_manager_.AddCache(key, !IsXML() || nested_object_level_ > 1, rule_name);
+      int format_context = IsXML() ? std::min(nested_object_level_, 2) : 0;
+      int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
+      rule_cache_manager_.AddCache(key, format_context, indentation_context, rule_name);
     }
   }
 
-  std::optional<std::string> GetCache(const std::string& key) const {
+  std::optional<std::string> GetCache(const std::string& key, bool indentation_sensitive = false)
+      const {
     if (key.empty()) {
       return std::nullopt;
     }
-    return rule_cache_manager_.GetCache(key, !IsXML() || nested_object_level_ > 1);
+    int format_context = IsXML() ? std::min(nested_object_level_, 2) : 0;
+    int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
+    return rule_cache_manager_.GetCache(key, format_context, indentation_context);
   }
 
   int32_t RegexExpression(
@@ -3232,13 +3276,18 @@ class JSONSchemaConverter::Impl {
       }
     }
 
+    SchemaSpecPtr resolved = ref_resolver_(spec.uri, rule_name_hint);
+    bool indentation_sensitive = IsIndentationSensitive(resolved);
+    auto cached = GetCache(resolved->cache_key, indentation_sensitive);
+    if (cached.has_value()) {
+      uri_to_rule_name_[spec.uri] = *cached;
+      return RuleRef(*cached);
+    }
+
     std::string allocated_rule = AllocateRuleName(rule_name_hint);
     uri_to_rule_name_[spec.uri] = allocated_rule;
-    SchemaSpecPtr resolved = ref_resolver_(spec.uri, allocated_rule);
+    AddCache(resolved->cache_key, allocated_rule, indentation_sensitive);
     AddRuleWithAllocatedName(allocated_rule, GenerateFromSpec(resolved, allocated_rule));
-    if (!resolved->cache_key.empty()) {
-      AddCache(resolved->cache_key, allocated_rule);
-    }
     return RuleRef(allocated_rule);
   }
 
