@@ -10,6 +10,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -22,6 +24,10 @@
 #include "xgrammar/exception.h"
 
 namespace xgrammar {
+
+class RuleLevelCache;
+class FirstByteTokenMaskCache;
+class OptionalCharacterClassTokenSummaryCache;
 
 /******************* CompiledGrammar Datastructures *******************/
 
@@ -168,6 +174,10 @@ class CompiledGrammar::Impl {
   std::unordered_map<ParserState, uint32_t, StateHashForCache, StateEqualForCache>
       adaptive_token_mask_ids;
 
+  /*! \brief Address-stable storage for masks generated after compilation. */
+  std::unordered_map<ParserState, AdaptiveTokenMask, StateHashForCache, StateEqualForCache>
+      dynamic_adaptive_token_mask_cache;
+
 #ifdef XGRAMMAR_PROFILE_COMPILE
   /*! \brief Per-task compile work, indexed by the structurally deduplicated task-group id. */
   std::vector<AdaptiveMaskCompileProfile> adaptive_mask_compile_profiles;
@@ -181,6 +191,32 @@ class CompiledGrammar::Impl {
     XGRAMMAR_DCHECK(mask_id_it->second < adaptive_token_masks.size());
     return &adaptive_token_masks[mask_id_it->second];
   }
+
+  /*! \brief Protects on-demand token mask cache insertion and cache serialization. */
+  mutable std::mutex adaptive_token_mask_cache_mutex;
+
+  /*! \brief Whether missing token mask cache entries should be generated on demand. */
+  bool enable_dynamic_compilation{false};
+
+  /*! \brief Reusable cache shared by grammars created from the same compiler. */
+  std::shared_ptr<RuleLevelCache> rule_level_cache;
+
+  /*! \brief Per-grammar caches retained by on-demand mask compilation. */
+  std::shared_ptr<FirstByteTokenMaskCache> first_byte_cache;
+  std::shared_ptr<OptionalCharacterClassTokenSummaryCache>
+      optional_character_class_token_summary_cache;
+
+  /*! \brief Whether direct-mask entries may be retained in the cross-grammar cache. */
+  bool cache_direct_masks_across_grammars{false};
+
+  /*! \brief Tag dispatch data needed to generate token masks on demand. */
+  std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
+
+  /*! \brief Get an existing token mask or generate and cache it on demand. */
+  const AdaptiveTokenMask& GetAdaptiveTokenMask(const ParserState& state, bool is_root_rule);
+
+  /*! \brief Generate every token mask before serialization. */
+  void MaterializeAdaptiveTokenMaskCache();
 
   Grammar GetGrammar() const { return grammar; }
 

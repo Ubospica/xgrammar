@@ -1842,13 +1842,14 @@ class GrammarMatcher::Impl : public EarleyParser {
             state.sequence_id,
             state.element_id,
             ParserState::kNoPrevInputPos,
+            -1,
             state.sub_element_id,
             state.repeat_count,
             state.partial_codepoint
         };
-        const AdaptiveTokenMask* mask =
-            matcher_->compiled_grammar_->FindAdaptiveTokenMask(lookup_state);
-        XGRAMMAR_DCHECK(mask != nullptr);
+        const AdaptiveTokenMask* mask = &matcher_->compiled_grammar_->GetAdaptiveTokenMask(
+            lookup_state, lookup_state.rule_id == matcher_->grammar_->GetRootRuleId()
+        );
         cached_masks.push_back(mask);
       }
       std::stable_sort(
@@ -2628,8 +2629,9 @@ class GrammarMatcher::Impl : public EarleyParser {
       ++profile_candidate_ascii_safe_subsumed_calls_;
       profile_candidate_ascii_safe_covered_tokens_ += candidate_ascii_safe_tokens;
       for (const auto& state : scanable_state_history_[scanable_state_history_.size() - 1]) {
-        const AdaptiveTokenMask* mask = compiled_grammar_->FindAdaptiveTokenMask(state);
-        XGRAMMAR_DCHECK(mask != nullptr);
+        const AdaptiveTokenMask* mask = &compiled_grammar_->GetAdaptiveTokenMask(
+            state, state.rule_id == grammar_->GetRootRuleId()
+        );
         bool has_relevant_uncertain_token = false;
         for (int32_t sorted_vocab_index : mask->uncertain_indices) {
           const int32_t token_id = sorted_decoded_vocab[sorted_vocab_index].first;
@@ -2728,8 +2730,9 @@ class GrammarMatcher::Impl : public EarleyParser {
                            << scanable_state_history_[scanable_state_history_.size() - 1].size()
                            << ")";
         for (const auto& state : scanable_state_history_[scanable_state_history_.size() - 1]) {
-          const AdaptiveTokenMask* mask = compiled_grammar_->FindAdaptiveTokenMask(state);
-          XGRAMMAR_DCHECK(mask != nullptr);
+          const AdaptiveTokenMask* mask = &compiled_grammar_->GetAdaptiveTokenMask(
+              state, state.rule_id == grammar_->GetRootRuleId()
+          );
           uint64_t uncertain_candidate_tokens = 0;
           if (mask->uncertain_bitset.Size() != 0) {
             for (int32_t sorted_vocab_index =
@@ -2903,9 +2906,9 @@ class GrammarMatcher::Impl : public EarleyParser {
                     .rule_has_atomic_token_edges[continuation_state->rule_id]) {
               continue;
             }
-            const AdaptiveTokenMask* continuation_mask =
-                compiled_grammar_->FindAdaptiveTokenMask(*continuation_state);
-            XGRAMMAR_DCHECK(continuation_mask != nullptr);
+            const AdaptiveTokenMask* continuation_mask = &compiled_grammar_->GetAdaptiveTokenMask(
+                *continuation_state, continuation_state->rule_id == grammar_->GetRootRuleId()
+            );
             if (continuation_mask->store_type == StoreType::kAcceptedBitset) {
               profile_suffix_accepted_union_bitset_ |= continuation_mask->accepted_bitset;
             } else if (continuation_mask->store_type == StoreType::kAccepted) {
@@ -3325,8 +3328,9 @@ class GrammarMatcher::Impl : public EarleyParser {
                                        .rule_has_atomic_token_edges[state.rule_id]) {
             continue;
           }
-          const AdaptiveTokenMask* mask = compiled_grammar_->FindAdaptiveTokenMask(state);
-          XGRAMMAR_DCHECK(mask != nullptr);
+          const AdaptiveTokenMask* mask = &compiled_grammar_->GetAdaptiveTokenMask(
+              state, state.rule_id == grammar_->GetRootRuleId()
+          );
           suffix_configuration_masks.push_back(mask);
         }
       }
@@ -5089,8 +5093,8 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
   std::vector<std::pair<ParserState, const AdaptiveTokenMask*>> latest_states_with_masks;
 
   for (const auto& state : latest_states) {
-    const AdaptiveTokenMask* adaptive_token_mask = compiled_grammar_->FindAdaptiveTokenMask(state);
-    XGRAMMAR_CHECK(adaptive_token_mask != nullptr) << state;
+    const AdaptiveTokenMask* adaptive_token_mask =
+        &compiled_grammar_->GetAdaptiveTokenMask(state, state.rule_id == grammar_->GetRootRuleId());
     if (state.char_budget_deadline >= 0) {
       int32_t remaining_chars = state.char_budget_deadline - GetCurrentCharIndex();
       if (remaining_chars <= tokenizer_info_.ImplPtr()->GetMaxTokenChars()) {
