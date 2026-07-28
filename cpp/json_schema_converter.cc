@@ -2447,7 +2447,7 @@ class JSONSchemaConverter::Impl {
     if (spec.pattern.has_value()) {
       return Sequence(
           {ByteString("\""),
-           RegexExpression(*spec.pattern, true, /*force_cfg_expansion=*/true),
+           RegexExpression(*spec.pattern, true, /*force_cfg_expansion=*/false),
            ByteString("\"")}
       );
     }
@@ -3037,7 +3037,7 @@ class JSONSchemaConverter::Impl {
               CreateRule(pattern_property.schema, rule_name + "_pp_" + std::to_string(index));
           patterns.push_back(Sequence(
               {ByteString("\""),
-               RegexExpression(pattern_property.pattern, true, /*force_cfg_expansion=*/true),
+               RegexExpression(pattern_property.pattern, true, /*force_cfg_expansion=*/false),
                ByteString("\""),
                colon_expr_id_,
                RuleRef(value_rule)}
@@ -3085,7 +3085,7 @@ class JSONSchemaConverter::Impl {
             property_choices.push_back(Sequence(
                 {beginning_separator,
                  ByteString("\""),
-                 RegexExpression(pattern_property.pattern, true, /*force_cfg_expansion=*/true),
+                 RegexExpression(pattern_property.pattern, true, /*force_cfg_expansion=*/false),
                  ByteString("\""),
                  colon_expr_id_,
                  RuleRef(value_rule)}
