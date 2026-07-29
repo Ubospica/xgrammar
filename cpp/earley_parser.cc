@@ -25,6 +25,85 @@ using GrammarExpr = Grammar::Impl::GrammarExpr;
 
 bool EarleyParser::IsCompleted() const { return is_completed_.back(); }
 
+bool EarleyParser::CompletionConsumedMarker(const ParserState& state) const {
+  const auto& body = grammar_->GetGrammarExpr(grammar_->GetRule(state.rule_id).body_expr_id);
+  if (body.type != GrammarExprType::kTagDispatch) {
+    return true;
+  }
+  XGRAMMAR_DCHECK(grammar_->per_rule_fsms[state.rule_id].has_value());
+  const auto& fsm = grammar_->per_rule_fsms[state.rule_id]->GetFsm().GetFsm();
+  return fsm.GetEdges(state.element_id).size() == 0;
+}
+
+std::vector<CaptureOccurrence> EarleyParser::CollectStopCaptureTargets(const ParserState& state
+) const {
+  // Follow only the parent links of this concrete rule occurrence. A byte-overlap test at
+  // materialization time cannot distinguish an actual captured ancestor from an unrelated
+  // Earley branch that happens to cover the same input.
+  std::vector<CaptureOccurrence> targets;
+  std::vector<CaptureOccurrence> pending{{state.rule_id, state.rule_start_pos}};
+  std::unordered_set<int64_t> visited;
+  while (!pending.empty()) {
+    CaptureOccurrence occurrence = pending.back();
+    pending.pop_back();
+    int64_t occurrence_key = (static_cast<int64_t>(occurrence.rule_id) << 32) |
+                             static_cast<uint32_t>(occurrence.start_pos);
+    if (!visited.insert(occurrence_key).second) {
+      continue;
+    }
+    if (RuleHasCapture(occurrence.rule_id)) {
+      targets.push_back(occurrence);
+    }
+    if (occurrence.start_pos == ParserState::kNoPrevInputPos) {
+      continue;
+    }
+    const auto& parent_states = rule_id_to_completable_states_[occurrence.start_pos];
+    for (const auto& [ref_rule_id, parent_state] : parent_states) {
+      if (ref_rule_id != occurrence.rule_id || parent_state.rule_id < 0) {
+        continue;
+      }
+      pending.push_back({parent_state.rule_id, parent_state.rule_start_pos});
+    }
+  }
+  return targets;
+}
+
+void EarleyParser::RecordCaptureEvent(const ParserState& state, bool marker_present) {
+  const auto* suffix_stop_info = grammar_->GetSuffixStopInfo(state.rule_id);
+  bool marker_consumed =
+      marker_present && suffix_stop_info != nullptr &&
+      (suffix_stop_info->hidden_suffix_bytes > 0 || suffix_stop_info->hidden_stop_bytes > 0) &&
+      CompletionConsumedMarker(state);
+  const int32_t hidden_suffix_bytes = marker_consumed ? suffix_stop_info->hidden_suffix_bytes : 0;
+  const int32_t hidden_stop_bytes = marker_consumed ? suffix_stop_info->hidden_stop_bytes : 0;
+
+  int32_t event_start_pos = state.rule_start_pos;
+  if (marker_consumed && suffix_stop_info->body_rule_id == state.rule_id) {
+    // A self-referencing body helper marks the zero-width event inserted immediately after a
+    // dynamic string trigger. Its capture span is the fixed-length marker that precedes it.
+    XGRAMMAR_DCHECK(event_start_pos != ParserState::kNoPrevInputPos);
+    event_start_pos -= std::max(hidden_suffix_bytes, hidden_stop_bytes);
+    XGRAMMAR_DCHECK(event_start_pos >= 0);
+  }
+
+  std::vector<CaptureOccurrence> stop_capture_targets =
+      hidden_stop_bytes > 0 ? CollectStopCaptureTargets(state) : std::vector<CaptureOccurrence>{};
+
+  capture_event_history_.PushBackInLatestRow(
+      {state.rule_id,
+       event_start_pos,
+       state.rule_start_pos,
+       hidden_suffix_bytes,
+       hidden_stop_bytes,
+       std::move(stop_capture_targets)}
+  );
+}
+
+int32_t EarleyParser::ResolveActiveTemperatureRule(int32_t rule_id, int32_t inherited_rule_id)
+    const {
+  return grammar_->GetRule(rule_id).temperature.has_value() ? rule_id : inherited_rule_id;
+}
+
 void EarleyParser::PopLastStates(int32_t cnt) {
   stop_token_is_accepted_ = false;
   if (cnt >= static_cast<int32_t>(rule_id_to_completable_states_.size())) {
@@ -33,9 +112,26 @@ void EarleyParser::PopLastStates(int32_t cnt) {
   rule_id_to_completable_states_.PopBack(cnt);
   is_completed_.resize(is_completed_.size() - cnt);
   scanable_state_history_.PopBack(cnt);
+  if (capture_tracking_) {
+    capture_event_history_.PopBack(cnt);
+  }
+  if (has_char_budget_rules_) {
+    char_count_history_.erase(char_count_history_.end() - cnt, char_count_history_.end());
+    char_budget_entry_history_.erase(
+        char_budget_entry_history_.end() - cnt, char_budget_entry_history_.end()
+    );
+  }
 }
 
-void EarleyParser::Complete(const ParserState& state, bool debug_print) {
+void EarleyParser::Complete(const ParserState& state, bool debug_print, bool marker_present) {
+  // Record capture and hidden-span events. This is only enabled during definitive advances;
+  // speculative completions (mask computation, lookahead) never record events.
+  if (capture_recording_ && RuleNeedsCaptureEvent(state.rule_id)) {
+    RecordCaptureEvent(state, marker_present);
+  }
+  if (state.rule_id != -1 && grammar_->GetRule(state.rule_id).is_lazy) {
+    tmp_completed_lazy_occurrences_.emplace_back(state.rule_id, state.rule_start_pos);
+  }
   // Check if a rule is completed.
   if (state.rule_start_pos == ParserState::kNoPrevInputPos) {
     // assert: if a root rule can achieve here, then it must be completed.
@@ -74,7 +170,12 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print) {
             parent_state.sequence_id,
             parent_state.element_id + 1,
             parent_state.rule_start_pos,
-            0
+            parent_state.budget_deadline,
+            0,
+            0,
+            0,
+            parent_state.active_temperature_rule_id,
+            parent_state.char_budget_deadline
         });
         continue;
       }
@@ -92,7 +193,12 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print) {
             parent_state.sequence_id,
             parent_state.element_id + 1,
             parent_state.rule_start_pos,
-            0
+            parent_state.budget_deadline,
+            0,
+            0,
+            0,
+            parent_state.active_temperature_rule_id,
+            parent_state.char_budget_deadline
         });
       }
       // If the repeat count is less than the max repeat count, we can continue to
@@ -120,8 +226,12 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print) {
             parent_state.sequence_id,
             edge.target,
             parent_state.rule_start_pos,
+            parent_state.budget_deadline,
             0,
-            0
+            0,
+            0,
+            parent_state.active_temperature_rule_id,
+            parent_state.char_budget_deadline
         });
       }
       if (new_count < info.Upper()) {
@@ -130,8 +240,12 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print) {
             parent_state.sequence_id,
             parent_state.element_id,
             parent_state.rule_start_pos,
+            parent_state.budget_deadline,
             0,
-            new_count
+            new_count,
+            0,
+            parent_state.active_temperature_rule_id,
+            parent_state.char_budget_deadline
         });
       }
       break;
@@ -172,7 +286,16 @@ std::pair</* scanable */ bool, /* completable */ bool> EarleyParser::Predict(
     case GrammarExprType::kCharacterClassStar: {
       if (state.sub_element_id == 0) {
         Enqueue(ParserState{
-            state.rule_id, state.sequence_id, state.element_id + 1, state.rule_start_pos, 0
+            state.rule_id,
+            state.sequence_id,
+            state.element_id + 1,
+            state.rule_start_pos,
+            state.budget_deadline,
+            0,
+            0,
+            0,
+            state.active_temperature_rule_id,
+            state.char_budget_deadline
         });
       }
       return std::make_pair(true, false);
@@ -186,7 +309,16 @@ std::pair</* scanable */ bool, /* completable */ bool> EarleyParser::Predict(
       ExpandNextRuleRefElement(state, grammar_expr, &element_expr, debug_print);
       if (state.repeat_count >= min_repeat_count) {
         Enqueue(ParserState{
-            state.rule_id, state.sequence_id, state.element_id + 1, state.rule_start_pos, 0
+            state.rule_id,
+            state.sequence_id,
+            state.element_id + 1,
+            state.rule_start_pos,
+            state.budget_deadline,
+            0,
+            0,
+            0,
+            state.active_temperature_rule_id,
+            state.char_budget_deadline
         });
       }
       return std::make_pair(false, false);
@@ -255,19 +387,33 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   tmp_states_visited_in_queue_.Clear();
   tmp_states_to_be_added_.clear();
   tmp_accept_stop_token_ = false;
+  tmp_completed_lazy_occurrences_.clear();
+  if (has_char_budget_rules_) {
+    tmp_char_budget_entered_ = char_budget_entry_history_.back();
+    char_count_history_.push_back(GetCurrentCharIndex() + StartsUTF8Codepoint(ch));
+  }
   const auto& latest_states = scanable_state_history_[scanable_state_history_.size() - 1];
   // Scan all the scanable states.
   for (const auto& state : latest_states) {
+    if (skip_expired_states_ && IsExpiredState(state)) {
+      continue;
+    }
     Scan(state, ch);
   }
 
   // Check if the character is accepted.
   if (tmp_process_state_queue_.empty() && tmp_states_to_be_added_.empty()) {
+    if (has_char_budget_rules_) {
+      char_count_history_.pop_back();
+    }
     return false;
   }
 
   // execute Predict and Complete for all states in the queue until empty.
   rule_id_to_completable_states_.PushBackEmpty();
+  if (capture_tracking_) {
+    capture_event_history_.PushBack(std::vector<CaptureEvent>());
+  }
   while (!tmp_process_state_queue_.empty()) {
     const ParserState& state = *tmp_process_state_queue_.front();
     tmp_process_state_queue_.pop();
@@ -281,8 +427,14 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   }
 
   // Check if the grammar is completed, and add the scannable states to the history.
+  if (!tmp_completed_lazy_occurrences_.empty()) {
+    RemoveCommittedLazyStates();
+  }
   is_completed_.push_back(tmp_accept_stop_token_);
   scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+  if (has_char_budget_rules_) {
+    char_budget_entry_history_.push_back(tmp_char_budget_entered_);
+  }
   return true;
 }
 
@@ -423,14 +575,58 @@ EarleyParser::EarleyParser(
       grammar_metadata_->rule_is_nullable.size() == static_cast<size_t>(grammar->NumRules())
   ) << "The Earley parser metadata does not match the grammar's rules";
 
+  for (int32_t i = 0; i < grammar_->NumRules(); ++i) {
+    has_budget_rules_ = has_budget_rules_ || grammar_->GetRule(i).max_tokens >= 0;
+    has_char_budget_rules_ = has_char_budget_rules_ || grammar_->GetRule(i).max_chars >= 0;
+    if (has_budget_rules_ && has_char_budget_rules_) {
+      break;
+    }
+  }
+  for (int32_t i = 0; i < grammar_->NumRules(); ++i) {
+    const auto& rule = grammar_->GetRule(i);
+    const auto* suffix_stop_info = grammar_->GetSuffixStopInfo(i);
+    capture_tracking_ =
+        capture_tracking_ || !rule.capture_name.empty() ||
+        (suffix_stop_info != nullptr && !suffix_stop_info->stop_capture_name.empty());
+    has_hidden_capture_rules_ =
+        has_hidden_capture_rules_ ||
+        (suffix_stop_info != nullptr &&
+         (suffix_stop_info->hidden_suffix_bytes > 0 || suffix_stop_info->hidden_stop_bytes > 0));
+    if (capture_tracking_ && has_hidden_capture_rules_) {
+      break;
+    }
+  }
+
   const ParserState init = initial_state.has_value() ? *initial_state : RootInitialState();
   if (!need_expand) {
     rule_id_to_completable_states_.PushBackEmpty();
     is_completed_.push_back(false);
     scanable_state_history_.PushBack({init});
+    if (capture_tracking_) {
+      capture_event_history_.PushBack(std::vector<CaptureEvent>());
+    }
+    if (has_char_budget_rules_) {
+      char_count_history_.push_back(0);
+      char_budget_entry_history_.push_back(false);
+    }
     return;
   }
   PushStateAndExpand(init);
+}
+
+void EarleyParser::RemoveCommittedLazyStates() {
+  auto is_committed = [&](const ParserState* state) {
+    for (const auto& [rule_id, rule_start_pos] : tmp_completed_lazy_occurrences_) {
+      if (state->rule_id == rule_id && state->rule_start_pos == rule_start_pos) {
+        return true;
+      }
+    }
+    return false;
+  };
+  tmp_states_to_be_added_.erase(
+      std::remove_if(tmp_states_to_be_added_.begin(), tmp_states_to_be_added_.end(), is_committed),
+      tmp_states_to_be_added_.end()
+  );
 }
 
 ParserState EarleyParser::RootInitialState() const {
@@ -441,7 +637,12 @@ ParserState EarleyParser::RootInitialState() const {
       grammar_->GetRule(root_rule_id).body_expr_id,
       grammar_->per_rule_fsms[root_rule_id]->GetFsm().GetStart(),
       ParserState::kNoPrevInputPos,
-      0
+      DeadlineForRule(root_rule_id, -1),
+      0,
+      0,
+      0,
+      ResolveActiveTemperatureRule(root_rule_id, -1),
+      CharDeadlineForRule(root_rule_id, -1)
   );
 }
 
@@ -449,8 +650,12 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
   tmp_states_visited_in_queue_.Clear();
   tmp_accept_stop_token_ = false;
   tmp_states_to_be_added_.clear();
+  tmp_completed_lazy_occurrences_.clear();
   Enqueue(state);
   rule_id_to_completable_states_.PushBackEmpty();
+  if (capture_tracking_) {
+    capture_event_history_.PushBack(std::vector<CaptureEvent>());
+  }
   while (!tmp_process_state_queue_.empty()) {
     const ParserState& state = *tmp_process_state_queue_.front();
     tmp_process_state_queue_.pop();
@@ -462,8 +667,15 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
       tmp_states_to_be_added_.push_back(&state);
     }
   }
+  if (!tmp_completed_lazy_occurrences_.empty()) {
+    RemoveCommittedLazyStates();
+  }
   is_completed_.push_back(tmp_accept_stop_token_);
   scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+  if (has_char_budget_rules_) {
+    char_count_history_.push_back(GetCurrentCharIndex());
+    char_budget_entry_history_.push_back(tmp_char_budget_entered_);
+  }
 }
 
 void EarleyParser::Reset() {
@@ -471,6 +683,13 @@ void EarleyParser::Reset() {
   scanable_state_history_.PopBack(scanable_state_history_.size());
   is_completed_.clear();
   stop_token_is_accepted_ = false;
+  if (capture_tracking_) {
+    capture_event_history_.PopBack(capture_event_history_.size());
+  }
+  char_count_history_.clear();
+  char_budget_entry_history_.clear();
+  tmp_char_budget_entered_ = false;
+  capture_recording_ = false;
   XGRAMMAR_DCHECK(tmp_process_state_queue_.empty());
   PushStateAndExpand(RootInitialState());
 }
@@ -497,9 +716,13 @@ void EarleyParser::ExpandNextRuleRefElement(
   }
 
   bool right_recursion_to_root = false;
+  // The right-recursion optimization elides the completion of the parent rule (and, in the
+  // to-root case, corrupts the start position of the child rule), so it must be disabled when
+  // either rule produces capture-history events.
   if (state.element_id != grammar_expr.size() - 1 ||
       sub_grammar_expr->type == GrammarExprType::kRepeat ||
-      (state.rule_start_pos == rule_id_to_completable_states_.size() - 1)) {
+      (state.rule_start_pos == rule_id_to_completable_states_.size() - 1) ||
+      RuleNeedsCaptureEvent(state.rule_id) || RuleNeedsCaptureEvent(ref_rule_id)) {
     // It's not the right recursion, or it's the root rule.
     rule_id_to_completable_states_.PushBackInLatestRow(std::make_pair(ref_rule_id, state));
   } else {
@@ -533,13 +756,25 @@ void EarleyParser::ExpandNextRuleRefElement(
 
   if (IsRuleNullable(ref_rule_id)) {
     XGRAMMAR_DCHECK(grammar_expr.type == GrammarExprType::kSequence);
-    Enqueue(
-        ParserState{state.rule_id, state.sequence_id, state.element_id + 1, state.rule_start_pos, 0}
-    );
+    Enqueue(ParserState{
+        state.rule_id,
+        state.sequence_id,
+        state.element_id + 1,
+        state.rule_start_pos,
+        state.budget_deadline,
+        0,
+        0,
+        0,
+        state.active_temperature_rule_id,
+        state.char_budget_deadline
+    });
   }
 
   // If the reference rule is not visited, we need to add it to the queue.
   const auto& ref_rule = grammar_->GetRule(ref_rule_id);
+  if (ref_rule.max_chars >= 0) {
+    tmp_char_budget_entered_ = true;
+  }
   const auto& ref_grammar_expr_id = ref_rule.body_expr_id;
 
   XGRAMMAR_DCHECK(grammar_->per_rule_fsms[ref_rule_id].has_value());
@@ -550,7 +785,12 @@ void EarleyParser::ExpandNextRuleRefElement(
       ref_fsm.GetFsm().GetStart(),
       right_recursion_to_root ? ParserState::kNoPrevInputPos
                               : int32_t(rule_id_to_completable_states_.size() - 1),
-      0
+      DeadlineForRule(ref_rule_id, state.budget_deadline),
+      0,
+      0,
+      0,
+      ResolveActiveTemperatureRule(ref_rule_id, state.active_temperature_rule_id),
+      CharDeadlineForRule(ref_rule_id, state.char_budget_deadline)
   });
 }
 
@@ -559,7 +799,18 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
   // Add the rule reference pairs, and enqueue the epsilon edges.
   for (const auto& edge : (*complete_fsm_edges_)[state.element_id]) {
     if (edge.IsEpsilon()) {
-      Enqueue(ParserState{state.rule_id, state.sequence_id, edge.target, state.rule_start_pos, 0});
+      Enqueue(ParserState{
+          state.rule_id,
+          state.sequence_id,
+          edge.target,
+          state.rule_start_pos,
+          state.budget_deadline,
+          0,
+          0,
+          0,
+          state.active_temperature_rule_id,
+          state.char_budget_deadline
+      });
       continue;
     }
     if (edge.IsCharRange()) {
@@ -581,7 +832,18 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
       ref_rule_id = repeat_info.RuleId();
 
       if (state.repeat_count >= repeat_info.Lower()) {
-        Enqueue(ParserState{state.rule_id, state.sequence_id, target, state.rule_start_pos, 0, 0});
+        Enqueue(ParserState{
+            state.rule_id,
+            state.sequence_id,
+            target,
+            state.rule_start_pos,
+            state.budget_deadline,
+            0,
+            0,
+            0,
+            state.active_temperature_rule_id,
+            state.char_budget_deadline
+        });
       }
       if (state.repeat_count >= repeat_info.Upper()) {
         continue;
@@ -597,8 +859,10 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
     }
     const uint8_t target_flags = GetFsmStateFlags(state.rule_id, target);
     if (!is_repeat && !(target_flags & kFsmStateHasEdges) && (target_flags & kFsmStateEnd) &&
-        state.rule_start_pos != static_cast<int32_t>(rule_id_to_completable_states_.size() - 1)) {
-      // It's a right recursion. We can optimize it.
+        state.rule_start_pos != static_cast<int32_t>(rule_id_to_completable_states_.size() - 1) &&
+        !RuleNeedsCaptureEvent(state.rule_id) && !RuleNeedsCaptureEvent(ref_rule_id)) {
+      // It's a right recursion. We can optimize it. The optimization elides the completion of
+      // the parent rule, so it is disabled when either rule produces capture-history events.
       // If it's the right recursion, we need to add the ancestors of the parent state.
       if (state.rule_start_pos == ParserState::kNoPrevInputPos) {
         // In this case, we can mark the new state as the root state to speed up.
@@ -636,26 +900,55 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
                  state.sequence_id,
                  state.element_id,
                  state.rule_start_pos,
+                 state.budget_deadline,
                  0,
-                 state.repeat_count
+                 state.repeat_count,
+                 0,
+                 state.active_temperature_rule_id,
+                 state.char_budget_deadline
              }}
         );
       } else {
         // For kRuleRef: store element_id = target (post-transition state)
         rule_id_to_completable_states_.PushBackInLatestRow(
             {ref_rule_id,
-             ParserState{state.rule_id, state.sequence_id, target, state.rule_start_pos, 0}}
+             ParserState{
+                 state.rule_id,
+                 state.sequence_id,
+                 target,
+                 state.rule_start_pos,
+                 state.budget_deadline,
+                 0,
+                 0,
+                 0,
+                 state.active_temperature_rule_id,
+                 state.char_budget_deadline
+             }}
         );
       }
     }
 
     // Check if the reference rule can be empty.
     if (!is_repeat && IsRuleNullable(ref_rule_id)) {
-      Enqueue(ParserState{state.rule_id, state.sequence_id, target, state.rule_start_pos, 0});
+      Enqueue(ParserState{
+          state.rule_id,
+          state.sequence_id,
+          target,
+          state.rule_start_pos,
+          state.budget_deadline,
+          0,
+          0,
+          0,
+          state.active_temperature_rule_id,
+          state.char_budget_deadline
+      });
     }
 
     // If the reference rule is not visited, we need to add it to the queue.
     const auto& ref_rule = grammar_->GetRule(ref_rule_id);
+    if (ref_rule.max_chars >= 0) {
+      tmp_char_budget_entered_ = true;
+    }
     const auto& ref_grammar_expr_id = ref_rule.body_expr_id;
 
     XGRAMMAR_DCHECK(grammar_->per_rule_fsms[ref_rule_id].has_value());
@@ -666,7 +959,12 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
         ref_fsm.GetFsm().GetStart(),
         right_recursion_to_root ? ParserState::kNoPrevInputPos
                                 : int32_t(rule_id_to_completable_states_.size() - 1),
-        0
+        DeadlineForRule(ref_rule_id, state.budget_deadline),
+        0,
+        0,
+        0,
+        ResolveActiveTemperatureRule(ref_rule_id, state.active_temperature_rule_id),
+        CharDeadlineForRule(ref_rule_id, state.char_budget_deadline)
     });
   }
 }
@@ -1015,20 +1313,36 @@ void EarleyParser::ScanAtomicToken(const ParserState& state, int32_t token_id) {
   }
 }
 
-bool EarleyParser::AdvanceAtomicToken(int32_t token_id, bool debug_print) {
+bool EarleyParser::AdvanceAtomicToken(
+    int32_t token_id, bool debug_print, int32_t token_char_count
+) {
   XGRAMMAR_DCHECK(tmp_process_state_queue_.empty())
       << "The tmp_process_state_queue_ should be empty before AdvanceAtomicToken.";
   tmp_states_visited_in_queue_.Clear();
   tmp_states_to_be_added_.clear();
   tmp_accept_stop_token_ = false;
+  tmp_completed_lazy_occurrences_.clear();
+  if (has_char_budget_rules_) {
+    tmp_char_budget_entered_ = char_budget_entry_history_.back();
+    char_count_history_.push_back(GetCurrentCharIndex() + token_char_count);
+  }
   const auto& latest_states = scanable_state_history_[scanable_state_history_.size() - 1];
   for (const auto& state : latest_states) {
+    if (skip_expired_states_ && IsExpiredState(state)) {
+      continue;
+    }
     ScanAtomicToken(state, token_id);
   }
   if (tmp_process_state_queue_.empty() && tmp_states_to_be_added_.empty()) {
+    if (has_char_budget_rules_) {
+      char_count_history_.pop_back();
+    }
     return false;
   }
   rule_id_to_completable_states_.PushBackEmpty();
+  if (capture_tracking_) {
+    capture_event_history_.PushBack(std::vector<CaptureEvent>());
+  }
   while (!tmp_process_state_queue_.empty()) {
     const ParserState& state = *tmp_process_state_queue_.front();
     tmp_process_state_queue_.pop();
@@ -1040,8 +1354,14 @@ bool EarleyParser::AdvanceAtomicToken(int32_t token_id, bool debug_print) {
       tmp_states_to_be_added_.push_back(&state);
     }
   }
+  if (!tmp_completed_lazy_occurrences_.empty()) {
+    RemoveCommittedLazyStates();
+  }
   is_completed_.push_back(tmp_accept_stop_token_);
   scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+  if (has_char_budget_rules_) {
+    char_budget_entry_history_.push_back(tmp_char_budget_entered_);
+  }
   return true;
 }
 
