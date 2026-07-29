@@ -269,6 +269,14 @@ struct EarleyParserGrammarMetadata {
   std::vector<uint8_t> rule_has_atomic_token_edges;
 
   /*!
+   * \brief Whether a rule is context-dependent or can run below a context-dependent rule.
+   *
+   * Reusable masks are shared between occurrences of a helper rule. Rules below token/character
+   * budgets, lazy rules, suffix stops, or temperature rules must retain per-occurrence parsing.
+   */
+  std::vector<uint8_t> rule_has_context_dependent_ancestor;
+
+  /*!
    * \brief State-to-table mapping for deterministic states with several character edges.
    * A value of -1 means AdvanceFsm should scan the state's edges.
    */
@@ -283,6 +291,7 @@ struct EarleyParserGrammarMetadata {
   friend std::size_t MemorySize(const EarleyParserGrammarMetadata& metadata) {
     return MemorySize(metadata.fsm_state_flags) + MemorySize(metadata.rule_is_nullable) +
            MemorySize(metadata.rule_has_atomic_token_edges) +
+           MemorySize(metadata.rule_has_context_dependent_ancestor) +
            MemorySize(metadata.deterministic_byte_transition_ids) +
            MemorySize(metadata.deterministic_byte_transitions);
   }

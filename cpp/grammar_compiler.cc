@@ -981,7 +981,7 @@ std::pair<bool, bool> GrammarMatcherForTokenMaskCache::IsTokenPassLookaheadAsser
     return {accepted, can_reach_end};
   }
   auto lookahead_state =
-      ParserState(/*rule_id*/ -1, lookahead_assertion_id, 0, ParserState::kNoPrevInputPos, 0);
+      ParserState(/*rule_id*/ -1, lookahead_assertion_id, 0, ParserState::kNoPrevInputPos, -1, 0);
   PushStateAndExpand(lookahead_state);
   int token_len = token.size();
   if (IsCompleted()) {
@@ -1208,6 +1208,7 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
       first_byte_cache_ != nullptr && token_edge_accepted.empty() && !speculative_calculation &&
       !is_root_rule && grammar_->GetRule(init_rule_id_).lookahead_assertion_id == -1 &&
       initial_state_.sub_element_id == 0 && !is_tag_dispatch_rule &&
+      !grammar_metadata_->rule_has_context_dependent_ancestor[init_rule_id_] &&
       !grammar_->per_rule_fsm_state_cache_keys[init_rule_id_].empty();
   const auto optional_character_class_chain =
       can_use_first_byte_cache ? RecognizeOptionalCharacterClassChain(grammar_, init_rule_id_)
@@ -1776,7 +1777,9 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   tmp_can_reach_end_prefix_or_stack_.push_back(false);
 
   // Try to get the crossing cache.
-  bool rule_level_cache_is_available = !has_char_budget_rules_ && rule_level_cache_ != nullptr;
+  bool rule_level_cache_is_available =
+      !has_char_budget_rules_ && rule_level_cache_ != nullptr &&
+      !grammar_metadata_->rule_has_context_dependent_ancestor[init_rule_id_];
   std::optional<uint64_t> fsm_hash = std::nullopt;
   int32_t new_state_id = -1;
   int32_t cache_state_count = -1;
@@ -2422,7 +2425,7 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
       lookahead_hash = GrammarFSMHasher::HashSequence(compiled_grammar_impl->grammar, lookahead_id);
     }
     auto cur_stack_element =
-        ParserState(rule_id, rule.body_expr_id, 0, ParserState::kNoPrevInputPos, 0);
+        ParserState(rule_id, rule.body_expr_id, 0, ParserState::kNoPrevInputPos, -1, 0);
     std::unordered_set<int> reachable_states;
     rule_fsm->GetFsm().GetReachableStates(&reachable_states);
     for (int i : reachable_states) {
@@ -2432,7 +2435,10 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
       }
       ++scanable_state_count;
       std::optional<AdaptiveMaskTaskKey> exact_task_key;
-      if (rule_id != root_rule_id && (lookahead_id == -1 || lookahead_hash.has_value())) {
+      if (rule_id != root_rule_id &&
+          !compiled_grammar_impl->earley_parser_metadata
+               .rule_has_context_dependent_ancestor[rule_id] &&
+          (lookahead_id == -1 || lookahead_hash.has_value())) {
         const auto& state_cache_keys =
             compiled_grammar_impl->grammar->per_rule_fsm_state_cache_keys[rule_id];
         const auto state_cache_key =

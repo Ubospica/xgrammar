@@ -444,6 +444,7 @@ EarleyParserGrammarMetadata::EarleyParserGrammarMetadata(const Grammar& grammar)
       ),
       rule_is_nullable(grammar->NumRules(), 0),
       rule_has_atomic_token_edges(grammar->NumRules(), 0),
+      rule_has_context_dependent_ancestor(grammar->NumRules(), 0),
       deterministic_byte_transition_ids(grammar->complete_fsm.NumStates(), -1) {
   XGRAMMAR_CHECK(grammar->optimized)
       << "Cannot build Earley parser metadata for an unoptimized grammar";
@@ -454,6 +455,10 @@ EarleyParserGrammarMetadata::EarleyParserGrammarMetadata(const Grammar& grammar)
 
   std::vector<std::vector<int32_t>> referenced_rules(grammar->NumRules());
   for (int32_t rule_id = 0; rule_id < grammar->NumRules(); ++rule_id) {
+    const auto& rule = grammar->GetRule(rule_id);
+    rule_has_context_dependent_ancestor[rule_id] = rule.max_tokens >= 0 || rule.max_chars >= 0 ||
+                                                   rule.is_lazy || rule.temperature.has_value() ||
+                                                   grammar->GetSuffixStopInfo(rule_id) != nullptr;
     const auto& rule_fsm = grammar->per_rule_fsms[rule_id]->GetFsm();
     std::unordered_set<int> reachable_states;
     rule_fsm.GetReachableStates(&reachable_states);
@@ -483,6 +488,22 @@ EarleyParserGrammarMetadata::EarleyParserGrammarMetadata(const Grammar& grammar)
           rule_has_atomic_token_edges[rule_id] = 1;
           changed = true;
           break;
+        }
+      }
+    }
+  }
+
+  changed = true;
+  while (changed) {
+    changed = false;
+    for (int32_t rule_id = 0; rule_id < grammar->NumRules(); ++rule_id) {
+      if (!rule_has_context_dependent_ancestor[rule_id]) {
+        continue;
+      }
+      for (int32_t referenced_rule_id : referenced_rules[rule_id]) {
+        if (!rule_has_context_dependent_ancestor[referenced_rule_id]) {
+          rule_has_context_dependent_ancestor[referenced_rule_id] = 1;
+          changed = true;
         }
       }
     }
