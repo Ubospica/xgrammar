@@ -461,6 +461,19 @@ def _mask_trace(compiled_grammar: xgr.CompiledGrammar, input_str: str):
     return trace
 
 
+def _assert_mask_traces_equal(
+    eager: xgr.CompiledGrammar, dynamic: xgr.CompiledGrammar, input_string: str
+) -> None:
+    expected_trace = _mask_trace(eager, input_string)
+    actual_trace = _mask_trace(dynamic, input_string)
+    assert len(actual_trace) == len(expected_trace)
+    for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(
+        expected_trace, actual_trace
+    ):
+        assert actual_apply == expected_apply
+        torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
 DYNAMIC_COMPILATION_VOCABULARY = [chr(value) for value in range(32, 127)] + [
     "Ada",
     "hello",
@@ -547,14 +560,92 @@ def test_dynamic_compilation_matches_precompiled_masks(compile_grammar, input_st
         xgr.GrammarCompiler(tokenizer_info, max_threads=1, enable_dynamic_compilation=True)
     )
 
-    expected_trace = _mask_trace(precompiled_grammar, input_string)
-    actual_trace = _mask_trace(dynamically_compiled_grammar, input_string)
-    assert len(actual_trace) == len(expected_trace)
-    for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(
-        expected_trace, actual_trace
-    ):
-        assert actual_apply == expected_apply
-        torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+    _assert_mask_traces_equal(precompiled_grammar, dynamically_compiled_grammar, input_string)
+
+
+@pytest.mark.parametrize(
+    ("character_class", "accepted_character", "rejected_character"),
+    [("[a-z]", "a", "A"), ("[^b]", "é", "b"), ("[a-zа-я一-龥]", "中", "!")],
+)
+def test_dynamic_compilation_large_character_class_repeat_masks(
+    character_class, accepted_character, rejected_character
+):
+    """Compare masks around the unzipped/repeat-ref boundary, including partial UTF-8 tokens."""
+    vocabulary = [
+        ">",
+        "<",
+        accepted_character,
+        rejected_character,
+        accepted_character * 127,
+        accepted_character * 128,
+        accepted_character * 129,
+        accepted_character * 255,
+        accepted_character * 256,
+        accepted_character * 127 + rejected_character,
+        accepted_character * 128 + rejected_character,
+        b"\xe4",
+        b"\xe4\xb8",
+        b"\xff",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    grammar = f"""
+root ::= ">" value "<"
+value ::= {character_class}{{1,255}}
+"""
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_grammar(grammar)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar(grammar)
+
+    _assert_mask_traces_equal(eager, dynamic, ">" + accepted_character * 255 + "<")
+
+
+def test_dynamic_compilation_large_json_schema_string_masks():
+    """Exercise the bounded character-class helpers emitted by the JSON Schema converter."""
+    vocabulary = [
+        '"',
+        "a",
+        "A",
+        "a" * 127,
+        "a" * 128,
+        "a" * 129,
+        "a" * 255,
+        "a" * 256,
+        "a" * 127 + '"',
+        "a" * 128 + '"',
+        b"\xe4",
+        b"\xe4\xb8",
+        b"\xff",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    schema = {"type": "string", "minLength": 1, "maxLength": 255}
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_json_schema(schema)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(schema)
+
+    _assert_mask_traces_equal(eager, dynamic, '"' + "a" * 255 + '"')
+
+
+def test_dynamic_compilation_character_class_repeat_with_max_chars():
+    """Rules with runtime attributes bypass direct masks and retain eager mask semantics."""
+    vocabulary = [">", "a", "A", "a" * 127, "a" * 128, "a" * 129, "a" * 128 + ">"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    grammar = xgr.Grammar.from_lark(
+        'start: value ">"\nvalue[max_chars=128]: /[a-z]*/', tokenizer_info=tokenizer_info
+    )
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_grammar(grammar)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar(grammar)
+
+    _assert_mask_traces_equal(eager, dynamic, "a" * 128 + ">")
 
 
 def test_dynamic_compilation_populates_and_reuses_mask_cache():

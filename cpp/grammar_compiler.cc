@@ -242,6 +242,7 @@ class OptionalCharacterClassTokenSummaryCache {
   struct TokenSummary {
     int32_t sorted_vocab_index;
     int32_t locally_consumed_characters;
+    int32_t completed_characters;
     bool consumed_whole_token;
     bool has_completed_character_prefix;
   };
@@ -314,6 +315,15 @@ struct OptionalCharacterClassChain {
   int32_t remaining_count;
 };
 
+uint64_t HashOptionalCharacterClass(const Grammar::Impl::GrammarExpr& character_class) {
+  uint64_t result =
+      HashCombine(uint64_t{0x4f50545f43484152ULL}, static_cast<int32_t>(character_class.type));
+  for (int32_t value : character_class) {
+    HashCombineBinary(result, static_cast<uint64_t>(value));
+  }
+  return result;
+}
+
 /*!
  * \brief Recognize the helper-rule chain emitted for a bounded optional character-class repeat.
  *
@@ -364,11 +374,7 @@ std::optional<OptionalCharacterClassChain> RecognizeOptionalCharacterClassChain(
     if (repeated_element.type != GrammarExprType::kCharacterClass) {
       return std::nullopt;
     }
-    uint64_t current_character_class_hash =
-        HashCombine(uint64_t{0x4f50545f43484152ULL}, static_cast<int32_t>(repeated_element.type));
-    for (int32_t value : repeated_element) {
-      HashCombineBinary(current_character_class_hash, static_cast<uint64_t>(value));
-    }
+    const uint64_t current_character_class_hash = HashOptionalCharacterClass(repeated_element);
     if (character_class_hash.has_value() && *character_class_hash != current_character_class_hash) {
       return std::nullopt;
     }
@@ -390,6 +396,80 @@ std::optional<OptionalCharacterClassChain> RecognizeOptionalCharacterClassChain(
     rule_id = next[0];
   }
   return std::nullopt;
+}
+
+std::optional<OptionalCharacterClassChain> RecognizeBoundedCharacterClassSequence(
+    const Grammar& grammar, int32_t initial_rule_id
+) {
+  using GrammarExprType = Grammar::Impl::GrammarExprType;
+
+  if (auto optional_chain = RecognizeOptionalCharacterClassChain(grammar, initial_rule_id)) {
+    return optional_chain;
+  }
+
+  const auto& body = grammar->GetGrammarExpr(grammar->GetRule(initial_rule_id).body_expr_id);
+  if (body.type != GrammarExprType::kChoices || body.size() != 1) {
+    return std::nullopt;
+  }
+  const auto& sequence = grammar->GetGrammarExpr(body[0]);
+  if (sequence.type != GrammarExprType::kSequence || sequence.size() != 2) {
+    return std::nullopt;
+  }
+  const auto& first_character = grammar->GetGrammarExpr(sequence[0]);
+  const auto& optional_tail_ref = grammar->GetGrammarExpr(sequence[1]);
+  if (first_character.type != GrammarExprType::kCharacterClass ||
+      optional_tail_ref.type != GrammarExprType::kRuleRef || optional_tail_ref.size() != 1) {
+    return std::nullopt;
+  }
+  auto optional_tail = RecognizeOptionalCharacterClassChain(grammar, optional_tail_ref[0]);
+  if (!optional_tail.has_value() ||
+      optional_tail->character_class_hash != HashOptionalCharacterClass(first_character)) {
+    return std::nullopt;
+  }
+  optional_tail->character_class_expr_id = sequence[0];
+  ++optional_tail->remaining_count;
+  return optional_tail;
+}
+
+struct ExactCharacterClassLookahead {
+  int32_t character_class_expr_id;
+  int32_t lookahead_character_count;
+};
+
+std::optional<ExactCharacterClassLookahead> RecognizeExactCharacterClassLookahead(
+    const Grammar& grammar, int32_t rule_id
+) {
+  using GrammarExprType = Grammar::Impl::GrammarExprType;
+
+  const auto& rule = grammar->GetRule(rule_id);
+  if (!rule.is_exact_lookahead || rule.lookahead_assertion_id == -1) {
+    return std::nullopt;
+  }
+  const auto& body = grammar->GetGrammarExpr(rule.body_expr_id);
+  if (body.type != GrammarExprType::kChoices || body.size() != 1) {
+    return std::nullopt;
+  }
+  const auto& body_sequence = grammar->GetGrammarExpr(body[0]);
+  if (body_sequence.type != GrammarExprType::kSequence || body_sequence.size() != 1) {
+    return std::nullopt;
+  }
+  const auto& character_class = grammar->GetGrammarExpr(body_sequence[0]);
+  if (character_class.type != GrammarExprType::kCharacterClass) {
+    return std::nullopt;
+  }
+  const auto& lookahead = grammar->GetGrammarExpr(rule.lookahead_assertion_id);
+  if (lookahead.type != GrammarExprType::kSequence || lookahead.size() == 0) {
+    return std::nullopt;
+  }
+  for (int32_t element_id : lookahead) {
+    const auto& element = grammar->GetGrammarExpr(element_id);
+    if (element.type != GrammarExprType::kCharacterClass ||
+        element.size() != character_class.size() ||
+        !std::equal(element.begin(), element.end(), character_class.begin())) {
+      return std::nullopt;
+    }
+  }
+  return ExactCharacterClassLookahead{body_sequence[0], static_cast<int32_t>(lookahead.size())};
 }
 
 OptionalCharacterClassTokenSummaryCache::Result BuildOptionalCharacterClassTokenSummaries(
@@ -509,6 +589,7 @@ OptionalCharacterClassTokenSummaryCache::Result BuildOptionalCharacterClassToken
       result.push_back(OptionalCharacterClassTokenSummaryCache::TokenSummary{
           sorted_vocab_index,
           locally_consumed_characters,
+          completed_characters,
           consumed_whole_token,
           completed_characters > 0
       });
@@ -568,6 +649,9 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
   AdaptiveTokenMask GetAdaptiveTokenMask(bool is_root_rule);
 
   std::optional<AdaptiveTokenMask> GetOptionalCharacterClassDirectMask(bool is_root_rule) const;
+
+  std::optional<AdaptiveTokenMask> GetExactCharacterClassLookaheadDirectMask(bool is_root_rule
+  ) const;
 
   /*!
    * \brief Get the token mask for the given ParserState.
@@ -689,10 +773,11 @@ std::optional<AdaptiveTokenMask>
 GrammarMatcherForTokenMaskCache::GetOptionalCharacterClassDirectMask(bool is_root_rule) const {
   if (is_root_rule || initial_state_.sub_element_id != 0 ||
       grammar_->GetRule(init_rule_id_).lookahead_assertion_id != -1 ||
-      initial_state_.element_id != grammar_->per_rule_fsms[init_rule_id_]->GetFsm().GetStart()) {
+      initial_state_.element_id != grammar_->per_rule_fsms[init_rule_id_]->GetFsm().GetStart() ||
+      grammar_metadata_->rule_has_context_dependent_ancestor[init_rule_id_]) {
     return std::nullopt;
   }
-  const auto chain = RecognizeOptionalCharacterClassChain(grammar_, init_rule_id_);
+  const auto chain = RecognizeBoundedCharacterClassSequence(grammar_, init_rule_id_);
   if (!chain.has_value()) {
     return std::nullopt;
   }
@@ -718,6 +803,46 @@ GrammarMatcherForTokenMaskCache::GetOptionalCharacterClassDirectMask(bool is_roo
       accepted_indices.push_back(summary.sorted_vocab_index);
     } else if (summary.has_completed_character_prefix) {
       uncertain_indices.push_back(summary.sorted_vocab_index);
+    }
+  }
+  return AdaptiveTokenMask(
+      vocab_size, sorted_vocab, std::move(accepted_indices), std::move(uncertain_indices)
+  );
+}
+
+std::optional<AdaptiveTokenMask>
+GrammarMatcherForTokenMaskCache::GetExactCharacterClassLookaheadDirectMask(bool is_root_rule
+) const {
+  if (is_root_rule || initial_state_.sub_element_id != 0 ||
+      initial_state_.element_id != grammar_->per_rule_fsms[init_rule_id_]->GetFsm().GetStart() ||
+      grammar_metadata_->rule_has_context_dependent_ancestor[init_rule_id_]) {
+    return std::nullopt;
+  }
+  const auto recognized = RecognizeExactCharacterClassLookahead(grammar_, init_rule_id_);
+  if (!recognized.has_value()) {
+    return std::nullopt;
+  }
+  const auto& character_class = grammar_->GetGrammarExpr(recognized->character_class_expr_id);
+  const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
+  const size_t vocab_size = tokenizer_info_.GetVocabSize();
+  OptionalCharacterClassTokenSummaryCache::Key summary_key;
+  summary_key.character_class.assign(character_class.begin(), character_class.end());
+  XGRAMMAR_DCHECK(optional_character_class_token_summary_cache_ != nullptr);
+  const auto token_summaries =
+      optional_character_class_token_summary_cache_->GetOrCreate(summary_key, [&]() {
+        return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
+      });
+
+  std::vector<int32_t> accepted_indices;
+  std::vector<int32_t> uncertain_indices;
+  accepted_indices.reserve(token_summaries->size());
+  uncertain_indices.reserve(token_summaries->size() / 16);
+  const int32_t completed_characters_for_uncertainty = recognized->lookahead_character_count + 1;
+  for (const auto& summary : *token_summaries) {
+    if (summary.completed_characters >= completed_characters_for_uncertainty) {
+      uncertain_indices.push_back(summary.sorted_vocab_index);
+    } else if (summary.consumed_whole_token) {
+      accepted_indices.push_back(summary.sorted_vocab_index);
     }
   }
   return AdaptiveTokenMask(
@@ -1870,7 +1995,11 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
     }
   }
 
-  if (auto direct_optional_chain_mask = GetOptionalCharacterClassDirectMask(is_root_rule)) {
+  auto direct_character_class_mask = GetOptionalCharacterClassDirectMask(is_root_rule);
+  if (!direct_character_class_mask.has_value()) {
+    direct_character_class_mask = GetExactCharacterClassLookaheadDirectMask(is_root_rule);
+  }
+  if (direct_character_class_mask.has_value()) {
 #ifdef XGRAMMAR_PROFILE_COMPILE
     profile_counters_.used_optional_character_class_direct_mask = true;
 #endif
@@ -1880,10 +2009,10 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
           new_state_id,
           cache_state_count,
           cache_edge_count,
-          *direct_optional_chain_mask
+          *direct_character_class_mask
       );
     }
-    return std::move(*direct_optional_chain_mask);
+    return std::move(*direct_character_class_mask);
   }
 
   std::bitset<256> first_character_mask;
