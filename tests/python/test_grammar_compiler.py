@@ -461,6 +461,10 @@ def _mask_trace(compiled_grammar: xgr.CompiledGrammar, input_str: str):
     return trace
 
 
+def _token_is_allowed(bitmask: torch.Tensor, token_id: int) -> bool:
+    return bool((int(bitmask[0, token_id // 32]) >> (token_id % 32)) & 1)
+
+
 def _assert_mask_traces_equal(
     eager: xgr.CompiledGrammar, dynamic: xgr.CompiledGrammar, input_string: str
 ) -> None:
@@ -570,7 +574,7 @@ def test_dynamic_compilation_matches_precompiled_masks(compile_grammar, input_st
 def test_dynamic_compilation_large_character_class_repeat_masks(
     character_class, accepted_character, rejected_character
 ):
-    """Compare masks around the unzipped/repeat-ref boundary, including partial UTF-8 tokens."""
+    """Check exact masks around the bounded repeat boundary, including partial UTF-8 tokens."""
     vocabulary = [
         ">",
         "<",
@@ -592,14 +596,33 @@ def test_dynamic_compilation_large_character_class_repeat_masks(
 root ::= ">" value "<"
 value ::= {character_class}{{1,255}}
 """
-    eager = xgr.GrammarCompiler(
-        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
-    ).compile_grammar(grammar)
     dynamic = xgr.GrammarCompiler(
         tokenizer_info, max_threads=1, enable_dynamic_compilation=True
     ).compile_grammar(grammar)
 
-    _assert_mask_traces_equal(eager, dynamic, ">" + accepted_character * 255 + "<")
+    matcher = xgr.GrammarMatcher(dynamic, terminate_without_stop_token=True)
+    bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    assert matcher.accept_string(">")
+    matcher.fill_next_token_bitmask(bitmask)
+    assert _token_is_allowed(bitmask, vocabulary.index(accepted_character * 255))
+    assert not _token_is_allowed(bitmask, vocabulary.index(accepted_character * 256))
+
+    assert matcher.accept_string(accepted_character * 127)
+    xgr.reset_token_bitmask(bitmask)
+    matcher.fill_next_token_bitmask(bitmask)
+    assert _token_is_allowed(bitmask, vocabulary.index(accepted_character * 128))
+    assert not _token_is_allowed(bitmask, vocabulary.index(accepted_character * 129))
+    assert not _token_is_allowed(
+        bitmask, vocabulary.index(accepted_character * 128 + rejected_character)
+    )
+
+    assert matcher.accept_string(accepted_character * 128)
+    xgr.reset_token_bitmask(bitmask)
+    matcher.fill_next_token_bitmask(bitmask)
+    assert _token_is_allowed(bitmask, vocabulary.index("<"))
+    assert not _token_is_allowed(bitmask, vocabulary.index(accepted_character))
+    assert _compiled_accepts(dynamic, ">" + accepted_character * 255 + "<")
+    assert not _compiled_accepts(dynamic, ">" + accepted_character * 256 + "<")
 
 
 def test_dynamic_compilation_large_json_schema_string_masks():
@@ -621,14 +644,31 @@ def test_dynamic_compilation_large_json_schema_string_masks():
     ]
     tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
     schema = {"type": "string", "minLength": 1, "maxLength": 255}
-    eager = xgr.GrammarCompiler(
-        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
-    ).compile_json_schema(schema)
     dynamic = xgr.GrammarCompiler(
         tokenizer_info, max_threads=1, enable_dynamic_compilation=True
     ).compile_json_schema(schema)
 
-    _assert_mask_traces_equal(eager, dynamic, '"' + "a" * 255 + '"')
+    matcher = xgr.GrammarMatcher(dynamic, terminate_without_stop_token=True)
+    bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    assert matcher.accept_string('"')
+    matcher.fill_next_token_bitmask(bitmask)
+    assert _token_is_allowed(bitmask, vocabulary.index("a" * 255))
+    assert not _token_is_allowed(bitmask, vocabulary.index("a" * 256))
+
+    assert matcher.accept_string("a" * 127)
+    xgr.reset_token_bitmask(bitmask)
+    matcher.fill_next_token_bitmask(bitmask)
+    assert _token_is_allowed(bitmask, vocabulary.index("a" * 128))
+    assert not _token_is_allowed(bitmask, vocabulary.index("a" * 129))
+    assert _token_is_allowed(bitmask, vocabulary.index("a" * 128 + '"'))
+
+    assert matcher.accept_string("a" * 128)
+    xgr.reset_token_bitmask(bitmask)
+    matcher.fill_next_token_bitmask(bitmask)
+    assert _token_is_allowed(bitmask, vocabulary.index('"'))
+    assert not _token_is_allowed(bitmask, vocabulary.index("a"))
+    assert _compiled_accepts(dynamic, '"' + "a" * 255 + '"')
+    assert not _compiled_accepts(dynamic, '"' + "a" * 256 + '"')
 
 
 def test_dynamic_compilation_character_class_repeat_with_max_chars():

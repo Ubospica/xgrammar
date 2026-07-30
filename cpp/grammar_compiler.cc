@@ -291,6 +291,11 @@ class OptionalCharacterClassTokenSummaryCache {
     }
   }
 
+  void Clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cache_.clear();
+  }
+
 #ifdef XGRAMMAR_PROFILE_COMPILE
   ~OptionalCharacterClassTokenSummaryCache() {
     XGRAMMAR_LOG(INFO) << "OptionalCharacterClassTokenSummaryProfile(builds=" << profile_builds_
@@ -598,6 +603,146 @@ OptionalCharacterClassTokenSummaryCache::Result BuildOptionalCharacterClassToken
   return result;
 }
 
+const DynamicBitset& CompiledGrammar::Impl::GetCharacterClassPrefixTokenBitset(
+    int32_t character_class_expr_id, int32_t max_characters
+) {
+  std::lock_guard<std::mutex> lock(character_class_prefix_token_bitsets_mutex);
+  const auto& character_class = grammar->GetGrammarExpr(character_class_expr_id);
+  XGRAMMAR_DCHECK(character_class.type == Grammar::Impl::GrammarExprType::kCharacterClass);
+  CharacterClassPrefixTokenBitsetKey cache_key;
+  cache_key.character_class.assign(character_class.begin(), character_class.end());
+  const auto existing = character_class_prefix_token_bitsets.find(cache_key);
+  if (existing != character_class_prefix_token_bitsets.end()) {
+    return existing->second[std::min<int32_t>(
+        max_characters, static_cast<int32_t>(existing->second.size()) - 1
+    )];
+  }
+
+  const auto& sorted_vocab = tokenizer_info.GetSortedDecodedVocab();
+  OptionalCharacterClassTokenSummaryCache::Result summaries;
+  if (optional_character_class_token_summary_cache != nullptr) {
+    OptionalCharacterClassTokenSummaryCache::Key summary_key;
+    summary_key.character_class.assign(character_class.begin(), character_class.end());
+    const auto cached =
+        optional_character_class_token_summary_cache->GetOrCreate(summary_key, [&]() {
+          return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
+        });
+    summaries = *cached;
+  } else {
+    summaries = BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
+  }
+
+  const int32_t max_token_characters = tokenizer_info.ImplPtr()->GetMaxTokenChars();
+  std::vector<std::vector<int32_t>> token_ids_by_character_count(max_token_characters + 1);
+  for (const auto& summary : summaries) {
+    if (summary.consumed_whole_token &&
+        summary.locally_consumed_characters <= max_token_characters) {
+      token_ids_by_character_count[summary.locally_consumed_characters].push_back(
+          sorted_vocab[summary.sorted_vocab_index].first
+      );
+    }
+  }
+  std::vector<DynamicBitset> bitsets;
+  bitsets.reserve(max_token_characters + 1);
+  DynamicBitset accumulated(tokenizer_info.GetVocabSize());
+  bitsets.push_back(accumulated);
+  for (int32_t character_count = 1; character_count <= max_token_characters; ++character_count) {
+    for (int32_t token_id : token_ids_by_character_count[character_count]) {
+      accumulated.Set(token_id);
+    }
+    bitsets.push_back(accumulated);
+  }
+  const auto inserted =
+      character_class_prefix_token_bitsets.emplace(std::move(cache_key), std::move(bitsets));
+  return inserted.first->second[std::min<int32_t>(
+      max_characters, static_cast<int32_t>(inserted.first->second.size()) - 1
+  )];
+}
+
+const AdaptiveTokenMask& CompiledGrammar::Impl::GetUnboundedCharacterClassRepeatTokenMask(
+    int32_t character_class_expr_id
+) {
+  std::lock_guard<std::mutex> lock(character_class_prefix_token_bitsets_mutex);
+  const auto& character_class = grammar->GetGrammarExpr(character_class_expr_id);
+  XGRAMMAR_DCHECK(character_class.type == Grammar::Impl::GrammarExprType::kCharacterClass);
+  CharacterClassPrefixTokenBitsetKey cache_key;
+  cache_key.character_class.assign(character_class.begin(), character_class.end());
+  const auto existing = unbounded_character_class_repeat_token_masks.find(cache_key);
+  if (existing != unbounded_character_class_repeat_token_masks.end()) {
+    return existing->second;
+  }
+
+  const auto& sorted_vocab = tokenizer_info.GetSortedDecodedVocab();
+  OptionalCharacterClassTokenSummaryCache::Key summary_key;
+  summary_key.character_class = cache_key.character_class;
+  const auto summaries =
+      optional_character_class_token_summary_cache->GetOrCreate(summary_key, [&]() {
+        return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
+      });
+  std::vector<int32_t> accepted_indices;
+  std::vector<int32_t> uncertain_indices;
+  accepted_indices.reserve(summaries->size());
+  uncertain_indices.reserve(summaries->size() / 16);
+  for (const auto& summary : *summaries) {
+    if (summary.consumed_whole_token) {
+      accepted_indices.push_back(summary.sorted_vocab_index);
+    } else if (summary.has_completed_character_prefix) {
+      uncertain_indices.push_back(summary.sorted_vocab_index);
+    }
+  }
+  const auto inserted = unbounded_character_class_repeat_token_masks.emplace(
+      std::move(cache_key),
+      AdaptiveTokenMask(
+          tokenizer_info.GetVocabSize(),
+          sorted_vocab,
+          std::move(accepted_indices),
+          std::move(uncertain_indices)
+      )
+  );
+  return inserted.first->second;
+}
+
+const AdaptiveTokenMask& CompiledGrammar::Impl::GetBoundedCharacterClassRepeatTokenMask(
+    int32_t character_class_expr_id, int32_t max_characters
+) {
+  std::lock_guard<std::mutex> lock(character_class_prefix_token_bitsets_mutex);
+  const auto& character_class = grammar->GetGrammarExpr(character_class_expr_id);
+  XGRAMMAR_DCHECK(character_class.type == Grammar::Impl::GrammarExprType::kCharacterClass);
+  BoundedCharacterClassRepeatTokenMaskKey cache_key;
+  cache_key.character_class.assign(character_class.begin(), character_class.end());
+  cache_key.max_characters = std::min(max_characters, tokenizer_info.ImplPtr()->GetMaxTokenChars());
+  const auto existing = bounded_character_class_repeat_token_masks.find(cache_key);
+  if (existing != bounded_character_class_repeat_token_masks.end()) {
+    return existing->second;
+  }
+
+  const auto& sorted_vocab = tokenizer_info.GetSortedDecodedVocab();
+  OptionalCharacterClassTokenSummaryCache::Key summary_key;
+  summary_key.character_class = cache_key.character_class;
+  const auto summaries =
+      optional_character_class_token_summary_cache->GetOrCreate(summary_key, [&]() {
+        return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
+      });
+  std::vector<int32_t> uncertain_indices;
+  uncertain_indices.reserve(summaries->size() / 8);
+  for (const auto& summary : *summaries) {
+    if (!summary.consumed_whole_token ||
+        summary.locally_consumed_characters > cache_key.max_characters) {
+      uncertain_indices.push_back(summary.sorted_vocab_index);
+    }
+  }
+  const auto inserted = bounded_character_class_repeat_token_masks.emplace(
+      std::move(cache_key),
+      AdaptiveTokenMask(
+          tokenizer_info.GetVocabSize(),
+          sorted_vocab,
+          std::vector<int32_t>{},
+          std::move(uncertain_indices)
+      )
+  );
+  return inserted.first->second;
+}
+
 /*! \brief The concrete implementation of GrammarMatcherNode. */
 class GrammarMatcherForTokenMaskCache : public EarleyParser {
  public:
@@ -649,6 +794,8 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
   AdaptiveTokenMask GetAdaptiveTokenMask(bool is_root_rule);
 
   std::optional<AdaptiveTokenMask> GetOptionalCharacterClassDirectMask(bool is_root_rule) const;
+
+  std::optional<AdaptiveTokenMask> GetSingleCharacterClassDirectMask(bool is_root_rule) const;
 
   std::optional<AdaptiveTokenMask> GetExactCharacterClassLookaheadDirectMask(bool is_root_rule
   ) const;
@@ -769,6 +916,55 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
 #endif
 };
 
+std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetSingleCharacterClassDirectMask(
+    bool is_root_rule
+) const {
+  using GrammarExprType = Grammar::Impl::GrammarExprType;
+  if (is_root_rule || initial_state_.sub_element_id != 0 ||
+      initial_state_.element_id != grammar_->per_rule_fsms[init_rule_id_]->GetFsm().GetStart() ||
+      grammar_->GetRule(init_rule_id_).lookahead_assertion_id != -1 ||
+      grammar_metadata_->rule_has_context_dependent_ancestor[init_rule_id_]) {
+    return std::nullopt;
+  }
+  const auto& body = grammar_->GetGrammarExpr(grammar_->GetRule(init_rule_id_).body_expr_id);
+  if (body.type != GrammarExprType::kChoices || body.size() != 1) {
+    return std::nullopt;
+  }
+  const auto& sequence = grammar_->GetGrammarExpr(body[0]);
+  if (sequence.type != GrammarExprType::kSequence || sequence.size() != 1) {
+    return std::nullopt;
+  }
+  const auto& character_class = grammar_->GetGrammarExpr(sequence[0]);
+  if (character_class.type != GrammarExprType::kCharacterClass) {
+    return std::nullopt;
+  }
+
+  OptionalCharacterClassTokenSummaryCache::Key summary_key;
+  summary_key.character_class.assign(character_class.begin(), character_class.end());
+  const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
+  const auto summaries =
+      optional_character_class_token_summary_cache_->GetOrCreate(summary_key, [&]() {
+        return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
+      });
+  std::vector<int32_t> accepted_indices;
+  std::vector<int32_t> uncertain_indices;
+  accepted_indices.reserve(summaries->size() / 16);
+  uncertain_indices.reserve(summaries->size());
+  for (const auto& summary : *summaries) {
+    if (summary.consumed_whole_token && summary.locally_consumed_characters <= 1) {
+      accepted_indices.push_back(summary.sorted_vocab_index);
+    } else if (summary.has_completed_character_prefix) {
+      uncertain_indices.push_back(summary.sorted_vocab_index);
+    }
+  }
+  return AdaptiveTokenMask(
+      tokenizer_info_.GetVocabSize(),
+      sorted_vocab,
+      std::move(accepted_indices),
+      std::move(uncertain_indices)
+  );
+}
+
 std::optional<AdaptiveTokenMask>
 GrammarMatcherForTokenMaskCache::GetOptionalCharacterClassDirectMask(bool is_root_rule) const {
   if (is_root_rule || initial_state_.sub_element_id != 0 ||
@@ -843,6 +1039,8 @@ GrammarMatcherForTokenMaskCache::GetExactCharacterClassLookaheadDirectMask(bool 
       uncertain_indices.push_back(summary.sorted_vocab_index);
     } else if (summary.consumed_whole_token) {
       accepted_indices.push_back(summary.sorted_vocab_index);
+    } else if (summary.has_completed_character_prefix) {
+      uncertain_indices.push_back(summary.sorted_vocab_index);
     }
   }
   return AdaptiveTokenMask(
@@ -1995,7 +2193,10 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
     }
   }
 
-  auto direct_character_class_mask = GetOptionalCharacterClassDirectMask(is_root_rule);
+  auto direct_character_class_mask = GetSingleCharacterClassDirectMask(is_root_rule);
+  if (!direct_character_class_mask.has_value()) {
+    direct_character_class_mask = GetOptionalCharacterClassDirectMask(is_root_rule);
+  }
   if (!direct_character_class_mask.has_value()) {
     direct_character_class_mask = GetExactCharacterClassLookaheadDirectMask(is_root_rule);
   }
@@ -2258,6 +2459,9 @@ class GrammarCompilerSub {
                 : nullptr
         ),
         rule_level_cache_(std::move(rule_level_cache)),
+        optional_character_class_token_summary_cache_(
+            std::make_shared<OptionalCharacterClassTokenSummaryCache>()
+        ),
         enable_dynamic_compilation_(enable_dynamic_compilation) {}
 
   CompiledGrammar CompileBuiltinJSONGrammar();
@@ -2279,6 +2483,8 @@ class GrammarCompilerSub {
   CompiledGrammar CompileGrammar(const Grammar& grammar);
 
   CompiledGrammar CompileGrammar(const std::string& ebnf_str, std::string root_rule_name);
+
+  void ClearCharacterClassCache() { optional_character_class_token_summary_cache_->Clear(); }
 
  private:
   /*! \brief The main logic. Compile the grammar with multi-threading. */
@@ -2304,6 +2510,10 @@ class GrammarCompilerSub {
 
   /*! \brief The manager of the rule level cache.*/
   std::shared_ptr<RuleLevelCache> rule_level_cache_;
+
+  /*! \brief Token/character-class summaries shared by grammars from this compiler. */
+  std::shared_ptr<OptionalCharacterClassTokenSummaryCache>
+      optional_character_class_token_summary_cache_;
 
   /*! \brief Whether token mask cache entries are generated on demand. */
   const bool enable_dynamic_compilation_;
@@ -2389,12 +2599,11 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   constexpr size_t kFirstByteCacheMaxBytes = 64 * 1024 * 1024;
   auto first_byte_cache =
       std::make_shared<FirstByteTokenMaskCache>(kFirstByteCacheMaxBytes, first_byte_vocab_buckets_);
-  auto optional_character_class_token_summary_cache =
-      std::make_shared<OptionalCharacterClassTokenSummaryCache>();
+  auto optional_character_class_token_summary_cache = optional_character_class_token_summary_cache_;
 #ifdef XGRAMMAR_PROFILE_COMPILE
   const auto fsm_hash_started_at = std::chrono::steady_clock::now();
 #endif
-  GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar);
+  GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar, !enable_dynamic_compilation_);
 #ifdef XGRAMMAR_PROFILE_COMPILE
   const auto fsm_hash_finished_at = std::chrono::steady_clock::now();
   const auto fsm_hash_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -3120,6 +3329,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
 
 void GrammarCompiler::Impl::ClearCache() {
   grammar_level_cache_.Clear();
+  no_cache_compiler_.ClearCharacterClassCache();
   if (rule_level_cache_ != nullptr) {
     rule_level_cache_->ClearCache();
   }

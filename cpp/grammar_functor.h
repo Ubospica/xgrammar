@@ -457,7 +457,7 @@ class RootRuleRenamer {
  */
 class GrammarFSMHasher {
  public:
-  static void Apply(Grammar* grammar);
+  static void Apply(Grammar* grammar, bool build_state_cache_keys = true);
   static std::optional<uint64_t> HashSequence(const Grammar& grammar, int32_t sequence_id);
 };
 
