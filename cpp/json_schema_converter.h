@@ -15,7 +15,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -219,22 +218,42 @@ class GenerateCacheManager {
   void AddCache(
       const std::string& key, int format_context, int64_t indentation_context, int32_t rule_id
   ) {
-    cache_[{key, format_context, indentation_context}] = rule_id;
+    cache_[key][{format_context, indentation_context}] = rule_id;
   }
 
   /*! \brief Get cached rule id by key. Returns std::nullopt if not found. */
   std::optional<int32_t> GetCache(
       const std::string& key, int format_context, int64_t indentation_context
   ) const {
-    auto it = cache_.find({key, format_context, indentation_context});
-    if (it != cache_.end()) {
-      return it->second;
+    auto key_it = cache_.find(key);
+    if (key_it == cache_.end()) {
+      return std::nullopt;
+    }
+    auto context_it = key_it->second.find({format_context, indentation_context});
+    if (context_it != key_it->second.end()) {
+      return context_it->second;
     }
     return std::nullopt;
   }
 
  private:
-  std::map<std::tuple<std::string, int, int64_t>, int32_t> cache_;
+  struct Context {
+    int format;
+    int64_t indentation;
+
+    bool operator==(const Context& other) const {
+      return format == other.format && indentation == other.indentation;
+    }
+  };
+
+  struct ContextHash {
+    size_t operator()(const Context& context) const {
+      return HashCombine(context.format, context.indentation);
+    }
+  };
+
+  using ContextCache = std::unordered_map<Context, int32_t, ContextHash>;
+  std::unordered_map<std::string, ContextCache> cache_;
 };
 
 /*!
@@ -479,6 +498,7 @@ class JSONSchemaConverter {
 
   std::unordered_map<std::string, int32_t> uri_to_rule_id_;  // For circular reference handling
   RefResolver ref_resolver_;  // Resolves $ref URI to SchemaSpecPtr at generate time
+  mutable std::unordered_map<const SchemaSpec*, bool> indentation_sensitivity_cache_;
 
   // Trie over property names, for key patterns that exclude specific properties
   struct TrieNode {

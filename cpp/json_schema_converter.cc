@@ -2129,7 +2129,11 @@ std::optional<int32_t> JSONSchemaConverter::GetCache(
 }
 
 bool JSONSchemaConverter::IsIndentationSensitive(const SchemaSpecPtr& spec) const {
-  return std::visit(
+  auto cached = indentation_sensitivity_cache_.find(spec.get());
+  if (cached != indentation_sensitivity_cache_.end()) {
+    return cached->second;
+  }
+  bool result = std::visit(
       [this](const auto& value) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<T, ArraySpec> || std::is_same_v<T, ObjectSpec> ||
@@ -2159,6 +2163,8 @@ bool JSONSchemaConverter::IsIndentationSensitive(const SchemaSpecPtr& spec) cons
       },
       spec->spec
   );
+  indentation_sensitivity_cache_.emplace(spec.get(), result);
+  return result;
 }
 
 int32_t JSONSchemaConverter::CreateRule(
