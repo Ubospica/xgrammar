@@ -2210,7 +2210,8 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   const auto optimizer_started_at = compile_started_at;
 #endif
   auto compiled_grammar_impl = std::make_shared<CompiledGrammar::Impl>();
-  compiled_grammar_impl->grammar = GrammarOptimizer::Apply(grammar_unoptimized);
+  compiled_grammar_impl->grammar =
+      GrammarOptimizer::Apply(grammar_unoptimized, !enable_dynamic_compilation_);
 #ifdef XGRAMMAR_PROFILE_COMPILE
   const auto optimizer_finished_at = std::chrono::steady_clock::now();
   const auto optimizer_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
