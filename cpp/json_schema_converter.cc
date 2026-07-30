@@ -701,7 +701,7 @@ class SchemaParser {
   );
 
   Config config_;
-  picojson::value root_schema_;
+  const picojson::value& root_schema_;
   std::unordered_map<std::string, SchemaSpecPtr> ref_cache_;
   std::unordered_map<std::string, SchemaSpecPtr> schema_cache_;
 };
@@ -721,14 +721,14 @@ std::string SchemaParser::ComputeCacheKey(const picojson::value& schema) {
 
   if (schema.is<picojson::object>()) {
     std::string result = "{";
-    std::vector<std::pair<std::string, picojson::value>> sorted_kv;
+    std::vector<std::pair<const std::string*, const picojson::value*>> sorted_kv;
     for (const auto& kv : schema.get<picojson::object>()) {
       if (kSkippedKeys.count(kv.first) == 0) {
-        sorted_kv.push_back(kv);
+        sorted_kv.emplace_back(&kv.first, &kv.second);
       }
     }
     std::sort(sorted_kv.begin(), sorted_kv.end(), [](const auto& lhs, const auto& rhs) {
-      return lhs.first < rhs.first;
+      return *lhs.first < *rhs.first;
     });
     int64_t idx = 0;
     for (const auto& [key, value] : sorted_kv) {
@@ -736,7 +736,7 @@ std::string SchemaParser::ComputeCacheKey(const picojson::value& schema) {
         result += ",";
       }
       ++idx;
-      result += "\"" + key + "\":" + ComputeCacheKey(value);
+      result += "\"" + *key + "\":" + ComputeCacheKey(*value);
     }
     return result + "}";
   } else if (schema.is<picojson::array>()) {
@@ -1427,6 +1427,7 @@ Result<EnumSpec, SchemaError> SchemaParser::ParseEnum(const picojson::object& sc
   if (enum_array.empty()) {
     return ResultErr<SchemaError>(SchemaErrorType::kInvalidSchema, "enum array must not be empty");
   }
+  spec.json_values.reserve(enum_array.size());
   for (const auto& value : enum_array) {
     spec.json_values.push_back(value.serialize());
   }
