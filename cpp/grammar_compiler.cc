@@ -81,6 +81,22 @@ class FirstByteTokenMaskCache {
     return result;
   }
 
+  static std::shared_ptr<const std::vector<int32_t>> BuildAsciiStringSafeIndices(
+      const std::vector<std::pair<int32_t, std::string>>& sorted_decoded_vocab
+  ) {
+    auto result = std::make_shared<std::vector<int32_t>>();
+    result->reserve(sorted_decoded_vocab.size() / 2);
+    for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
+      const auto& token = sorted_decoded_vocab[index].second;
+      if (!token.empty() && std::all_of(token.begin(), token.end(), [](uint8_t byte) {
+            return byte >= 0x20 && byte < 0x7f && byte != '"' && byte != '\\';
+          })) {
+        result->push_back(index);
+      }
+    }
+    return result;
+  }
+
   struct Key {
     uint8_t first_byte;
     bool collect_rejected;
@@ -112,12 +128,20 @@ class FirstByteTokenMaskCache {
   };
 
   FirstByteTokenMaskCache(
-      size_t max_memory_bytes, std::shared_ptr<const VocabBuckets> vocab_buckets
+      size_t max_memory_bytes,
+      std::shared_ptr<const VocabBuckets> vocab_buckets,
+      std::shared_ptr<const std::vector<int32_t>> ascii_string_safe_indices
   )
-      : max_memory_bytes_(max_memory_bytes), vocab_buckets_(std::move(vocab_buckets)) {}
+      : max_memory_bytes_(max_memory_bytes),
+        vocab_buckets_(std::move(vocab_buckets)),
+        ascii_string_safe_indices_(std::move(ascii_string_safe_indices)) {}
 
   const VocabBucket& GetVocabBucket(uint8_t first_byte) const {
     return (*vocab_buckets_)[first_byte];
+  }
+
+  const std::vector<int32_t>& GetAsciiStringSafeIndices() const {
+    return *ascii_string_safe_indices_;
   }
 
 #ifdef XGRAMMAR_PROFILE_COMPILE
@@ -201,6 +225,7 @@ class FirstByteTokenMaskCache {
   size_t memory_bytes_ = 0;
   std::unordered_map<Key, std::shared_ptr<const Result>, KeyHash> cache_;
   std::shared_ptr<const VocabBuckets> vocab_buckets_;
+  std::shared_ptr<const std::vector<int32_t>> ascii_string_safe_indices_;
 #ifdef XGRAMMAR_PROFILE_COMPILE
   uint64_t profile_hits_ = 0;
   uint64_t profile_misses_ = 0;
@@ -291,15 +316,55 @@ class OptionalCharacterClassTokenSummaryCache {
     }
   }
 
+  template <typename Builder>
+  std::shared_ptr<const AdaptiveTokenMask> GetOrCreateSingleCharacterMask(
+      const Key& key, Builder&& builder
+  ) {
+    using SharedResult = std::shared_ptr<const AdaptiveTokenMask>;
+    std::shared_future<SharedResult> future;
+    std::promise<SharedResult> producer;
+    bool should_build = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto it = single_character_masks_.find(key);
+      if (it != single_character_masks_.end()) {
+        future = it->second;
+#ifdef XGRAMMAR_PROFILE_COMPILE
+        ++profile_mask_hits_;
+#endif
+      } else {
+        future = producer.get_future().share();
+        single_character_masks_.emplace(key, future);
+        should_build = true;
+#ifdef XGRAMMAR_PROFILE_COMPILE
+        ++profile_mask_builds_;
+#endif
+      }
+    }
+    if (!should_build) {
+      return future.get();
+    }
+    try {
+      SharedResult result = std::make_shared<const AdaptiveTokenMask>(builder());
+      producer.set_value(result);
+      return result;
+    } catch (...) {
+      producer.set_exception(std::current_exception());
+      throw;
+    }
+  }
+
   void Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     cache_.clear();
+    single_character_masks_.clear();
   }
 
 #ifdef XGRAMMAR_PROFILE_COMPILE
   ~OptionalCharacterClassTokenSummaryCache() {
     XGRAMMAR_LOG(INFO) << "OptionalCharacterClassTokenSummaryProfile(builds=" << profile_builds_
-                       << ", hits=" << profile_hits_
+                       << ", hits=" << profile_hits_ << ", mask_builds=" << profile_mask_builds_
+                       << ", mask_hits=" << profile_mask_hits_
                        << ", candidate_tokens=" << profile_candidate_tokens_ << ")";
   }
 #endif
@@ -307,9 +372,13 @@ class OptionalCharacterClassTokenSummaryCache {
  private:
   std::mutex mutex_;
   std::unordered_map<Key, std::shared_future<std::shared_ptr<const Result>>, KeyHash> cache_;
+  std::unordered_map<Key, std::shared_future<std::shared_ptr<const AdaptiveTokenMask>>, KeyHash>
+      single_character_masks_;
 #ifdef XGRAMMAR_PROFILE_COMPILE
   uint64_t profile_builds_ = 0;
   uint64_t profile_hits_ = 0;
+  uint64_t profile_mask_builds_ = 0;
+  uint64_t profile_mask_hits_ = 0;
   uint64_t profile_candidate_tokens_ = 0;
 #endif
 };
@@ -942,27 +1011,33 @@ std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetSingleChara
   OptionalCharacterClassTokenSummaryCache::Key summary_key;
   summary_key.character_class.assign(character_class.begin(), character_class.end());
   const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
-  const auto summaries =
-      optional_character_class_token_summary_cache_->GetOrCreate(summary_key, [&]() {
-        return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
-      });
-  std::vector<int32_t> accepted_indices;
-  std::vector<int32_t> uncertain_indices;
-  accepted_indices.reserve(summaries->size() / 16);
-  uncertain_indices.reserve(summaries->size());
-  for (const auto& summary : *summaries) {
-    if (summary.consumed_whole_token && summary.locally_consumed_characters <= 1) {
-      accepted_indices.push_back(summary.sorted_vocab_index);
-    } else if (summary.has_completed_character_prefix) {
-      uncertain_indices.push_back(summary.sorted_vocab_index);
-    }
-  }
-  return AdaptiveTokenMask(
-      tokenizer_info_.GetVocabSize(),
-      sorted_vocab,
-      std::move(accepted_indices),
-      std::move(uncertain_indices)
+  const auto mask = optional_character_class_token_summary_cache_->GetOrCreateSingleCharacterMask(
+      summary_key,
+      [&]() {
+        const auto summaries =
+            optional_character_class_token_summary_cache_->GetOrCreate(summary_key, [&]() {
+              return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
+            });
+        std::vector<int32_t> accepted_indices;
+        std::vector<int32_t> uncertain_indices;
+        accepted_indices.reserve(summaries->size() / 16);
+        uncertain_indices.reserve(summaries->size());
+        for (const auto& summary : *summaries) {
+          if (summary.consumed_whole_token && summary.locally_consumed_characters <= 1) {
+            accepted_indices.push_back(summary.sorted_vocab_index);
+          } else if (summary.has_completed_character_prefix) {
+            uncertain_indices.push_back(summary.sorted_vocab_index);
+          }
+        }
+        return AdaptiveTokenMask(
+            tokenizer_info_.GetVocabSize(),
+            sorted_vocab,
+            std::move(accepted_indices),
+            std::move(uncertain_indices)
+        );
+      }
   );
+  return *mask;
 }
 
 std::optional<AdaptiveTokenMask>
@@ -1670,6 +1745,18 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
   const std::string* prev_token = nullptr;
   int32_t skip_ptr = 0;
   const int32_t skip_size = static_cast<int32_t>(token_edge_accepted.size());
+  bool accepts_ascii_string_safe_slice =
+      speculative_calculation && !definite_accepted_bitset.has_value();
+  if (accepts_ascii_string_safe_slice) {
+    for (int32_t byte = 0x20; byte < 0x7f; ++byte) {
+      if (byte != '"' && byte != '\\' && !speculative_mask[byte]) {
+        accepts_ascii_string_safe_slice = false;
+        break;
+      }
+    }
+  }
+  const auto& ascii_string_safe_indices = first_byte_cache_->GetAsciiStringSafeIndices();
+  size_t ascii_string_safe_position = 0;
   for (size_t interval_idx = 0; interval_idx < possible_intervals.size(); ++interval_idx) {
     const auto& interval = possible_intervals[interval_idx];
     int group_begin = interval.first;
@@ -1810,6 +1897,20 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
           continue;
         }
         const auto& token = sorted_decoded_vocab[i].second;
+        if (accepts_ascii_string_safe_slice) {
+          while (ascii_string_safe_position < ascii_string_safe_indices.size() &&
+                 ascii_string_safe_indices[ascii_string_safe_position] < i) {
+            ++ascii_string_safe_position;
+          }
+          if (ascii_string_safe_position < ascii_string_safe_indices.size() &&
+              ascii_string_safe_indices[ascii_string_safe_position] == i) {
+#ifdef XGRAMMAR_PROFILE_COMPILE
+            ++profile_counters_.speculative_accepted_tokens;
+#endif
+            tmp_accepted_indices_.push_back(i);
+            continue;
+          }
+        }
         // This optimization is useful for simple self-recursive rules, like string content.
         if (speculative_calculation) {
           // Optimization for tag dispatch rules.
@@ -2452,6 +2553,9 @@ class GrammarCompilerSub {
         first_byte_vocab_buckets_(
             FirstByteTokenMaskCache::BuildVocabBuckets(tokenizer_info.GetSortedDecodedVocab())
         ),
+        ascii_string_safe_indices_(FirstByteTokenMaskCache::BuildAsciiStringSafeIndices(
+            tokenizer_info.GetSortedDecodedVocab()
+        )),
         max_threads_(max_threads),
         thread_pool_(
             max_threads > 1 && !enable_dynamic_compilation
@@ -2503,6 +2607,8 @@ class GrammarCompilerSub {
   const TokenizerInfo tokenizer_info_;
   /*! \brief Immutable first-byte ranges shared by every grammar compiled for this tokenizer. */
   const std::shared_ptr<const FirstByteTokenMaskCache::VocabBuckets> first_byte_vocab_buckets_;
+  /*! \brief Printable ASCII tokens that cannot terminate or escape a JSON string. */
+  const std::shared_ptr<const std::vector<int32_t>> ascii_string_safe_indices_;
   /*! \brief The maximum number of threads to use. */
   const int max_threads_;
   /*! \brief Reused workers so each compile avoids thread startup and teardown. */
@@ -2597,8 +2703,9 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
     active_rule_level_cache = std::make_shared<RuleLevelCache>(kLocalRuleCacheMaxBytes);
   }
   constexpr size_t kFirstByteCacheMaxBytes = 64 * 1024 * 1024;
-  auto first_byte_cache =
-      std::make_shared<FirstByteTokenMaskCache>(kFirstByteCacheMaxBytes, first_byte_vocab_buckets_);
+  auto first_byte_cache = std::make_shared<FirstByteTokenMaskCache>(
+      kFirstByteCacheMaxBytes, first_byte_vocab_buckets_, ascii_string_safe_indices_
+  );
   auto optional_character_class_token_summary_cache = optional_character_class_token_summary_cache_;
 #ifdef XGRAMMAR_PROFILE_COMPILE
   const auto fsm_hash_started_at = std::chrono::steady_clock::now();
