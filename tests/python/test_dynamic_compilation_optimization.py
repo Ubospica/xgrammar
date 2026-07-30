@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import xgrammar as xgr
+from xgrammar.testing import bitmask_to_bool_mask
 
 
 def _mask_trace(compiled_grammar: xgr.CompiledGrammar, input_string: str):
@@ -25,7 +26,10 @@ def _assert_mask_traces_equal(eager, dynamic, input_string: str) -> None:
     assert len(dynamic_trace) == len(eager_trace)
     for (eager_apply, eager_mask), (dynamic_apply, dynamic_mask) in zip(eager_trace, dynamic_trace):
         assert dynamic_apply == eager_apply
-        torch.testing.assert_close(dynamic_mask, eager_mask, rtol=0, atol=0)
+        vocab_size = eager.tokenizer_info.vocab_size
+        eager_tokens = bitmask_to_bool_mask(eager_mask, vocab_size)
+        dynamic_tokens = bitmask_to_bool_mask(dynamic_mask, vocab_size)
+        torch.testing.assert_close(dynamic_tokens, eager_tokens, rtol=0, atol=0)
 
 
 def _assert_dynamic_masks_equal_eager(grammar: str, vocabulary, input_string: str) -> None:
@@ -37,6 +41,25 @@ def _assert_dynamic_masks_equal_eager(grammar: str, vocabulary, input_string: st
         tokenizer_info, max_threads=1, enable_dynamic_compilation=True
     ).compile_grammar(grammar)
     _assert_mask_traces_equal(eager, dynamic, input_string)
+
+
+@pytest.mark.parametrize(
+    "repeat_range,value",
+    [
+        ("{0}", ""),
+        ("{1}", "a"),
+        ("{0,1}", ""),
+        ("{1,3}", "ab"),
+        ("{63,65}", "a" * 64),
+        ("{127,129}", "a" * 128),
+        ("{255,257}", "a" * 256),
+        ("{2,}", "abc"),
+    ],
+)
+def test_preserved_repetition_ranges_match_eager_masks(repeat_range: str, value: str):
+    vocabulary = [">", "<", "a", "aa", "ab", "abc", "b", "ba", "c", b"\xc3", b"\xff"]
+    grammar = f'root ::= ">" [a-z]{repeat_range} "<"'
+    _assert_dynamic_masks_equal_eager(grammar, vocabulary, ">" + value + "<")
 
 
 BUCKET_TEST_VOCABULARY = [
