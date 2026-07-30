@@ -1755,14 +1755,15 @@ Grammar JSONSchemaConverter::Convert(const SchemaSpecPtr& spec) {
   uri_to_rule_id_["#"] = root_rule_id;
 
   // Check if the spec can be directly mapped to an existing rule
-  auto cached_rule = GetCache(spec->cache_key);
+  bool indentation_sensitive = IsIndentationSensitive(spec);
+  auto cached_rule = GetCache(spec->cache_key, indentation_sensitive);
   if (cached_rule.has_value()) {
     // Root schema matches a basic type, just reference it
     builder_.UpdateRuleBody(root_rule_id, RuleRef(*cached_rule));
   } else {
     // Generate the rule body
     if (!spec->cache_key.empty()) {
-      AddCache(spec->cache_key, root_rule_id);
+      AddCache(spec->cache_key, root_rule_id, indentation_sensitive);
     }
     builder_.UpdateRuleBody(root_rule_id, GenerateFromSpec(spec, root_rule_name));
   }
@@ -2108,29 +2109,68 @@ int32_t JSONSchemaConverter::GetKeyPatternExcluding(
 
 std::string JSONSchemaConverter::GetBasicAnyRuleName() const { return kBasicAny; }
 
-void JSONSchemaConverter::AddCache(const std::string& key, int32_t rule_id) {
+void JSONSchemaConverter::AddCache(
+    const std::string& key, int32_t rule_id, bool indentation_sensitive
+) {
   if (!key.empty()) {
-    rule_cache_manager_.AddCache(key, true, rule_id);
+    int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
+    rule_cache_manager_.AddCache(key, 0, indentation_context, rule_id);
   }
 }
 
-std::optional<int32_t> JSONSchemaConverter::GetCache(const std::string& key) const {
+std::optional<int32_t> JSONSchemaConverter::GetCache(
+    const std::string& key, bool indentation_sensitive
+) const {
   if (key.empty()) {
     return std::nullopt;
   }
-  return rule_cache_manager_.GetCache(key, true);
+  int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
+  return rule_cache_manager_.GetCache(key, 0, indentation_context);
+}
+
+bool JSONSchemaConverter::IsIndentationSensitive(const SchemaSpecPtr& spec) const {
+  return std::visit(
+      [this](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, ArraySpec> || std::is_same_v<T, ObjectSpec> ||
+                      std::is_same_v<T, RefSpec>) {
+          return true;
+        } else if constexpr (std::is_same_v<T, AnyOfSpec> || std::is_same_v<T, OneOfSpec>) {
+          return std::any_of(
+              value.options.begin(),
+              value.options.end(),
+              [this](const auto& option) { return IsIndentationSensitive(option); }
+          );
+        } else if constexpr (std::is_same_v<T, AllOfSpec>) {
+          return std::any_of(
+              value.schemas.begin(),
+              value.schemas.end(),
+              [this](const auto& schema) { return IsIndentationSensitive(schema); }
+          );
+        } else if constexpr (std::is_same_v<T, TypeArraySpec>) {
+          return std::any_of(
+              value.type_schemas.begin(),
+              value.type_schemas.end(),
+              [this](const auto& schema) { return IsIndentationSensitive(schema); }
+          );
+        } else {
+          return false;
+        }
+      },
+      spec->spec
+  );
 }
 
 int32_t JSONSchemaConverter::CreateRule(
     const SchemaSpecPtr& spec, const std::string& rule_name_hint
 ) {
-  // Only check cache for basic rules (pre-populated in AddBasicRules)
-  // Don't cache other rules to match original behavior
-  auto cached = GetCache(spec->cache_key);
+  bool indentation_sensitive = IsIndentationSensitive(spec);
+  auto cached = GetCache(spec->cache_key, indentation_sensitive);
   if (cached.has_value()) {
     return cached.value();
   }
   int32_t rule_id = builder_.AddEmptyRuleWithHint(rule_name_hint);
+  AddCache(spec->cache_key, rule_id, indentation_sensitive);
   // Copy the name before generating: GenerateFromSpec may add rules and reallocate the
   // builder's rule storage, invalidating references into it.
   std::string rule_name = builder_.GetRule(rule_id).name;
@@ -3079,14 +3119,19 @@ int32_t JSONSchemaConverter::GenerateRef(const RefSpec& spec, const std::string&
     }
   }
 
+  SchemaSpecPtr resolved = ref_resolver_(spec.uri, rule_name_hint);
+  bool indentation_sensitive = IsIndentationSensitive(resolved);
+  auto cached = GetCache(resolved->cache_key, indentation_sensitive);
+  if (cached.has_value()) {
+    uri_to_rule_id_[spec.uri] = *cached;
+    return RuleRef(*cached);
+  }
+
   int32_t allocated_rule_id = builder_.AddEmptyRuleWithHint(rule_name_hint);
   std::string allocated_rule_name = builder_.GetRule(allocated_rule_id).name;
   uri_to_rule_id_[spec.uri] = allocated_rule_id;
-  SchemaSpecPtr resolved = ref_resolver_(spec.uri, allocated_rule_name);
+  AddCache(resolved->cache_key, allocated_rule_id, indentation_sensitive);
   builder_.UpdateRuleBody(allocated_rule_id, GenerateFromSpec(resolved, allocated_rule_name));
-  if (!resolved->cache_key.empty()) {
-    AddCache(resolved->cache_key, allocated_rule_id);
-  }
   return RuleRef(allocated_rule_id);
 }
 

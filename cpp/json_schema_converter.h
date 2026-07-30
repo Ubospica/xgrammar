@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -215,13 +216,17 @@ std::optional<JSONFormat> JSONFormatFromString(const std::string& format);
 class GenerateCacheManager {
  public:
   /*! \brief Add a key-value pair to the cache. */
-  void AddCache(const std::string& key, bool is_inner_layer, int32_t rule_id) {
-    cache_[{key, is_inner_layer}] = rule_id;
+  void AddCache(
+      const std::string& key, int format_context, int64_t indentation_context, int32_t rule_id
+  ) {
+    cache_[{key, format_context, indentation_context}] = rule_id;
   }
 
   /*! \brief Get cached rule id by key. Returns std::nullopt if not found. */
-  std::optional<int32_t> GetCache(const std::string& key, bool is_inner_layer) const {
-    auto it = cache_.find({key, is_inner_layer});
+  std::optional<int32_t> GetCache(
+      const std::string& key, int format_context, int64_t indentation_context
+  ) const {
+    auto it = cache_.find({key, format_context, indentation_context});
     if (it != cache_.end()) {
       return it->second;
     }
@@ -229,7 +234,7 @@ class GenerateCacheManager {
   }
 
  private:
-  std::unordered_map<std::pair<std::string, bool>, int32_t> cache_;
+  std::map<std::tuple<std::string, int, int64_t>, int32_t> cache_;
 };
 
 /*!
@@ -251,6 +256,9 @@ class IndentManager {
   std::string EndSeparator();
   std::string EmptySeparator();
   std::string NextSeparator(bool is_end = false);
+  int64_t GetCacheContext() const {
+    return any_whitespace_ || !enable_newline_ ? 0 : total_indent_;
+  }
 
  private:
   bool any_whitespace_;
@@ -351,10 +359,17 @@ class JSONSchemaConverter {
   void AddBasicRules(const std::vector<std::string>& additional_rule_names);
 
   /*! \brief Add a key-value pair to the generation cache. Override for custom cache behavior. */
-  virtual void AddCache(const std::string& key, int32_t rule_id);
+  virtual void AddCache(
+      const std::string& key, int32_t rule_id, bool indentation_sensitive = false
+  );
 
   /*! \brief Get cached value by key. Returns std::nullopt if not found. */
-  virtual std::optional<int32_t> GetCache(const std::string& key) const;
+  virtual std::optional<int32_t> GetCache(
+      const std::string& key, bool indentation_sensitive = false
+  ) const;
+
+  /*! \brief Whether a schema's grammar depends on the current indentation depth. */
+  bool IsIndentationSensitive(const SchemaSpecPtr& spec) const;
 
   // ==================== Helper methods (for subclasses to use) ====================
 
