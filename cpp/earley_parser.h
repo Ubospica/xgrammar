@@ -13,7 +13,6 @@
 #include <memory>
 #include <optional>
 #include <ostream>
-#include <queue>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -24,6 +23,29 @@
 #include "xgrammar/grammar.h"
 
 namespace xgrammar {
+
+struct ParserState;
+
+class ReusableStatePointerQueue {
+ public:
+  bool empty() const { return head_ == entries_.size(); }
+
+  const ParserState* front() const { return entries_[head_]; }
+
+  void pop() { ++head_; }
+
+  void push(const ParserState* state) {
+    if (empty()) {
+      entries_.clear();
+      head_ = 0;
+    }
+    entries_.push_back(state);
+  }
+
+ private:
+  std::vector<const ParserState*> entries_;
+  size_t head_ = 0;
+};
 
 /*!
  * \brief The state of the Earley parser.
@@ -461,7 +483,7 @@ class EarleyParser {
   std::vector<const ParserState*> tmp_states_to_be_added_;
 
   /*! \brief Stable pointers to visited states awaiting prediction/completion. */
-  std::queue<const ParserState*> tmp_process_state_queue_;
+  ReusableStatePointerQueue tmp_process_state_queue_;
 
   /*! \brief The class is used to check if a state has been added into the queue. */
   RepeatDetector tmp_states_visited_in_queue_;
