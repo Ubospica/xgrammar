@@ -458,9 +458,19 @@ EarleyParserGrammarMetadata::EarleyParserGrammarMetadata(const Grammar& grammar)
   std::vector<std::vector<int32_t>> referenced_rules(grammar->NumRules());
   for (int32_t rule_id = 0; rule_id < grammar->NumRules(); ++rule_id) {
     const auto& rule = grammar->GetRule(rule_id);
+    const auto* suffix_stop_info = grammar->GetSuffixStopInfo(rule_id);
+    has_budget_rules = has_budget_rules || rule.max_tokens >= 0;
+    has_char_budget_rules = has_char_budget_rules || rule.max_chars >= 0;
+    capture_tracking =
+        capture_tracking || !rule.capture_name.empty() ||
+        (suffix_stop_info != nullptr && !suffix_stop_info->stop_capture_name.empty());
+    has_hidden_capture_rules =
+        has_hidden_capture_rules ||
+        (suffix_stop_info != nullptr &&
+         (suffix_stop_info->hidden_suffix_bytes > 0 || suffix_stop_info->hidden_stop_bytes > 0));
     rule_has_context_dependent_ancestor[rule_id] = rule.max_tokens >= 0 || rule.max_chars >= 0 ||
                                                    rule.is_lazy || rule.temperature.has_value() ||
-                                                   grammar->GetSuffixStopInfo(rule_id) != nullptr;
+                                                   suffix_stop_info != nullptr;
     const auto& rule_fsm = grammar->per_rule_fsms[rule_id]->GetFsm();
     std::unordered_set<int> reachable_states;
     rule_fsm.GetReachableStates(&reachable_states);
@@ -598,27 +608,10 @@ EarleyParser::EarleyParser(
       grammar_metadata_->rule_is_nullable.size() == static_cast<size_t>(grammar->NumRules())
   ) << "The Earley parser metadata does not match the grammar's rules";
 
-  for (int32_t i = 0; i < grammar_->NumRules(); ++i) {
-    has_budget_rules_ = has_budget_rules_ || grammar_->GetRule(i).max_tokens >= 0;
-    has_char_budget_rules_ = has_char_budget_rules_ || grammar_->GetRule(i).max_chars >= 0;
-    if (has_budget_rules_ && has_char_budget_rules_) {
-      break;
-    }
-  }
-  for (int32_t i = 0; i < grammar_->NumRules(); ++i) {
-    const auto& rule = grammar_->GetRule(i);
-    const auto* suffix_stop_info = grammar_->GetSuffixStopInfo(i);
-    capture_tracking_ =
-        capture_tracking_ || !rule.capture_name.empty() ||
-        (suffix_stop_info != nullptr && !suffix_stop_info->stop_capture_name.empty());
-    has_hidden_capture_rules_ =
-        has_hidden_capture_rules_ ||
-        (suffix_stop_info != nullptr &&
-         (suffix_stop_info->hidden_suffix_bytes > 0 || suffix_stop_info->hidden_stop_bytes > 0));
-    if (capture_tracking_ && has_hidden_capture_rules_) {
-      break;
-    }
-  }
+  has_budget_rules_ = grammar_metadata_->has_budget_rules;
+  has_char_budget_rules_ = grammar_metadata_->has_char_budget_rules;
+  capture_tracking_ = grammar_metadata_->capture_tracking;
+  has_hidden_capture_rules_ = grammar_metadata_->has_hidden_capture_rules;
 
   const ParserState init = initial_state.has_value() ? *initial_state : RootInitialState();
   if (!need_expand) {
@@ -1390,8 +1383,8 @@ bool EarleyParser::AdvanceAtomicToken(
 
 const ParserState* RepeatDetector::InsertInSet(const ParserState& state) {
   if (!using_set_) {
-    for (const auto& existing : visited_vector_) {
-      visited_set_.insert(existing);
+    for (int32_t index = 0; index < size_; ++index) {
+      visited_set_.insert(visited_vector_[index]);
     }
     using_set_ = true;
   }

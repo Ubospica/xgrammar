@@ -27,6 +27,14 @@ def _assert_dynamic_masks_equal_eager(grammar: str, vocabulary, input_string: st
         tokenizer_info, max_threads=1, enable_dynamic_compilation=True
     ).compile_grammar(grammar)
 
+    _assert_compiled_masks_equal(eager, dynamic, input_string)
+
+
+def _assert_compiled_masks_equal(
+    eager: xgr.CompiledGrammar, dynamic: xgr.CompiledGrammar, input_string: str
+) -> None:
+    tokenizer_info = eager.tokenizer_info
+
     eager_trace = _mask_trace(eager, input_string)
     dynamic_trace = _mask_trace(dynamic, input_string)
     assert len(dynamic_trace) == len(eager_trace)
@@ -57,3 +65,72 @@ def test_preserved_repetition_ranges_match_eager_masks(repeat_range: str, value:
 def test_first_byte_vocab_buckets_preserve_mask_results(grammar: str, value: str):
     vocabulary = [">", "<", "a", "aa", "ab", "abc", "b", "ba", "é", "ê", b"\xc3", b"\xff"]
     _assert_dynamic_masks_equal_eager(grammar, vocabulary, value)
+
+
+def test_common_character_class_masks_are_reused_without_changing_results():
+    vocabulary = [">", "<", "[", "]", "a", "ab", "abc", "z", "é", b"\xc3", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    eager_compiler = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    )
+    dynamic_compiler = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    )
+    for grammar, value in [('root ::= ">" [a-z] "<"', ">a<"), ('root ::= "[" [a-z] "]"', "[z]")]:
+        _assert_compiled_masks_equal(
+            eager_compiler.compile_grammar(grammar),
+            dynamic_compiler.compile_grammar(grammar),
+            value,
+        )
+
+
+def test_common_ascii_json_classification_preserves_masks():
+    vocabulary = ['"', "safe", "safe ASCII", 'quote"', "slash\\", "\n", "é", b"\xc3", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    schema = {"type": "string", "minLength": 1}
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_json_schema(schema)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(schema)
+    _assert_compiled_masks_equal(eager, dynamic, '"safe ASCII"')
+
+
+def test_shared_parser_feature_metadata_preserves_matcher_behavior():
+    tokenizer_info = xgr.TokenizerInfo(["ab ", "cd", " ", "</t>", "1", "<t>", "x"])
+    token_budget_grammar = xgr.Grammar.from_lark(
+        'start: r "<t>"\nr[max_tokens=3, capture]: TEXT\nTEXT: /(\\n|.)*/',
+        tokenizer_info=tokenizer_info,
+    )
+    token_budget_compiled = xgr.GrammarCompiler(tokenizer_info).compile_grammar(
+        token_budget_grammar
+    )
+    for _ in range(4):
+        matcher = xgr.GrammarMatcher(token_budget_compiled, terminate_without_stop_token=True)
+        assert all(matcher.accept_token(token_id) for token_id in [0, 1, 2])
+        bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        assert matcher.fill_next_token_bitmask(bitmask)
+        assert bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size).nonzero().tolist() == [
+            [0, 5]
+        ]
+        assert matcher.accept_token(5)
+        assert matcher.is_terminated()
+        assert matcher.get_captures() == [("r", b"ab cd ")]
+
+    character_budget_grammar = xgr.Grammar.from_lark(
+        'start[capture="outer"]: r "z"\nr[max_chars=2, capture="inner", suffix="!"]: /[a-z]*/'
+    )
+    character_budget_compiled = xgr.GrammarCompiler(xgr.TokenizerInfo([])).compile_grammar(
+        character_budget_grammar
+    )
+    for _ in range(4):
+        for value, expected_captures in [
+            ("a!z", [("inner", b"a"), ("outer", b"a!z")]),
+            ("abz", [("inner", b"ab"), ("outer", b"abz")]),
+        ]:
+            matcher = xgr.GrammarMatcher(
+                character_budget_compiled, terminate_without_stop_token=True
+            )
+            assert matcher.accept_string(value) and matcher.is_terminated()
+            assert matcher.get_captures() == expected_captures
