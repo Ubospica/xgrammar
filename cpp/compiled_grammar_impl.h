@@ -29,6 +29,44 @@ class RuleLevelCache;
 class FirstByteTokenMaskCache;
 class OptionalCharacterClassTokenSummaryCache;
 
+struct CharacterClassPrefixTokenBitsetKey {
+  std::vector<int32_t> character_class;
+
+  bool operator==(const CharacterClassPrefixTokenBitsetKey& other) const {
+    return character_class == other.character_class;
+  }
+};
+
+struct CharacterClassPrefixTokenBitsetKeyHash {
+  size_t operator()(const CharacterClassPrefixTokenBitsetKey& key) const {
+    uint64_t result = 0x434841525f505246ULL;
+    for (int32_t value : key.character_class) {
+      HashCombineBinary(result, static_cast<uint64_t>(value));
+    }
+    return result;
+  }
+};
+
+struct BoundedCharacterClassRepeatTokenMaskKey {
+  std::vector<int32_t> character_class;
+  int32_t max_characters;
+
+  bool operator==(const BoundedCharacterClassRepeatTokenMaskKey& other) const {
+    return max_characters == other.max_characters && character_class == other.character_class;
+  }
+};
+
+struct BoundedCharacterClassRepeatTokenMaskKeyHash {
+  size_t operator()(const BoundedCharacterClassRepeatTokenMaskKey& key) const {
+    uint64_t result = 0x424e445f43484152ULL;
+    for (int32_t value : key.character_class) {
+      HashCombineBinary(result, static_cast<uint64_t>(value));
+    }
+    HashCombineBinary(result, static_cast<uint64_t>(key.max_characters));
+    return result;
+  }
+};
+
 /******************* CompiledGrammar Datastructures *******************/
 
 /*!
@@ -175,6 +213,24 @@ class CompiledGrammar::Impl {
   std::shared_ptr<OptionalCharacterClassTokenSummaryCache>
       optional_character_class_token_summary_cache;
 
+  /*! \brief Complete-token character-class masks built on first use by bounded repeats. */
+  std::unordered_map<
+      CharacterClassPrefixTokenBitsetKey,
+      std::vector<DynamicBitset>,
+      CharacterClassPrefixTokenBitsetKeyHash>
+      character_class_prefix_token_bitsets;
+  std::unordered_map<
+      CharacterClassPrefixTokenBitsetKey,
+      AdaptiveTokenMask,
+      CharacterClassPrefixTokenBitsetKeyHash>
+      unbounded_character_class_repeat_token_masks;
+  std::unordered_map<
+      BoundedCharacterClassRepeatTokenMaskKey,
+      AdaptiveTokenMask,
+      BoundedCharacterClassRepeatTokenMaskKeyHash>
+      bounded_character_class_repeat_token_masks;
+  mutable std::mutex character_class_prefix_token_bitsets_mutex;
+
   /*! \brief Whether direct-mask entries may be retained in the cross-grammar cache. */
   bool cache_direct_masks_across_grammars{false};
 
@@ -183,6 +239,20 @@ class CompiledGrammar::Impl {
 
   /*! \brief Get an existing token mask or generate and cache it on demand. */
   const AdaptiveTokenMask& GetAdaptiveTokenMask(const ParserState& state, bool is_root_rule);
+
+  /*! \brief Get tokens whose complete byte strings are valid prefixes of a character class. */
+  const DynamicBitset& GetCharacterClassPrefixTokenBitset(
+      int32_t character_class_expr_id, int32_t max_characters
+  );
+
+  /*! \brief Get the contextual mask for a character class under an unbounded repeat. */
+  const AdaptiveTokenMask& GetUnboundedCharacterClassRepeatTokenMask(int32_t character_class_expr_id
+  );
+
+  /*! \brief Get the unresolved tokens for a character class under a bounded repeat. */
+  const AdaptiveTokenMask& GetBoundedCharacterClassRepeatTokenMask(
+      int32_t character_class_expr_id, int32_t max_characters
+  );
 
   /*! \brief Generate every token mask before serialization. */
   void MaterializeAdaptiveTokenMaskCache();

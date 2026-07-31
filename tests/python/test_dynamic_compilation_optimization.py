@@ -52,7 +52,6 @@ def _assert_dynamic_masks_equal_eager(grammar: str, vocabulary, input_string: st
         ("{1,3}", "ab"),
         ("{63,65}", "a" * 64),
         ("{127,129}", "a" * 128),
-        ("{255,257}", "a" * 256),
         ("{2,}", "abc"),
     ],
 )
@@ -60,6 +59,29 @@ def test_preserved_repetition_ranges_match_eager_masks(repeat_range: str, value:
     vocabulary = [">", "<", "a", "aa", "ab", "abc", "b", "ba", "c", b"\xc3", b"\xff"]
     grammar = f'root ::= ">" [a-z]{repeat_range} "<"'
     _assert_dynamic_masks_equal_eager(grammar, vocabulary, ">" + value + "<")
+
+
+@pytest.mark.parametrize("prefix_length", [254, 255, 256, 257])
+def test_large_preserved_repetition_range_masks_match_token_acceptance(prefix_length: int):
+    vocabulary = [">", "<", "a", "aa", "ab", "abc", "b", "ba", "c", b"\xc3", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar('root ::= ">" [a-z]{255,257} "<"')
+    prefix = ">" + "a" * prefix_length
+
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    assert matcher.accept_string(prefix)
+    bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    matcher.fill_next_token_bitmask(bitmask)
+    allowed_tokens = bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+
+    # Precompiled masks can conservatively retain a token that crosses the upper bound. Compare
+    # this optimized boundary path with the matcher's exact token acceptance instead.
+    for token_id in range(tokenizer_info.vocab_size):
+        oracle = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        assert oracle.accept_string(prefix)
+        assert bool(allowed_tokens[token_id]) == oracle.accept_token(token_id)
 
 
 BUCKET_TEST_VOCABULARY = [
