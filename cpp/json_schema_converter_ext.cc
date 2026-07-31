@@ -7,6 +7,7 @@
 
 #include <picojson.h>
 
+#include <algorithm>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -284,18 +285,26 @@ int32_t XMLToolCallingConverter::GenerateObject(
   return result;
 }
 
-void XMLToolCallingConverter::AddCache(const std::string& key, int32_t rule_id) {
+void XMLToolCallingConverter::AddCache(
+    const std::string& key, int32_t rule_id, bool indentation_sensitive
+) {
   if (key.empty()) {
     return;
   }
-  rule_cache_manager_.AddCache(key, nested_object_level_ > 1, rule_id);
+  int format_context = std::min(nested_object_level_, 2);
+  int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
+  rule_cache_manager_.AddCache(key, format_context, indentation_context, rule_id);
 }
 
-std::optional<int32_t> XMLToolCallingConverter::GetCache(const std::string& key) const {
+std::optional<int32_t> XMLToolCallingConverter::GetCache(
+    const std::string& key, bool indentation_sensitive
+) const {
   if (key.empty()) {
     return std::nullopt;
   }
-  return rule_cache_manager_.GetCache(key, nested_object_level_ > 1);
+  int format_context = std::min(nested_object_level_, 2);
+  int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
+  return rule_cache_manager_.GetCache(key, format_context, indentation_context);
 }
 
 }  // namespace xgrammar
