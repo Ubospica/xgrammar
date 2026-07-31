@@ -70,8 +70,10 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
 
   void AddBasicRules() override;
 
-  void AddCache(const std::string& key, int32_t rule_id) override;
-  std::optional<int32_t> GetCache(const std::string& key) const override;
+  void AddCache(const std::string& key, int32_t rule_id, bool indentation_sensitive = false)
+      override;
+  std::optional<int32_t> GetCache(const std::string& key, bool indentation_sensitive = false)
+      const override;
 
  private:
   // Wrapper strings for XML parameter tags (key prefix/suffix, value prefix, closing suffix)
