@@ -533,6 +533,45 @@ def _compile_structural_tag_for_dynamic_test(compiler: xgr.GrammarCompiler) -> x
     )
 
 
+def test_structural_tag_slicing_cache_isolated_and_concurrent():
+    vocabulary = [chr(value) for value in range(32, 127)] + [
+        "x<alpha>",
+        "x<beta>",
+        "x<guard>",
+        "x<block>",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+
+    def compile_dispatch(compiler, trigger, exclude):
+        return compiler.compile_structural_tag(
+            {
+                "type": "structural_tag",
+                "format": {
+                    "type": "dispatch",
+                    "rules": [[trigger, {"type": "const_string", "value": "X"}]],
+                    "loop": False,
+                    "excludes": [exclude],
+                },
+            }
+        )
+
+    specs = [("<alpha>", "<guard>"), ("<beta>", "<block>")] * 8
+    shared_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=False)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        shared_results = list(
+            pool.map(lambda spec: compile_dispatch(shared_compiler, *spec), specs)
+        )
+
+    fresh_results = {
+        spec: compile_dispatch(
+            xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=False), *spec
+        )
+        for spec in set(specs)
+    }
+    for spec, shared_result in zip(specs, shared_results):
+        _assert_mask_traces_equal(fresh_results[spec], shared_result, "prefix" + spec[0] + "X")
+
+
 DYNAMIC_COMPILATION_CASES = [
     (_compile_ebnf_for_dynamic_test, "hello!"),
     (_compile_json_schema_for_dynamic_test, '{"name":"Ada","scores":[1,2]}'),
