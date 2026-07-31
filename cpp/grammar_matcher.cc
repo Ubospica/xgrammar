@@ -1388,64 +1388,6 @@ class GrammarMatcher::Impl : public EarleyParser {
     return std::nullopt;
   }
 
-  std::optional<std::vector<int32_t>> GetStableCharacterClassRepeatMaskKey(
-      const std::vector<ParserState>& latest_states
-  ) const {
-    std::vector<int32_t> key;
-    key.reserve(latest_states.size() * 14 + 2);
-    key.push_back(static_cast<int32_t>(latest_states.size()));
-    key.push_back(IsCompleted());
-    bool has_stable_repeat = false;
-    for (const auto& state : latest_states) {
-      if (state.rule_id < 0 || state.budget_deadline >= 0 ||
-          state.active_temperature_rule_id >= 0 || state.char_budget_deadline >= 0 ||
-          grammar_->GetRule(state.rule_id).lookahead_assertion_id != -1 ||
-          compiled_grammar_->earley_parser_metadata
-              .rule_has_context_dependent_ancestor[state.rule_id]) {
-        return std::nullopt;
-      }
-      const auto repeated_character_class = GetBatchAcceptedCharacterClassRepeat(state);
-      if (repeated_character_class.has_value()) {
-        const auto& parent = repeated_character_class->parent_state;
-        if (parent.repeat_count < repeated_character_class->lower ||
-            !repeated_character_class->has_stable_upper) {
-          return std::nullopt;
-        }
-        has_stable_repeat = true;
-        key.insert(
-            key.end(),
-            {1,
-             state.rule_id,
-             state.sequence_id,
-             state.element_id,
-             state.sub_element_id,
-             state.repeat_count,
-             state.partial_codepoint,
-             repeated_character_class->character_class_expr_id,
-             parent.rule_id,
-             parent.sequence_id,
-             parent.element_id,
-             parent.rule_start_pos,
-             parent.sub_element_id,
-             parent.partial_codepoint}
-        );
-      } else {
-        key.insert(
-            key.end(),
-            {0,
-             state.rule_id,
-             state.sequence_id,
-             state.element_id,
-             state.rule_start_pos,
-             state.sub_element_id,
-             state.repeat_count,
-             state.partial_codepoint}
-        );
-      }
-    }
-    return has_stable_repeat ? std::optional<std::vector<int32_t>>(std::move(key)) : std::nullopt;
-  }
-
   enum class CachedRowRefKind : uint8_t { kNone, kExternal, kCanonical, kCurrent };
 
   struct CachedParserState {
@@ -1762,13 +1704,46 @@ class GrammarMatcher::Impl : public EarleyParser {
   // virtual prefix, then falls back to EarleyParser. The cache is destroyed after one ParserState.
   class ContinuationTransitionCache {
    public:
-    ContinuationTransitionCache(Impl* matcher, int32_t external_row_count)
-        : matcher_(matcher),
-          external_row_count_(external_row_count),
-          memory_bytes_(
-              kAdmissionQueries * sizeof(TransitionSlot) + kMaxVirtualDepth * sizeof(Transition)
-          ),
-          peak_bytes_(memory_bytes_) {
+    ContinuationTransitionCache(Impl* matcher, int32_t external_row_count) : matcher_(matcher) {
+      Reset(external_row_count);
+    }
+
+    void Reset(int32_t external_row_count) {
+      external_row_count_ = external_row_count;
+      enabled_ = true;
+      admitted_ = false;
+      steady_fast_path_ = false;
+      disabled_for_low_reuse_ = false;
+      queries_ = 0;
+      misses_ = 0;
+      reuse_window_start_queries_ = 0;
+      reuse_window_start_misses_ = 0;
+      fast_queries_remaining_ = 0;
+      memory_bytes_ =
+          kAdmissionQueries * sizeof(TransitionSlot) + kMaxVirtualDepth * sizeof(Transition);
+      peak_bytes_ = memory_bytes_;
+      peak_canonical_rows_ = 0;
+      peak_canonical_configurations_ = 0;
+      num_transitions_ = 0;
+      warmup_transitions_.clear();
+      transition_table_.clear();
+      rows_.clear();
+      configurations_.clear();
+      absolute_rows_by_canonical_id_.clear();
+      transition_depth_ = 0;
+      current_transition_row_ = nullptr;
+      current_configuration_id_ = -1;
+      materialized_depth_ = 0;
+      tmp_completable_states_.clear();
+      tmp_scanable_states_.clear();
+      for (auto& masks : suffix_certificate_masks_) {
+        masks.clear();
+      }
+      suffix_certificate_masks_ready_.fill(0);
+      suffix_certificate_queries_.fill(0);
+      for (auto& accepted_union : suffix_certificate_accepted_unions_) {
+        accepted_union.reset();
+      }
       warmup_transitions_.reserve(kAdmissionQueries);
       XGRAMMAR_DCHECK(matcher_->rule_id_to_completable_states_.size() == external_row_count_ + 1);
       const auto initial_row_id = InternCurrentCompletableRow();
@@ -2525,13 +2500,13 @@ class GrammarMatcher::Impl : public EarleyParser {
       admitted_ = false;
       steady_fast_path_ = false;
       fast_queries_remaining_ = 0;
-      std::vector<TransitionSlot>().swap(warmup_transitions_);
-      std::vector<Transition>().swap(transition_table_);
-      std::vector<CanonicalCompletableRow>().swap(rows_);
-      std::vector<CanonicalConfiguration>().swap(configurations_);
-      std::vector<std::vector<int32_t>>().swap(absolute_rows_by_canonical_id_);
-      std::vector<std::pair<int32_t, ParserState>>().swap(tmp_completable_states_);
-      std::vector<ParserState>().swap(tmp_scanable_states_);
+      warmup_transitions_.clear();
+      transition_table_.clear();
+      rows_.clear();
+      configurations_.clear();
+      absolute_rows_by_canonical_id_.clear();
+      tmp_completable_states_.clear();
+      tmp_scanable_states_.clear();
       transition_depth_ = 0;
       current_transition_row_ = nullptr;
       current_configuration_id_ = -1;
@@ -3944,6 +3919,9 @@ class GrammarMatcher::Impl : public EarleyParser {
   std::vector<int32_t> tmp_unresolved_uncertain_indices_;
   std::vector<int32_t> tmp_rejected_indices_;
   std::vector<int32_t> tmp_rejected_indices_delta_;
+  std::vector<ParserState> tmp_latest_states_;
+  std::vector<std::pair<ParserState, const AdaptiveTokenMask*>> tmp_latest_states_with_masks_;
+  std::vector<int32_t> tmp_stable_character_class_repeat_key_;
   std::vector<WhitespaceContinuationBatchCacheEntry> whitespace_continuation_batch_cache_;
   struct CharacterClassRepeatMaskCacheEntry {
     std::vector<int32_t> key;
@@ -5160,7 +5138,9 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
   const auto& subtree_range = tokenizer_info_.GetTrieSubtreeNodesRange();
   // We need to have a copy, because scanable_state_history_ will be modified during the
   // FillNextTokenBitmask process, which can lead to undefined behavior.
-  auto latest_states = GetLatestScanableStates();
+  auto& latest_states = tmp_latest_states_;
+  const auto& current_scanable_states = scanable_state_history_[scanable_state_history_.size() - 1];
+  latest_states.assign(current_scanable_states.begin(), current_scanable_states.end());
   if (skip_expired) {
     latest_states.erase(
         std::remove_if(
@@ -5171,37 +5151,32 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
         latest_states.end()
     );
   }
-  const auto stable_character_class_repeat_key =
-      GetStableCharacterClassRepeatMaskKey(latest_states);
-  if (stable_character_class_repeat_key.has_value()) {
-    for (const auto& entry : character_class_repeat_mask_cache_) {
-      if (entry.key == *stable_character_class_repeat_key) {
-        DynamicBitset output_mask(
-            tokenizer_info_.GetVocabSize(), reinterpret_cast<uint32_t*>(bitmask_data_ptr)
-        );
-        output_mask = entry.mask;
-        return;
-      }
+  auto compute_raw_state_hash = [&]() {
+    uint64_t result = latest_states.size();
+    for (const auto& state : latest_states) {
+      HashCombineBinary(result, static_cast<uint32_t>(state.rule_id));
+      HashCombineBinary(result, static_cast<uint32_t>(state.sequence_id));
+      HashCombineBinary(result, static_cast<uint32_t>(state.element_id));
+      HashCombineBinary(result, static_cast<uint32_t>(state.sub_element_id));
+      HashCombineBinary(result, static_cast<uint32_t>(state.repeat_count));
+      HashCombineBinary(result, static_cast<uint32_t>(state.partial_codepoint));
     }
-  }
-  uint64_t raw_state_hash = latest_states.size();
-  for (const auto& state : latest_states) {
-    HashCombineBinary(raw_state_hash, static_cast<uint32_t>(state.rule_id));
-    HashCombineBinary(raw_state_hash, static_cast<uint32_t>(state.sequence_id));
-    HashCombineBinary(raw_state_hash, static_cast<uint32_t>(state.element_id));
-    HashCombineBinary(raw_state_hash, static_cast<uint32_t>(state.sub_element_id));
-    HashCombineBinary(raw_state_hash, static_cast<uint32_t>(state.repeat_count));
-    HashCombineBinary(raw_state_hash, static_cast<uint32_t>(state.partial_codepoint));
-  }
+    return result;
+  };
+  std::optional<uint64_t> raw_state_hash;
   bool resolved_mask_cache_started = false;
   std::optional<int32_t> full_mask_configuration;
-  if (!has_char_budget_rules_ && resolved_uncertain_mask_cache_.MayHaveFullMask(raw_state_hash)) {
+  if (!has_char_budget_rules_ && resolved_uncertain_mask_cache_.NumFullMaskResults() != 0) {
+    raw_state_hash = compute_raw_state_hash();
+  }
+  if (raw_state_hash.has_value() &&
+      resolved_uncertain_mask_cache_.MayHaveFullMask(*raw_state_hash)) {
     resolved_uncertain_mask_cache_.BeginFill();
     resolved_mask_cache_started = true;
     full_mask_configuration = resolved_uncertain_mask_cache_.InternCurrentConfiguration();
     if (full_mask_configuration.has_value()) {
       if (const auto* cached_mask = resolved_uncertain_mask_cache_.FindFullMask(
-              raw_state_hash, *full_mask_configuration
+              *raw_state_hash, *full_mask_configuration
           )) {
 #ifdef XGRAMMAR_PROFILE_COMPILE
         ++profile_full_mask_cache_hits_;
@@ -5234,10 +5209,64 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
                        << ", num of states=" << latest_states.size();
   }
 
-  std::vector<std::pair<ParserState, const AdaptiveTokenMask*>> latest_states_with_masks;
+  auto& latest_states_with_masks = tmp_latest_states_with_masks_;
+  latest_states_with_masks.clear();
+  auto& stable_character_class_repeat_key = tmp_stable_character_class_repeat_key_;
+  stable_character_class_repeat_key.clear();
+  stable_character_class_repeat_key.reserve(latest_states.size() * 14 + 2);
+  stable_character_class_repeat_key.push_back(static_cast<int32_t>(latest_states.size()));
+  stable_character_class_repeat_key.push_back(IsCompleted());
+  bool stable_character_class_repeat_key_possible = true;
+  bool has_stable_character_class_repeat = false;
 
   for (const auto& state : latest_states) {
     const auto repeated_character_class = GetBatchAcceptedCharacterClassRepeat(state);
+    if (stable_character_class_repeat_key_possible) {
+      if (state.rule_id < 0 || state.budget_deadline >= 0 ||
+          state.active_temperature_rule_id >= 0 || state.char_budget_deadline >= 0 ||
+          grammar_->GetRule(state.rule_id).lookahead_assertion_id != -1 ||
+          compiled_grammar_->earley_parser_metadata
+              .rule_has_context_dependent_ancestor[state.rule_id]) {
+        stable_character_class_repeat_key_possible = false;
+      } else if (repeated_character_class.has_value()) {
+        const auto& parent = repeated_character_class->parent_state;
+        if (parent.repeat_count < repeated_character_class->lower ||
+            !repeated_character_class->has_stable_upper) {
+          stable_character_class_repeat_key_possible = false;
+        } else {
+          has_stable_character_class_repeat = true;
+          stable_character_class_repeat_key.insert(
+              stable_character_class_repeat_key.end(),
+              {1,
+               state.rule_id,
+               state.sequence_id,
+               state.element_id,
+               state.sub_element_id,
+               state.repeat_count,
+               state.partial_codepoint,
+               repeated_character_class->character_class_expr_id,
+               parent.rule_id,
+               parent.sequence_id,
+               parent.element_id,
+               parent.rule_start_pos,
+               parent.sub_element_id,
+               parent.partial_codepoint}
+          );
+        }
+      } else {
+        stable_character_class_repeat_key.insert(
+            stable_character_class_repeat_key.end(),
+            {0,
+             state.rule_id,
+             state.sequence_id,
+             state.element_id,
+             state.rule_start_pos,
+             state.sub_element_id,
+             state.repeat_count,
+             state.partial_codepoint}
+        );
+      }
+    }
     const AdaptiveTokenMask* adaptive_token_mask =
         repeated_character_class.has_value()
             ? (repeated_character_class->has_stable_upper
@@ -5286,6 +5315,20 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     }
   }
 
+  const bool has_stable_character_class_repeat_key =
+      stable_character_class_repeat_key_possible && has_stable_character_class_repeat;
+  if (has_stable_character_class_repeat_key) {
+    for (const auto& entry : character_class_repeat_mask_cache_) {
+      if (entry.key == stable_character_class_repeat_key) {
+        DynamicBitset output_mask(
+            tokenizer_info_.GetVocabSize(), reinterpret_cast<uint32_t*>(bitmask_data_ptr)
+        );
+        output_mask = entry.mask;
+        return;
+      }
+    }
+  }
+
 #ifdef XGRAMMAR_PROFILE_COMPILE
   profile_union_uncertain_tokens_ += profile_uncertain_union_bitset_.Count();
   profile_unresolved_union_uncertain_tokens_ += tmp_unresolved_uncertain_bitset_.AssignDifference(
@@ -5298,6 +5341,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
   constexpr bool used_full_configuration_hybrid = false;
 
   if (!used_full_configuration_hybrid) {
+    std::unique_ptr<ContinuationTransitionCache> reusable_transition_cache;
     for (const auto& [state, adaptive_token_mask_ptr] : latest_states_with_masks) {
       const auto& adaptive_token_mask = *adaptive_token_mask_ptr;
 #ifdef XGRAMMAR_PROFILE_COMPILE
@@ -5312,7 +5356,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
               static_cast<int32_t>(ContinuationTransitionCache::MaxVirtualDepth());
       const int32_t external_row_count =
           use_transition_cache ? rule_id_to_completable_states_.size() : -1;
-      std::unique_ptr<ContinuationTransitionCache> transition_cache;
+      ContinuationTransitionCache* transition_cache = nullptr;
 
       // For each ParserState, we will check every uncertain token and put them into the accepted or
       // rejected list.
@@ -5433,7 +5477,13 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
       bool deferred_uncertain_has_rejection = false;
       if (use_transition_cache && !skip_uncertain_evaluation &&
           !adaptive_token_mask.uncertain_indices.empty()) {
-        transition_cache = std::make_unique<ContinuationTransitionCache>(this, external_row_count);
+        if (reusable_transition_cache) {
+          reusable_transition_cache->Reset(external_row_count);
+        } else {
+          reusable_transition_cache =
+              std::make_unique<ContinuationTransitionCache>(this, external_row_count);
+        }
+        transition_cache = reusable_transition_cache.get();
       }
       size_t uncertain_position = 0;
       int lcp_with_last_evaluated_token = std::numeric_limits<int>::max();
@@ -5445,7 +5495,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
         // dynamic-LCP branches that would otherwise run once per vocabulary token.
         XGRAMMAR_DCHECK(transition_cache != nullptr);
         prev_matched_size = EvaluateDisjointUncertainTokens(
-            adaptive_token_mask, transition_cache.get(), &deferred_uncertain_has_rejection
+            adaptive_token_mask, transition_cache, &deferred_uncertain_has_rejection
         );
 
         if (deferred_uncertain_has_rejection) {
@@ -5676,7 +5726,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
       bitmask_data_ptr, tmp_accepted_bitset_, tmp_rejected_indices_, can_reach_end, false
   );
   constexpr size_t kMaxCharacterClassRepeatMaskCacheEntries = 32;
-  if (stable_character_class_repeat_key.has_value() &&
+  if (has_stable_character_class_repeat_key &&
       character_class_repeat_mask_cache_.size() < kMaxCharacterClassRepeatMaskCacheEntries) {
     const DynamicBitset output_mask(
         tokenizer_info_.GetVocabSize(), reinterpret_cast<uint32_t*>(bitmask_data_ptr)
@@ -5684,7 +5734,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     DynamicBitset owned_mask(tokenizer_info_.GetVocabSize());
     owned_mask = output_mask;
     character_class_repeat_mask_cache_.push_back(CharacterClassRepeatMaskCacheEntry{
-        *stable_character_class_repeat_key, std::move(owned_mask)
+        tmp_stable_character_class_repeat_key_, std::move(owned_mask)
     });
   }
   constexpr auto kFullMaskCacheAdmissionLatency = std::chrono::microseconds(200);
@@ -5698,11 +5748,14 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
       full_mask_configuration = resolved_uncertain_mask_cache_.InternCurrentConfiguration();
     }
     if (full_mask_configuration.has_value()) {
+      if (!raw_state_hash.has_value()) {
+        raw_state_hash = compute_raw_state_hash();
+      }
       const DynamicBitset output_mask(
           tokenizer_info_.GetVocabSize(), reinterpret_cast<uint32_t*>(bitmask_data_ptr)
       );
       resolved_uncertain_mask_cache_.InsertFullMask(
-          raw_state_hash, *full_mask_configuration, output_mask
+          *raw_state_hash, *full_mask_configuration, output_mask
       );
     }
   }
