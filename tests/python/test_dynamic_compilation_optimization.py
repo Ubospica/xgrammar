@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 import torch
 
@@ -16,6 +18,12 @@ def _mask_trace(compiled_grammar: xgr.CompiledGrammar, input_string: str):
         assert matcher.accept_string(character)
     assert matcher.is_terminated()
     return trace
+
+
+def _next_token_mask(matcher: xgr.GrammarMatcher, vocab_size: int) -> torch.Tensor:
+    bitmask = xgr.allocate_token_bitmask(1, vocab_size)
+    matcher.fill_next_token_bitmask(bitmask)
+    return bitmask_to_bool_mask(bitmask, vocab_size)
 
 
 def _assert_dynamic_masks_equal_eager(grammar: str, vocabulary, input_string: str) -> None:
@@ -134,3 +142,79 @@ def test_shared_parser_feature_metadata_preserves_matcher_behavior():
             )
             assert matcher.accept_string(value) and matcher.is_terminated()
             assert matcher.get_captures() == expected_captures
+
+
+def test_reused_matcher_scratch_survives_fork_reset_failure_and_rollback():
+    vocabulary = ["a", "b", "c", "d", "ab", "bc", "abc", "cd", "x", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar('root ::= [a-c]{0,8} "d"')
+    token_ids = {token: vocabulary.index(token) for token in ["a", "b", "c", "d", "x"]}
+
+    def fresh_mask(prefix):
+        fresh = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        assert all(fresh.accept_token(token_id) for token_id in prefix)
+        return _next_token_mask(fresh, tokenizer_info.vocab_size)
+
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    for _ in range(32):
+        matcher.reset()
+        prefix = []
+        for token in ["a", "b"]:
+            expected = fresh_mask(prefix)
+            torch.testing.assert_close(
+                _next_token_mask(matcher, tokenizer_info.vocab_size), expected, rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                _next_token_mask(matcher, tokenizer_info.vocab_size), expected, rtol=0, atol=0
+            )
+            assert matcher.accept_token(token_ids[token])
+            prefix.append(token_ids[token])
+
+        forked = matcher.fork()
+        torch.testing.assert_close(
+            _next_token_mask(forked, tokenizer_info.vocab_size), fresh_mask(prefix), rtol=0, atol=0
+        )
+        assert forked.accept_token(token_ids["c"])
+        assert forked.accept_token(token_ids["d"])
+        assert forked.is_terminated()
+
+        before_failure = _next_token_mask(matcher, tokenizer_info.vocab_size)
+        assert not matcher.accept_token(token_ids["x"])
+        torch.testing.assert_close(
+            _next_token_mask(matcher, tokenizer_info.vocab_size), before_failure, rtol=0, atol=0
+        )
+
+        matcher.rollback(1)
+        prefix.pop()
+        torch.testing.assert_close(
+            _next_token_mask(matcher, tokenizer_info.vocab_size), fresh_mask(prefix), rtol=0, atol=0
+        )
+        assert matcher.accept_token(token_ids["c"])
+        assert matcher.accept_token(token_ids["d"])
+        assert matcher.is_terminated()
+
+
+def test_reused_matcher_scratch_is_isolated_across_matchers():
+    vocabulary = ["a", "b", "c", "d", "ab", "bc", "abc", "cd", "x", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar('root ::= [a-c]{0,8} "d"')
+    token_ids = [vocabulary.index(token) for token in ["a", "b", "c", "d"]]
+
+    def run_trace(_):
+        matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        trace = []
+        for token_id in token_ids:
+            trace.append(_next_token_mask(matcher, tokenizer_info.vocab_size))
+            assert matcher.accept_token(token_id)
+        assert matcher.is_terminated()
+        return trace
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        traces = list(pool.map(run_trace, range(64)))
+    for trace in traces[1:]:
+        for expected, actual in zip(traces[0], trace):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
