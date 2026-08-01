@@ -409,19 +409,19 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   }
 
   // execute Predict and Complete for all states in the queue until empty.
-  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
+  rule_id_to_completable_states_.PushBackEmpty();
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
   while (!tmp_process_state_queue_.empty()) {
-    const auto state = std::move(tmp_process_state_queue_.front());
+    const ParserState& state = *tmp_process_state_queue_.front();
     tmp_process_state_queue_.pop();
     auto [scanable, completable] = Predict(state, debug_print);
     if (completable) {
       Complete(state, debug_print);
     }
     if (scanable) {
-      tmp_states_to_be_added_.push_back(state);
+      tmp_states_to_be_added_.push_back(&state);
     }
   }
 
@@ -430,7 +430,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
     RemoveCommittedLazyStates();
   }
   is_completed_.push_back(tmp_accept_stop_token_);
-  scanable_state_history_.PushBack(tmp_states_to_be_added_);
+  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
   if (has_char_budget_rules_) {
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
@@ -438,9 +438,9 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
 }
 
 void EarleyParser::RemoveCommittedLazyStates() {
-  auto is_committed = [&](const ParserState& state) {
+  auto is_committed = [&](const ParserState* state) {
     for (const auto& [rule_id, rule_start_pos] : tmp_completed_lazy_occurrences_) {
-      if (state.rule_id == rule_id && state.rule_start_pos == rule_start_pos) {
+      if (state->rule_id == rule_id && state->rule_start_pos == rule_start_pos) {
         return true;
       }
     }
@@ -542,26 +542,26 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
   tmp_states_to_be_added_.clear();
   tmp_completed_lazy_occurrences_.clear();
   Enqueue(state);
-  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
+  rule_id_to_completable_states_.PushBackEmpty();
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
   while (!tmp_process_state_queue_.empty()) {
-    const auto state = tmp_process_state_queue_.front();
+    const ParserState& state = *tmp_process_state_queue_.front();
     tmp_process_state_queue_.pop();
     auto [scanable, completable] = Predict(state);
     if (completable) {
       Complete(state);
     }
     if (scanable) {
-      tmp_states_to_be_added_.push_back(state);
+      tmp_states_to_be_added_.push_back(&state);
     }
   }
   if (!tmp_completed_lazy_occurrences_.empty()) {
     RemoveCommittedLazyStates();
   }
   is_completed_.push_back(tmp_accept_stop_token_);
-  scanable_state_history_.PushBack(tmp_states_to_be_added_);
+  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
   if (has_char_budget_rules_) {
     char_count_history_.push_back(GetCurrentCharIndex());
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
@@ -870,7 +870,7 @@ void EarleyParser::AdvanceByteString(
       Enqueue(new_state);
       // Assert: In a sequence, the bytestring can't be skipped. So the state can't be repeated.
     } else {
-      tmp_states_to_be_added_.push_back(new_state);
+      EnqueueWithoutProcessing(new_state);
     }
   }
   return;
@@ -945,7 +945,7 @@ void EarleyParser::AdvanceCharacterClass(
         // For positive classes: only continue if some range could match
         bool should_continue = is_negative ? true : could_match;
         if (should_continue) {
-          tmp_states_to_be_added_.push_back(new_state);
+          EnqueueWithoutProcessing(new_state);
         }
       }
     }
@@ -985,7 +985,7 @@ void EarleyParser::AdvanceCharacterClass(
       auto new_state = state;
       new_state.sub_element_id = num_bytes - 1;
       new_state.partial_codepoint = partial;
-      tmp_states_to_be_added_.push_back(new_state);
+      EnqueueWithoutProcessing(new_state);
     }
     return;
   }
@@ -1078,7 +1078,7 @@ void EarleyParser::AdvanceCharacterClassStar(
         // For positive classes: only continue if some range could match
         bool should_continue = is_negative ? true : could_match;
         if (should_continue) {
-          tmp_states_to_be_added_.push_back(new_state);
+          EnqueueWithoutProcessing(new_state);
         }
       }
     }
@@ -1118,7 +1118,7 @@ void EarleyParser::AdvanceCharacterClassStar(
       auto new_state = state;
       new_state.sub_element_id = num_bytes - 1;
       new_state.partial_codepoint = partial;
-      tmp_states_to_be_added_.push_back(new_state);
+      EnqueueWithoutProcessing(new_state);
     }
     return;
   }
@@ -1144,13 +1144,11 @@ void EarleyParser::AdvanceFsm(const ParserState& state, const uint8_t ch) {
     if ((!edge.IsCharRange()) || ch < edge.min || ch > edge.max) {
       continue;
     }
-    auto new_state = state;
-    new_state.element_id = edge.target;
     const uint8_t flags = GetFsmStateFlags(state.rule_id, edge.target);
     if (!(flags & kFsmStateNonTerminal) && !(flags & kFsmStateEnd) && (flags & kFsmStateScanable)) {
-      EnqueueWithoutProcessing(std::move(new_state));
+      EnqueueFsmTransitionWithoutProcessing(state, edge.target);
     } else {
-      Enqueue(std::move(new_state));
+      EnqueueFsmTransition(state, edge.target);
     }
   }
 }
@@ -1206,63 +1204,47 @@ bool EarleyParser::AdvanceAtomicToken(
     }
     return false;
   }
-  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
+  rule_id_to_completable_states_.PushBackEmpty();
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
   while (!tmp_process_state_queue_.empty()) {
-    const auto state = std::move(tmp_process_state_queue_.front());
+    const ParserState& state = *tmp_process_state_queue_.front();
     tmp_process_state_queue_.pop();
     auto [scanable, completable] = Predict(state, debug_print);
     if (completable) {
       Complete(state, debug_print);
     }
     if (scanable) {
-      tmp_states_to_be_added_.push_back(state);
+      tmp_states_to_be_added_.push_back(&state);
     }
   }
   if (!tmp_completed_lazy_occurrences_.empty()) {
     RemoveCommittedLazyStates();
   }
   is_completed_.push_back(tmp_accept_stop_token_);
-  scanable_state_history_.PushBack(tmp_states_to_be_added_);
+  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
   if (has_char_budget_rules_) {
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
   return true;
 }
 
-bool RepeatDetector::IsVisited(const ParserState& state) const {
-  // If the size is larger than the threshold, then we use the set to check.
-  if (size_ > transition_threshold_) {
-    return visited_set_.find(state) != visited_set_.end();
-  }
-  return std::find_if(
-             visited_vector_.begin(),
-             visited_vector_.begin() + size_,
-             [&state](const ParserState& s) { return StateEqualForParsing()(state, s); }
-         ) != visited_vector_.begin() + size_;
-}
-
-void RepeatDetector::Insert(const ParserState& state) {
-  if (size_ == transition_threshold_) {
-    for (const auto& s : visited_vector_) {
-      visited_set_.insert(s);
+const ParserState* RepeatDetector::InsertInSet(const ParserState& state) {
+  if (!using_set_) {
+    for (const auto& existing : visited_vector_) {
+      visited_set_.insert(existing);
     }
+    using_set_ = true;
   }
-  size_++;
-  if (size_ > transition_threshold_) {
-    visited_set_.insert(state);
-  } else {
-    visited_vector_[size_ - 1] = state;
+  const auto [it, inserted] = visited_set_.insert(state);
+  if (inserted) {
+    ++size_;
+    return &*it;
   }
+  return nullptr;
 }
 
-void RepeatDetector::Clear() {
-  if (size_ > transition_threshold_) {
-    visited_set_.clear();
-  }
-  size_ = 0;
-}
+void RepeatDetector::ClearSet() { visited_set_.clear(); }
 
 }  // namespace xgrammar
