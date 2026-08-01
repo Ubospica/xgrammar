@@ -95,6 +95,36 @@ def test_jit_mode_matches_eager_masks(compile_grammar, input_string):
     )
 
 
+@pytest.mark.parametrize(
+    "repeat_range,value",
+    [
+        ("{0}", ""),
+        ("{1}", "a"),
+        ("{0,1}", ""),
+        ("{1,3}", "ab"),
+        ("{63,65}", "a" * 64),
+        ("{127,129}", "a" * 128),
+        ("{255,257}", "a" * 256),
+        ("{2,}", "abc"),
+    ],
+)
+def test_jit_mode_preserved_repetition_ranges_match_eager(repeat_range, value):
+    vocabulary = [">", "<", "a", "aa", "ab", "abc", "b", "ba", "c", b"\xc3", b"\xff"]
+    vocabulary += [f"x{index}" for index in range(21)]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    grammar = f'root ::= ">" [a-z]{repeat_range} "<"'
+    eager_grammar = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=False
+    ).compile_grammar(grammar)
+    jit_grammar = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=False, jit_mode=True
+    ).compile_grammar(grammar)
+
+    _assert_traces_equal(
+        _mask_trace(eager_grammar, ">" + value + "<"), _mask_trace(jit_grammar, ">" + value + "<")
+    )
+
+
 def test_jit_mode_populates_and_reuses_masks():
     tokenizer_info = xgr.TokenizerInfo(JIT_MODE_VOCABULARY, stop_token_ids=[])
     jit_grammar = _compile_builtin_json(

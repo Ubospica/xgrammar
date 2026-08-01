@@ -2981,7 +2981,7 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
 
 class GrammarOptimizerImpl {
  public:
-  static Grammar Apply(const Grammar& grammar) {
+  static Grammar Apply(const Grammar& grammar, bool expand_repetition_ranges) {
     // ByteStringFuser and RuleInliner rewrite the grammar in place, so work on a private copy: the
     // input grammar may be shared (e.g. a cached grammar) and must not be mutated. Copy the impl
     // directly (contiguous vector copies) instead of going through GrammarBuilder, which would
@@ -2989,7 +2989,9 @@ class GrammarOptimizerImpl {
     Grammar result(std::make_shared<Grammar::Impl>(*grammar.operator->()));
     ByteStringFuser::Apply(&result);
     RuleInliner::Apply(&result);
-    result = RepetitionRangeExpander::Apply(result);
+    if (expand_repetition_ranges) {
+      result = RepetitionRangeExpander::Apply(result);
+    }
     result = LazyBodyFlattenerImpl().Apply(result);
     result = DeadCodeEliminator::Apply(result);
     result = LookaheadAssertionAnalyzer::Apply(result);
@@ -3998,7 +4000,11 @@ Grammar RepetitionRangeExpander::Apply(const Grammar& grammar) {
 }
 
 Grammar GrammarOptimizer::Apply(const Grammar& grammar) {
-  return GrammarOptimizerImpl::Apply(grammar);
+  return GrammarOptimizerImpl::Apply(grammar, true);
+}
+
+Grammar GrammarOptimizer::Apply(const Grammar& grammar, bool expand_repetition_ranges) {
+  return GrammarOptimizerImpl::Apply(grammar, expand_repetition_ranges);
 }
 
 void ByteStringFuser::Apply(Grammar* grammar) { ByteStringFuserImpl().Apply(grammar); }
