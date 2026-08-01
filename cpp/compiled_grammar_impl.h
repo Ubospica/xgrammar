@@ -126,6 +126,8 @@ class CompiledGrammar::Impl {
   /*! \brief Whether missing token masks should be generated on first use. */
   bool enable_dynamic_compilation{false};
 
+  /*! \brief Grammar-wide flags and nullable rules shared by Earley parsers. */
+  std::shared_ptr<const EarleyParserGrammarFeatures> earley_parser_grammar_features;
   /*! \brief Tag-dispatch data retained for on-demand token mask generation. */
   std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
 

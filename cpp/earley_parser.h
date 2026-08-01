@@ -307,6 +307,21 @@ struct CaptureEvent {
   std::vector<CaptureOccurrence> stop_capture_targets;
 };
 
+/*! \brief Immutable grammar-wide features shared by short-lived Earley parsers. */
+struct EarleyParserGrammarFeatures {
+  std::vector<uint8_t> rule_is_nullable;
+  bool has_budget_rules = false;
+  bool has_char_budget_rules = false;
+  bool capture_tracking = false;
+  bool has_hidden_capture_rules = false;
+
+  explicit EarleyParserGrammarFeatures(const Grammar& grammar);
+
+  friend std::size_t MemorySize(const EarleyParserGrammarFeatures& features) {
+    return MemorySize(features.rule_is_nullable);
+  }
+};
+
 class EarleyParser {
   /*!
    * \brief Here is an article about Earley Parser.
@@ -370,8 +385,8 @@ class EarleyParser {
   /*! \brief Lazily-computed FSM state properties, indexed by rule id and state id. */
   std::vector<std::vector<uint8_t>> fsm_state_flags_cache_;
 
-  /*! \brief Whether each rule can match the empty string. */
-  std::vector<uint8_t> rule_is_nullable_;
+  /*! \brief Grammar-wide parser features shared by every parser for this grammar. */
+  std::shared_ptr<const EarleyParserGrammarFeatures> grammar_features_;
 
   /*! \brief Compute and cache properties for a state in a per-rule FSM. */
   uint8_t InitializeFsmStateFlags(int32_t rule_id, int32_t state_id);
@@ -389,7 +404,9 @@ class EarleyParser {
     return InitializeFsmStateFlags(rule_id, state_id);
   }
 
-  bool IsRuleNullable(int32_t rule_id) const { return rule_is_nullable_[rule_id] != 0; }
+  bool IsRuleNullable(int32_t rule_id) const {
+    return grammar_features_->rule_is_nullable[rule_id] != 0;
+  }
 
   /*! \brief The index of the LLM token currently being accepted, set by the matcher; -1
    * before any token. budget_deadline values are compared against it. */
@@ -669,7 +686,9 @@ class EarleyParser {
    * from the root rule of the grammar.
    */
   explicit EarleyParser(
-      const Grammar& grammar, std::optional<ParserState> initial_state = std::nullopt
+      const Grammar& grammar,
+      std::optional<ParserState> initial_state = std::nullopt,
+      std::shared_ptr<const EarleyParserGrammarFeatures> grammar_features = nullptr
   );
 
   /*!

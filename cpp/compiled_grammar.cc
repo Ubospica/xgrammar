@@ -208,7 +208,10 @@ std::optional<SerializationError> DeserializeJSONValue(
 std::size_t MemorySize(const CompiledGrammar::Impl& impl) {
   std::lock_guard<std::mutex> lock(impl.adaptive_token_mask_cache_mutex);
   return MemorySize(impl.grammar) + MemorySize(impl.adaptive_token_mask_cache) +
-         MemorySize(impl.tag_dispatch_rule_id_to_second_slicing_bitset);
+         MemorySize(impl.tag_dispatch_rule_id_to_second_slicing_bitset) +
+         (impl.earley_parser_grammar_features == nullptr
+              ? 0
+              : MemorySize(*impl.earley_parser_grammar_features));
 }
 
 std::size_t CompiledGrammar::MemorySizeBytes() const { return MemorySize(*pimpl_); }

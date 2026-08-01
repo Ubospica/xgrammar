@@ -454,38 +454,45 @@ void EarleyParser::RemoveCommittedLazyStates() {
   );
 }
 
-EarleyParser::EarleyParser(const Grammar& grammar, std::optional<ParserState> initial_state)
+EarleyParserGrammarFeatures::EarleyParserGrammarFeatures(const Grammar& grammar)
+    : rule_is_nullable(grammar->NumRules(), 0) {
+  for (int32_t rule_id = 0; rule_id < grammar->NumRules(); ++rule_id) {
+    const auto& rule = grammar->GetRule(rule_id);
+    const auto* suffix_stop_info = grammar->GetSuffixStopInfo(rule_id);
+    has_budget_rules = has_budget_rules || rule.max_tokens >= 0;
+    has_char_budget_rules = has_char_budget_rules || rule.max_chars >= 0;
+    capture_tracking =
+        capture_tracking || !rule.capture_name.empty() ||
+        (suffix_stop_info != nullptr && !suffix_stop_info->stop_capture_name.empty());
+    has_hidden_capture_rules =
+        has_hidden_capture_rules ||
+        (suffix_stop_info != nullptr &&
+         (suffix_stop_info->hidden_suffix_bytes > 0 || suffix_stop_info->hidden_stop_bytes > 0));
+  }
+  for (int32_t rule_id : grammar->allow_empty_rule_ids) {
+    rule_is_nullable[rule_id] = true;
+  }
+}
+
+EarleyParser::EarleyParser(
+    const Grammar& grammar,
+    std::optional<ParserState> initial_state,
+    std::shared_ptr<const EarleyParserGrammarFeatures> grammar_features
+)
     : grammar_(grammar),
       fsm_state_flags_cache_(grammar->NumRules()),
-      rule_is_nullable_(grammar->NumRules(), 0) {
+      grammar_features_(
+          grammar_features != nullptr ? std::move(grammar_features)
+                                      : std::make_shared<const EarleyParserGrammarFeatures>(grammar)
+      ) {
   if (!grammar->optimized) {
     XGRAMMAR_LOG(FATAL) << "The grammar is not optimized. Please optimize the grammar before using "
                            "the Earley parser.";
   }
-  for (int32_t i = 0; i < grammar_->NumRules(); ++i) {
-    has_budget_rules_ = has_budget_rules_ || grammar_->GetRule(i).max_tokens >= 0;
-    has_char_budget_rules_ = has_char_budget_rules_ || grammar_->GetRule(i).max_chars >= 0;
-    if (has_budget_rules_ && has_char_budget_rules_) {
-      break;
-    }
-  }
-  for (int32_t i = 0; i < grammar_->NumRules(); ++i) {
-    const auto& rule = grammar_->GetRule(i);
-    const auto* suffix_stop_info = grammar_->GetSuffixStopInfo(i);
-    capture_tracking_ =
-        capture_tracking_ || !rule.capture_name.empty() ||
-        (suffix_stop_info != nullptr && !suffix_stop_info->stop_capture_name.empty());
-    has_hidden_capture_rules_ =
-        has_hidden_capture_rules_ ||
-        (suffix_stop_info != nullptr &&
-         (suffix_stop_info->hidden_suffix_bytes > 0 || suffix_stop_info->hidden_stop_bytes > 0));
-    if (capture_tracking_ && has_hidden_capture_rules_) {
-      break;
-    }
-  }
-  for (int32_t rule_id : grammar_->allow_empty_rule_ids) {
-    rule_is_nullable_[rule_id] = true;
-  }
+  has_budget_rules_ = grammar_features_->has_budget_rules;
+  has_char_budget_rules_ = grammar_features_->has_char_budget_rules;
+  capture_tracking_ = grammar_features_->capture_tracking;
+  has_hidden_capture_rules_ = grammar_features_->has_hidden_capture_rules;
   PushStateAndExpand(initial_state.has_value() ? *initial_state : RootInitialState());
 }
 
