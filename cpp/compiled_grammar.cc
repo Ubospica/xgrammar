@@ -215,9 +215,14 @@ std::size_t MemorySize(const CompiledGrammar::Impl& impl) {
   if (impl.jit_mode) {
     lock.lock();
   }
+  std::lock_guard<std::mutex> repeated_character_class_lock(
+      impl.repeated_character_class_token_masks_mutex
+  );
   return MemorySize(impl.grammar) + MemorySize(impl.earley_parser_metadata) +
          MemorySize(impl.adaptive_token_mask_cache) +
-         MemorySize(impl.tag_dispatch_rule_id_to_second_slicing_bitset);
+         MemorySize(impl.tag_dispatch_rule_id_to_second_slicing_bitset) +
+         MemorySize(impl.character_class_token_summaries) +
+         MemorySize(impl.repeated_character_class_token_masks);
 }
 
 std::size_t CompiledGrammar::MemorySizeBytes() const { return MemorySize(*pimpl_); }

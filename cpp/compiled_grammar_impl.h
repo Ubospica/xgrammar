@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -25,6 +26,46 @@
 namespace xgrammar {
 
 /******************* CompiledGrammar Datastructures *******************/
+
+struct CharacterClassTokenSummary {
+  int32_t sorted_vocab_index;
+  int32_t consumed_characters;
+  bool consumed_whole_token;
+  bool has_completed_character_prefix;
+};
+
+struct IntVectorHash {
+  size_t operator()(const std::vector<int32_t>& values) const {
+    size_t result = 0;
+    for (int32_t value : values) {
+      result ^= std::hash<int32_t>{}(value) + 0x9e3779b9 + (result << 6) + (result >> 2);
+    }
+    return result;
+  }
+};
+
+struct RepeatedCharacterClassTokenMaskKey {
+  std::vector<int32_t> character_class;
+  int32_t max_characters;
+
+  bool operator==(const RepeatedCharacterClassTokenMaskKey& other) const {
+    return max_characters == other.max_characters && character_class == other.character_class;
+  }
+
+  friend std::size_t MemorySize(const RepeatedCharacterClassTokenMaskKey& key) {
+    return MemorySize(key.character_class);
+  }
+};
+
+struct RepeatedCharacterClassTokenMaskKeyHash {
+  size_t operator()(const RepeatedCharacterClassTokenMaskKey& key) const {
+    size_t result = std::hash<int32_t>{}(key.max_characters);
+    for (int32_t value : key.character_class) {
+      result ^= std::hash<int32_t>{}(value) + 0x9e3779b9 + (result << 6) + (result >> 2);
+    }
+    return result;
+  }
+};
 
 /*!
  * \brief Preprocessed information, for a given specific ParserState, divides the token set
@@ -132,8 +173,23 @@ class CompiledGrammar::Impl {
   /*! \brief Tag dispatch data retained for token mask generation. */
   std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
 
+  /*! \brief Token summaries and masks generated for repeated character classes. */
+  std::unordered_map<std::vector<int32_t>, std::vector<CharacterClassTokenSummary>, IntVectorHash>
+      character_class_token_summaries;
+  std::unordered_map<
+      RepeatedCharacterClassTokenMaskKey,
+      AdaptiveTokenMask,
+      RepeatedCharacterClassTokenMaskKeyHash>
+      repeated_character_class_token_masks;
+  mutable std::mutex repeated_character_class_token_masks_mutex;
+
   /*! \brief Get a cached token mask, generating it when jit_mode is enabled. */
   const AdaptiveTokenMask& GetAdaptiveTokenMask(const ParserState& state, bool is_root_rule);
+
+  /*! \brief Get the token mask for a repeated character class. */
+  const AdaptiveTokenMask& GetRepeatedCharacterClassTokenMask(
+      int32_t character_class_expr_id, int32_t max_characters
+  );
 
   /*! \brief Generate every token mask before serialization. */
   void MaterializeAdaptiveTokenMaskCache();

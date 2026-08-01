@@ -203,7 +203,7 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
       }
       // If the repeat count is less than the max repeat count, we can continue to
       // visit the repeat state for another round.
-      if (new_state.repeat_count < max_repeat_count) {
+      if (max_repeat_count == -1 || new_state.repeat_count < max_repeat_count) {
         Enqueue(new_state);
       }
       continue;
@@ -235,7 +235,7 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
             parent_state.char_budget_deadline
         });
       }
-      if (new_count < info.Upper()) {
+      if (info.Upper() == -1 || new_count < info.Upper()) {
         Enqueue(ParserState{
             parent_state.rule_id,
             parent_state.sequence_id,
@@ -306,8 +306,10 @@ std::pair</* scanable */ bool, /* completable */ bool> EarleyParser::Predict(
       const int32_t& max_repeat_count = element_expr[2];
       // If the current repeat count is less than the max repeat count,
       // we can expand the next rule reference element.
-      XGRAMMAR_DCHECK(state.repeat_count <= max_repeat_count);
-      ExpandNextRuleRefElement(state, grammar_expr, &element_expr, debug_print);
+      XGRAMMAR_DCHECK(max_repeat_count == -1 || state.repeat_count <= max_repeat_count);
+      if (max_repeat_count == -1 || state.repeat_count < max_repeat_count) {
+        ExpandNextRuleRefElement(state, grammar_expr, &element_expr, debug_print);
+      }
       if (state.repeat_count >= min_repeat_count) {
         Enqueue(ParserState{
             state.rule_id,
@@ -458,7 +460,8 @@ EarleyParserGrammarMetadata::EarleyParserGrammarMetadata(const Grammar& grammar)
     : fsm_state_flags(
           grammar->complete_fsm.NumStates(), EarleyParserGrammarMetadata::kFsmStateInitialized
       ),
-      rule_is_nullable(grammar->NumRules(), 0) {
+      rule_is_nullable(grammar->NumRules(), 0),
+      rule_has_context_dependent_ancestor(grammar->NumRules(), 0) {
   XGRAMMAR_CHECK(grammar->optimized)
       << "Cannot build Earley parser metadata for an unoptimized grammar";
 
@@ -482,13 +485,44 @@ EarleyParserGrammarMetadata::EarleyParserGrammarMetadata(const Grammar& grammar)
     }
   }
 
-  for (const auto& optional_rule_fsm : grammar->per_rule_fsms) {
+  std::vector<std::vector<int32_t>> referenced_rules(grammar->NumRules());
+  for (int32_t rule_id = 0; rule_id < grammar->NumRules(); ++rule_id) {
+    const auto& rule = grammar->GetRule(rule_id);
+    rule_has_context_dependent_ancestor[rule_id] = rule.max_tokens >= 0 || rule.max_chars >= 0 ||
+                                                   rule.is_lazy || rule.temperature.has_value() ||
+                                                   grammar->GetSuffixStopInfo(rule_id) != nullptr;
+    const auto& optional_rule_fsm = grammar->per_rule_fsms[rule_id];
     XGRAMMAR_DCHECK(optional_rule_fsm.has_value());
     std::unordered_set<int> reachable_states;
     optional_rule_fsm->GetFsm().GetReachableStates(&reachable_states);
     for (int32_t state_id : reachable_states) {
       if (optional_rule_fsm->GetFsm().IsEndState(state_id)) {
         fsm_state_flags[state_id] |= EarleyParserGrammarMetadata::kFsmStateEnd;
+      }
+      for (const auto& edge : optional_rule_fsm->GetFsm().GetFsm().GetEdges(state_id)) {
+        if (edge.IsRuleRef()) {
+          referenced_rules[rule_id].push_back(edge.GetRefRuleId());
+        } else if (edge.IsRepeatRef()) {
+          referenced_rules[rule_id].push_back(
+              grammar->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex()).RuleId()
+          );
+        }
+      }
+    }
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (int32_t rule_id = 0; rule_id < grammar->NumRules(); ++rule_id) {
+      if (!rule_has_context_dependent_ancestor[rule_id]) {
+        continue;
+      }
+      for (int32_t referenced_rule_id : referenced_rules[rule_id]) {
+        if (!rule_has_context_dependent_ancestor[referenced_rule_id]) {
+          rule_has_context_dependent_ancestor[referenced_rule_id] = 1;
+          changed = true;
+        }
       }
     }
   }
@@ -511,6 +545,10 @@ EarleyParser::EarleyParser(
   XGRAMMAR_CHECK(
       grammar_metadata_->rule_is_nullable.size() == static_cast<size_t>(grammar->NumRules())
   ) << "The Earley parser metadata does not match the grammar's rules";
+  XGRAMMAR_CHECK(
+      grammar_metadata_->rule_has_context_dependent_ancestor.size() ==
+      static_cast<size_t>(grammar->NumRules())
+  ) << "The Earley parser metadata does not match the grammar's rule ancestry";
   for (int32_t i = 0; i < grammar_->NumRules(); ++i) {
     has_budget_rules_ = has_budget_rules_ || grammar_->GetRule(i).max_tokens >= 0;
     has_char_budget_rules_ = has_char_budget_rules_ || grammar_->GetRule(i).max_chars >= 0;
@@ -750,7 +788,7 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
             state.char_budget_deadline
         });
       }
-      if (state.repeat_count >= repeat_info.Upper()) {
+      if (repeat_info.Upper() != -1 && state.repeat_count >= repeat_info.Upper()) {
         continue;
       }
     } else {

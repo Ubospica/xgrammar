@@ -256,11 +256,15 @@ struct EarleyParserGrammarMetadata {
   /*! \brief Whether each rule can match the empty string. */
   std::vector<uint8_t> rule_is_nullable;
 
+  /*! \brief Whether each rule is nested in a rule whose matching depends on runtime context. */
+  std::vector<uint8_t> rule_has_context_dependent_ancestor;
+
   EarleyParserGrammarMetadata() = default;
   explicit EarleyParserGrammarMetadata(const Grammar& grammar);
 
   friend std::size_t MemorySize(const EarleyParserGrammarMetadata& metadata) {
-    return MemorySize(metadata.fsm_state_flags) + MemorySize(metadata.rule_is_nullable);
+    return MemorySize(metadata.fsm_state_flags) + MemorySize(metadata.rule_is_nullable) +
+           MemorySize(metadata.rule_has_context_dependent_ancestor);
   }
 };
 

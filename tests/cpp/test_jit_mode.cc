@@ -13,6 +13,100 @@
 namespace xgrammar {
 namespace {
 
+TEST(JitModeTest, PreservesRepetitionRangesOnlyInJitMode) {
+  TokenizerInfo tokenizer_info(
+      {">", "<", "a", "aa", "b"}, VocabType::RAW, std::nullopt, std::vector<int32_t>{}
+  );
+  GrammarCompiler eager_compiler(
+      tokenizer_info,
+      /*max_threads=*/1,
+      /*cache_enabled=*/false,
+      /*max_memory_bytes=*/-1,
+      /*jit_mode=*/false
+  );
+  GrammarCompiler jit_compiler(
+      tokenizer_info,
+      /*max_threads=*/1,
+      /*cache_enabled=*/false,
+      /*max_memory_bytes=*/-1,
+      /*jit_mode=*/true
+  );
+  const auto grammar = R"(root ::= ">" [a-z]{63,65} "<")";
+  const CompiledGrammar eager_grammar = eager_compiler.CompileGrammar(grammar);
+  const CompiledGrammar jit_grammar = jit_compiler.CompileGrammar(grammar);
+  const auto contains_repetition_range = [](const CompiledGrammar& compiled_grammar) {
+    for (int32_t index = 0; index < compiled_grammar->grammar->NumGrammarExprs(); ++index) {
+      const auto expression = compiled_grammar->grammar->GetGrammarExpr(index);
+      if (expression.type == Grammar::Impl::GrammarExprType::kRepeat) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  EXPECT_FALSE(contains_repetition_range(eager_grammar));
+  EXPECT_TRUE(contains_repetition_range(jit_grammar));
+}
+
+TEST(JitModeTest, RepeatedCharacterClassMasksAreCached) {
+  TokenizerInfo tokenizer_info(
+      {"a", "ab", "abc", "ab<", "<", std::string("\xc3", 1)},
+      VocabType::RAW,
+      std::nullopt,
+      std::vector<int32_t>{}
+  );
+  GrammarCompiler compiler(
+      tokenizer_info,
+      /*max_threads=*/1,
+      /*cache_enabled=*/false,
+      /*max_memory_bytes=*/-1,
+      /*jit_mode=*/true
+  );
+  CompiledGrammar compiled_grammar = compiler.CompileGrammar(R"(root ::= [a-z]{1,4} "<")");
+
+  int32_t character_class_expr_id = -1;
+  for (int32_t index = 0; index < compiled_grammar->grammar->NumGrammarExprs(); ++index) {
+    const auto expression = compiled_grammar->grammar->GetGrammarExpr(index);
+    if (expression.type != Grammar::Impl::GrammarExprType::kRepeat) {
+      continue;
+    }
+    const auto& repeated_rule = compiled_grammar->grammar->GetRule(expression[0]);
+    const auto choices = compiled_grammar->grammar->GetGrammarExpr(repeated_rule.body_expr_id);
+    ASSERT_EQ(choices.type, Grammar::Impl::GrammarExprType::kChoices);
+    ASSERT_EQ(choices.size(), 1);
+    const auto sequence = compiled_grammar->grammar->GetGrammarExpr(choices[0]);
+    ASSERT_EQ(sequence.type, Grammar::Impl::GrammarExprType::kSequence);
+    ASSERT_EQ(sequence.size(), 1);
+    character_class_expr_id = sequence[0];
+    break;
+  }
+  ASSERT_NE(character_class_expr_id, -1);
+
+  constexpr int kThreadCount = 16;
+  std::vector<const AdaptiveTokenMask*> masks(kThreadCount);
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+  for (int index = 0; index < kThreadCount; ++index) {
+    threads.emplace_back([&, index] {
+      masks[index] =
+          &compiled_grammar->GetRepeatedCharacterClassTokenMask(character_class_expr_id, -1);
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  ASSERT_NE(masks[0], nullptr);
+  for (const AdaptiveTokenMask* mask : masks) {
+    EXPECT_EQ(mask, masks[0]);
+  }
+  const auto* bounded_mask =
+      &compiled_grammar->GetRepeatedCharacterClassTokenMask(character_class_expr_id, 2);
+  EXPECT_NE(bounded_mask, masks[0]);
+  EXPECT_EQ(compiled_grammar->character_class_token_summaries.size(), 1);
+  EXPECT_EQ(compiled_grammar->repeated_character_class_token_masks.size(), 2);
+}
+
 TEST(JitModeTest, ConcurrentGenerationReusesOneMask) {
   std::vector<std::string> vocabulary;
   for (int value = 32; value < 127; ++value) {
