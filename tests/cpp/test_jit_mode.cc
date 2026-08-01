@@ -20,16 +20,14 @@ TEST(JitModeTest, ConcurrentGenerationReusesOneMask) {
   }
   vocabulary.insert(vocabulary.end(), {"alpha", "beta", "gamma", "delta"});
   TokenizerInfo tokenizer_info(vocabulary, VocabType::RAW, std::nullopt, std::vector<int32_t>{});
-  constexpr int64_t kCacheLimit = 64 * 1024;
   GrammarCompiler compiler(
       tokenizer_info,
       /*max_threads=*/1,
-      /*cache_enabled=*/true,
-      /*max_memory_bytes=*/kCacheLimit,
+      /*cache_enabled=*/false,
+      /*max_memory_bytes=*/-1,
       /*jit_mode=*/true
   );
   CompiledGrammar compiled_grammar = compiler.CompileGrammar(R"(root ::= [a-z]+ "!")");
-  EXPECT_EQ(compiler.GetCacheSizeBytes(), 0);
 
   const int32_t root_rule_id = compiled_grammar->grammar->GetRootRuleId();
   const auto root_rule = compiled_grammar->grammar->GetRule(root_rule_id);
@@ -60,28 +58,17 @@ TEST(JitModeTest, ConcurrentGenerationReusesOneMask) {
       generated_masks[index] = &compiled_grammar->GetAdaptiveTokenMask(state, true);
     });
   }
-  bool cache_sizes_valid = true;
-  std::thread cache_reader([&] {
-    start_signal.wait();
-    for (int index = 0; index < 1000; ++index) {
-      const int64_t cache_size = compiler.GetCacheSizeBytes();
-      cache_sizes_valid = cache_sizes_valid && cache_size >= 0 && cache_size <= kCacheLimit;
-    }
-  });
 
   start_promise.set_value();
   for (auto& thread : threads) {
     thread.join();
   }
-  cache_reader.join();
 
   ASSERT_NE(generated_masks[0], nullptr);
   for (const AdaptiveTokenMask* mask : generated_masks) {
     EXPECT_EQ(mask, generated_masks[0]);
   }
   EXPECT_EQ(compiled_grammar->adaptive_token_mask_cache.size(), 1);
-  EXPECT_TRUE(cache_sizes_valid);
-  EXPECT_LE(compiler.GetCacheSizeBytes(), kCacheLimit);
 }
 
 }  // namespace

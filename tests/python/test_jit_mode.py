@@ -210,6 +210,28 @@ def test_jit_mode_supports_fork_rollback_and_reset():
     _assert_next_masks_equal(eager_matcher, jit_matcher, tokenizer_info)
 
 
+def test_jit_mode_matches_eager_lazy_rule():
+    tokenizer_info = xgr.TokenizerInfo(["x", "!", "z", "x!"], stop_token_ids=[])
+    grammar = xgr.Grammar.from_lark(
+        """
+start: head "z"
+head[max_tokens=2, lazy, capture, temperature=0.7]: TEXT "!"
+TEXT: /(\\n|.)*/
+""",
+        tokenizer_info=tokenizer_info,
+    )
+    eager_grammar = xgr.GrammarCompiler(tokenizer_info, cache_enabled=False).compile_grammar(
+        grammar
+    )
+    jit_grammar = xgr.GrammarCompiler(
+        tokenizer_info, cache_enabled=False, jit_mode=True
+    ).compile_grammar(grammar)
+    assert xgr.GrammarMatcher(eager_grammar).temperature == pytest.approx(0.7)
+    assert xgr.GrammarMatcher(jit_grammar).temperature == pytest.approx(0.7)
+
+    _assert_traces_equal(_mask_trace(eager_grammar, "x!z"), _mask_trace(jit_grammar, "x!z"))
+
+
 def _token_trace(compiled_grammar, tokenizer_info, token_ids):
     matcher = xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True)
     trace = []
@@ -249,3 +271,28 @@ TEXT: /(\\n|.)*/
     _assert_traces_equal(expected_trace, actual_trace)
     assert eager_result == expected
     assert jit_result == expected
+
+
+def test_jit_mode_matches_eager_suffix_stop():
+    tokenizer_info = xgr.TokenizerInfo(["aa!", "a>!", "aa>!"], stop_token_ids=[])
+    grammar = xgr.Grammar.from_lark(
+        """
+start: reasoning "!"
+reasoning[max_chars=2, suffix=">"]: TEXT
+TEXT: /(\\n|.)*/
+""",
+        tokenizer_info=tokenizer_info,
+    )
+    eager_grammar = xgr.GrammarCompiler(tokenizer_info, cache_enabled=False).compile_grammar(
+        grammar
+    )
+    jit_grammar = xgr.GrammarCompiler(
+        tokenizer_info, cache_enabled=False, jit_mode=True
+    ).compile_grammar(grammar)
+
+    for token_id, expected in [(0, True), (1, True), (2, False)]:
+        expected_trace, eager_result = _token_trace(eager_grammar, tokenizer_info, [token_id])
+        actual_trace, jit_result = _token_trace(jit_grammar, tokenizer_info, [token_id])
+        _assert_traces_equal(expected_trace, actual_trace)
+        assert eager_result == expected
+        assert jit_result == expected
