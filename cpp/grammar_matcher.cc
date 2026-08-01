@@ -1213,16 +1213,49 @@ class GrammarMatcher::Impl : public EarleyParser {
   // matcher history, while temporary-row references are canonicalized by exact row contents and
   // self references remain explicit. This makes (configuration, byte) an exact transition key.
   // Cache hits stay virtual; an unseen transition or any resource limit first materializes the
-  // virtual prefix, then falls back to EarleyParser. The cache is destroyed after one ParserState.
+  // virtual prefix, then falls back to EarleyParser. Storage is reused between ParserStates.
   class ContinuationTransitionCache {
    public:
-    ContinuationTransitionCache(Impl* matcher, int32_t external_row_count)
-        : matcher_(matcher),
-          external_row_count_(external_row_count),
-          memory_bytes_(
-              kAdmissionQueries * sizeof(TransitionSlot) + kMaxVirtualDepth * sizeof(Transition)
-          ),
-          peak_bytes_(memory_bytes_) {
+    ContinuationTransitionCache(Impl* matcher, int32_t external_row_count) : matcher_(matcher) {
+      Reset(external_row_count);
+    }
+
+    void Reset(int32_t external_row_count) {
+      external_row_count_ = external_row_count;
+      enabled_ = true;
+      admitted_ = false;
+      steady_fast_path_ = false;
+      disabled_for_low_reuse_ = false;
+      queries_ = 0;
+      misses_ = 0;
+      reuse_window_start_queries_ = 0;
+      reuse_window_start_misses_ = 0;
+      fast_queries_remaining_ = 0;
+      memory_bytes_ =
+          kAdmissionQueries * sizeof(TransitionSlot) + kMaxVirtualDepth * sizeof(Transition);
+      peak_bytes_ = memory_bytes_;
+      peak_canonical_rows_ = 0;
+      peak_canonical_configurations_ = 0;
+      num_transitions_ = 0;
+      warmup_transitions_.clear();
+      transition_table_.clear();
+      rows_.clear();
+      configurations_.clear();
+      absolute_rows_by_canonical_id_.clear();
+      transition_depth_ = 0;
+      current_transition_row_ = nullptr;
+      current_configuration_id_ = -1;
+      materialized_depth_ = 0;
+      tmp_completable_states_.clear();
+      tmp_scanable_states_.clear();
+      for (auto& masks : suffix_certificate_masks_) {
+        masks.clear();
+      }
+      suffix_certificate_masks_ready_.fill(0);
+      suffix_certificate_queries_.fill(0);
+      for (auto& accepted_union : suffix_certificate_accepted_unions_) {
+        accepted_union.reset();
+      }
       warmup_transitions_.reserve(kAdmissionQueries);
       XGRAMMAR_DCHECK(matcher_->rule_id_to_completable_states_.size() == external_row_count_ + 1);
       const auto initial_row_id = InternCurrentCompletableRow();
@@ -1907,13 +1940,13 @@ class GrammarMatcher::Impl : public EarleyParser {
       admitted_ = false;
       steady_fast_path_ = false;
       fast_queries_remaining_ = 0;
-      std::vector<TransitionSlot>().swap(warmup_transitions_);
-      std::vector<Transition>().swap(transition_table_);
-      std::vector<CanonicalCompletableRow>().swap(rows_);
-      std::vector<CanonicalConfiguration>().swap(configurations_);
-      std::vector<std::vector<int32_t>>().swap(absolute_rows_by_canonical_id_);
-      std::vector<std::pair<int32_t, ParserState>>().swap(tmp_completable_states_);
-      std::vector<ParserState>().swap(tmp_scanable_states_);
+      warmup_transitions_.clear();
+      transition_table_.clear();
+      rows_.clear();
+      configurations_.clear();
+      absolute_rows_by_canonical_id_.clear();
+      tmp_completable_states_.clear();
+      tmp_scanable_states_.clear();
       transition_depth_ = 0;
       current_transition_row_ = nullptr;
       current_configuration_id_ = -1;
@@ -3521,6 +3554,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
   constexpr bool used_full_configuration_hybrid = false;
 
   if (!used_full_configuration_hybrid) {
+    std::unique_ptr<ContinuationTransitionCache> reusable_transition_cache;
     for (const auto& [state, adaptive_token_mask_ptr] : latest_states_with_masks) {
       const auto& adaptive_token_mask = *adaptive_token_mask_ptr;
       constexpr size_t kMinUncertainTokensForTransitionCache = 128;
@@ -3531,7 +3565,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
               static_cast<int32_t>(ContinuationTransitionCache::MaxVirtualDepth());
       const int32_t external_row_count =
           use_transition_cache ? rule_id_to_completable_states_.size() : -1;
-      std::unique_ptr<ContinuationTransitionCache> transition_cache;
+      ContinuationTransitionCache* transition_cache = nullptr;
 
       // For each ParserState, we will check every uncertain token and put them into the accepted or
       // rejected list.
@@ -3652,7 +3686,13 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
       bool deferred_uncertain_has_rejection = false;
       if (use_transition_cache && !skip_uncertain_evaluation &&
           !adaptive_token_mask.uncertain_indices.empty()) {
-        transition_cache = std::make_unique<ContinuationTransitionCache>(this, external_row_count);
+        if (reusable_transition_cache) {
+          reusable_transition_cache->Reset(external_row_count);
+        } else {
+          reusable_transition_cache =
+              std::make_unique<ContinuationTransitionCache>(this, external_row_count);
+        }
+        transition_cache = reusable_transition_cache.get();
       }
       size_t uncertain_position = 0;
       int lcp_with_last_evaluated_token = std::numeric_limits<int>::max();
@@ -3664,7 +3704,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
         // dynamic-LCP branches that would otherwise run once per vocabulary token.
         XGRAMMAR_DCHECK(transition_cache != nullptr);
         prev_matched_size = EvaluateDisjointUncertainTokens(
-            adaptive_token_mask, transition_cache.get(), &deferred_uncertain_has_rejection
+            adaptive_token_mask, transition_cache, &deferred_uncertain_has_rejection
         );
 
         if (deferred_uncertain_has_rejection) {
