@@ -27,6 +27,7 @@
 namespace xgrammar {
 
 class RuleLevelCache;
+class CharacterClassTokenSummaryCache;
 
 /******************* CompiledGrammar Datastructures *******************/
 
@@ -142,8 +143,7 @@ class CompiledGrammar::Impl {
   std::vector<uint8_t> rule_level_cacheable;
 
   /*! \brief Character-class repeat masks shared by matchers using this grammar. */
-  std::unordered_map<int32_t, std::vector<CharacterClassTokenSummary>>
-      character_class_token_summaries;
+  std::shared_ptr<CharacterClassTokenSummaryCache> character_class_token_summary_cache;
   std::unordered_map<uint64_t, CharacterClassRepeatTokenMask> character_class_repeat_token_masks;
   mutable std::mutex character_class_repeat_token_masks_mutex;
 
