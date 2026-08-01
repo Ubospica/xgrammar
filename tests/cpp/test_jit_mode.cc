@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "compiled_grammar_impl.h"
+#include "grammar_functor.h"
 #include "xgrammar/compiler.h"
 #include "xgrammar/tokenizer_info.h"
 
@@ -105,6 +106,70 @@ TEST(JitModeTest, RepeatedCharacterClassMasksAreCached) {
   EXPECT_NE(bounded_mask, masks[0]);
   EXPECT_EQ(compiled_grammar->character_class_token_summaries.size(), 1);
   EXPECT_EQ(compiled_grammar->repeated_character_class_token_masks.size(), 2);
+}
+
+TEST(JitModeTest, RuleMasksAreSharedOnlyWithoutRuntimeContext) {
+  TokenizerInfo tokenizer_info(
+      {"\"", "a", "ab", "b", "x", "y"}, VocabType::RAW, std::nullopt, std::vector<int32_t>{}
+  );
+  GrammarCompiler compiler(
+      tokenizer_info,
+      /*max_threads=*/1,
+      /*cache_enabled=*/true,
+      /*max_memory_bytes=*/-1,
+      /*jit_mode=*/true
+  );
+  const auto first = compiler.CompileGrammar(
+      "root ::= \"\\\"\" content \"\\\"x\"\n"
+      "content ::= \"\" | [a-z] content"
+  );
+  const auto second = compiler.CompileGrammar(
+      "root ::= \"\\\"\" content \"\\\"y\"\n"
+      "content ::= \"\" | [a-z] content"
+  );
+  ASSERT_NE(first->rule_level_cache, nullptr);
+  ASSERT_NE(second->rule_level_cache, nullptr);
+  EXPECT_EQ(first->rule_level_cache->ImplPtr(), second->rule_level_cache->ImplPtr());
+
+  const auto generate_rule_masks = [](CompiledGrammar compiled_grammar,
+                                      const std::string& rule_name) {
+    int32_t rule_id = -1;
+    for (int32_t index = 0; index < compiled_grammar->grammar->NumRules(); ++index) {
+      if (compiled_grammar->grammar->GetRule(index).name == rule_name) {
+        rule_id = index;
+        break;
+      }
+    }
+    ASSERT_NE(rule_id, -1);
+    const auto& rule = compiled_grammar->grammar->GetRule(rule_id);
+    const auto& rule_fsm = compiled_grammar->grammar->per_rule_fsms[rule_id];
+    ASSERT_TRUE(rule_fsm.has_value());
+    std::unordered_set<int> reachable_states;
+    rule_fsm->GetFsm().GetReachableStates(&reachable_states);
+    for (int32_t element_id : reachable_states) {
+      if (!rule_fsm->GetFsm().IsScanableState(element_id)) {
+        continue;
+      }
+      compiled_grammar->GetAdaptiveTokenMask(
+          ParserState(rule_id, rule.body_expr_id, element_id, ParserState::kNoPrevInputPos, 0),
+          /*is_root_rule=*/false
+      );
+    }
+  };
+
+  const std::size_t initial_size = MemorySize(*first->rule_level_cache);
+  generate_rule_masks(first, "content");
+  const std::size_t populated_size = MemorySize(*first->rule_level_cache);
+  EXPECT_GT(populated_size, initial_size);
+  generate_rule_masks(second, "content");
+  EXPECT_EQ(MemorySize(*first->rule_level_cache), populated_size);
+
+  const auto context_dependent = compiler.CompileGrammar(
+      "root ::= limited\n"
+      "limited[max_tokens=1] ::= \"\" | [a-z] limited"
+  );
+  generate_rule_masks(context_dependent, "limited");
+  EXPECT_EQ(MemorySize(*first->rule_level_cache), populated_size);
 }
 
 TEST(JitModeTest, ConcurrentGenerationReusesOneMask) {

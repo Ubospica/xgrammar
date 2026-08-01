@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -1234,7 +1235,10 @@ const AdaptiveTokenMask& CompiledGrammar::Impl::GetAdaptiveTokenMask(
       cache_state,
       is_root_rule,
       tag_dispatch_rule_id_to_second_slicing_bitset,
-      std::nullopt
+      rule_level_cache != nullptr &&
+              !earley_parser_metadata.rule_has_context_dependent_ancestor[state.rule_id]
+          ? std::optional<RuleLevelCache>(*rule_level_cache)
+          : std::nullopt
   );
 
   std::lock_guard<std::mutex> lock(adaptive_token_mask_cache_mutex);
@@ -1348,10 +1352,14 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   TagDispatchOptimization(compiled_grammar_impl, &tag_dispatch_rule_id_to_second_slicing_bitset);
 
   // If the compiler is cache-enabled, then we hash the grammars for crossing-grammar caching.
-  if (!jit_mode_ && rule_level_cache_.has_value()) {
+  if (rule_level_cache_.has_value()) {
     GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar);
   }
   if (jit_mode_) {
+    if (rule_level_cache_.has_value()) {
+      compiled_grammar_impl->rule_level_cache =
+          std::make_shared<RuleLevelCache>(*rule_level_cache_);
+    }
     compiled_grammar_impl->tag_dispatch_rule_id_to_second_slicing_bitset =
         std::move(tag_dispatch_rule_id_to_second_slicing_bitset);
     return CompiledGrammar(compiled_grammar_impl);
