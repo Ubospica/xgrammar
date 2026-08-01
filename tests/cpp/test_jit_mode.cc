@@ -13,6 +13,41 @@
 namespace xgrammar {
 namespace {
 
+TEST(JitModeTest, PreservesRepetitionRangesOnlyInJitMode) {
+  TokenizerInfo tokenizer_info(
+      {">", "<", "a", "aa", "b"}, VocabType::RAW, std::nullopt, std::vector<int32_t>{}
+  );
+  GrammarCompiler eager_compiler(
+      tokenizer_info,
+      /*max_threads=*/1,
+      /*cache_enabled=*/false,
+      /*max_memory_bytes=*/-1,
+      /*jit_mode=*/false
+  );
+  GrammarCompiler jit_compiler(
+      tokenizer_info,
+      /*max_threads=*/1,
+      /*cache_enabled=*/false,
+      /*max_memory_bytes=*/-1,
+      /*jit_mode=*/true
+  );
+  const auto grammar = R"(root ::= ">" [a-z]{63,65} "<")";
+  const CompiledGrammar eager_grammar = eager_compiler.CompileGrammar(grammar);
+  const CompiledGrammar jit_grammar = jit_compiler.CompileGrammar(grammar);
+  const auto contains_repetition_range = [](const CompiledGrammar& compiled_grammar) {
+    for (int32_t index = 0; index < compiled_grammar->grammar->NumGrammarExprs(); ++index) {
+      const auto expression = compiled_grammar->grammar->GetGrammarExpr(index);
+      if (expression.type == Grammar::Impl::GrammarExprType::kRepeat) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  EXPECT_FALSE(contains_repetition_range(eager_grammar));
+  EXPECT_TRUE(contains_repetition_range(jit_grammar));
+}
+
 TEST(JitModeTest, ConcurrentGenerationReusesOneMask) {
   std::vector<std::string> vocabulary;
   for (int value = 32; value < 127; ++value) {

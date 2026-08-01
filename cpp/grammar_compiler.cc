@@ -1159,7 +1159,7 @@ class GrammarCompilerSub {
 
 CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_unoptimized) {
   auto compiled_grammar_impl = std::make_shared<CompiledGrammar::Impl>();
-  compiled_grammar_impl->grammar = GrammarOptimizer::Apply(grammar_unoptimized);
+  compiled_grammar_impl->grammar = GrammarOptimizer::Apply(grammar_unoptimized, !jit_mode_);
   compiled_grammar_impl->earley_parser_metadata =
       EarleyParserGrammarMetadata(compiled_grammar_impl->grammar);
   compiled_grammar_impl->tokenizer_info = tokenizer_info_;
