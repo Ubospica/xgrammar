@@ -612,6 +612,13 @@ class GrammarMatcher::Impl : public EarleyParser {
       int32_t* bitmask_data_ptr, int index, bool skip_expired, bool debug_print
   );
 
+  struct RepeatedCharacterClass {
+    int32_t character_class_expr_id;
+    int32_t max_characters;
+  };
+
+  std::optional<RepeatedCharacterClass> GetRepeatedCharacterClass(const ParserState& state) const;
+
   void FillBitmaskForCharBudgetBoundary(
       const AdaptiveTokenMask& adaptive_token_mask, int32_t remaining_chars
   );
@@ -739,6 +746,64 @@ class GrammarMatcher::Impl : public EarleyParser {
   std::vector<int32_t> tmp_rejected_indices_;
   std::vector<int32_t> tmp_rejected_indices_delta_;
 };
+
+std::optional<GrammarMatcher::Impl::RepeatedCharacterClass>
+GrammarMatcher::Impl::GetRepeatedCharacterClass(const ParserState& state) const {
+  if (state.rule_id < 0 || state.sub_element_id != 0 || state.partial_codepoint != 0 ||
+      state.budget_deadline >= 0 || state.active_temperature_rule_id >= 0 ||
+      state.char_budget_deadline >= 0 || state.rule_start_pos < 0 ||
+      state.rule_start_pos >= static_cast<int32_t>(rule_id_to_completable_states_.size()) ||
+      grammar_->GetRule(state.rule_id).lookahead_assertion_id != -1 ||
+      compiled_grammar_->earley_parser_metadata
+          .rule_has_context_dependent_ancestor[state.rule_id]) {
+    return std::nullopt;
+  }
+
+  const auto& body = grammar_->GetGrammarExpr(grammar_->GetRule(state.rule_id).body_expr_id);
+  if (body.type != GrammarExprType::kChoices || body.size() != 1) {
+    return std::nullopt;
+  }
+  const auto& sequence = grammar_->GetGrammarExpr(body[0]);
+  if (sequence.type != GrammarExprType::kSequence || sequence.size() != 1) {
+    return std::nullopt;
+  }
+  const int32_t character_class_expr_id = sequence[0];
+  if (grammar_->GetGrammarExpr(character_class_expr_id).type != GrammarExprType::kCharacterClass) {
+    return std::nullopt;
+  }
+  if (state.element_id != grammar_->per_rule_fsms[state.rule_id]->GetFsm().GetStart()) {
+    return std::nullopt;
+  }
+
+  const int32_t max_token_characters = tokenizer_info_.ImplPtr()->GetMaxTokenChars();
+  for (const auto& [completed_rule_id, parent_state] :
+       rule_id_to_completable_states_[state.rule_start_pos]) {
+    if (completed_rule_id != state.rule_id || parent_state.rule_id < 0) {
+      continue;
+    }
+    for (const auto& edge : grammar_->complete_fsm.GetEdges(parent_state.element_id)) {
+      if (!edge.IsRepeatRef()) {
+        continue;
+      }
+      const auto repeat = grammar_->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
+      if (repeat.RuleId() != state.rule_id) {
+        continue;
+      }
+      const int32_t remaining_repetitions =
+          repeat.Upper() == -1 ? max_token_characters : repeat.Upper() - parent_state.repeat_count;
+      if (remaining_repetitions <= 0) {
+        continue;
+      }
+      return RepeatedCharacterClass{
+          character_class_expr_id,
+          repeat.Upper() == -1 || remaining_repetitions >= max_token_characters
+              ? -1
+              : remaining_repetitions
+      };
+    }
+  }
+  return std::nullopt;
+}
 
 class BatchGrammarMatcher::Impl {
  public:
@@ -1860,8 +1925,16 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
   std::vector<std::pair<ParserState, const AdaptiveTokenMask*>> latest_states_with_masks;
 
   for (const auto& state : latest_states) {
+    const auto repeated_character_class = GetRepeatedCharacterClass(state);
     const AdaptiveTokenMask* adaptive_token_mask =
-        &compiled_grammar_->GetAdaptiveTokenMask(state, state.rule_id == grammar_->GetRootRuleId());
+        repeated_character_class.has_value()
+            ? &compiled_grammar_->GetRepeatedCharacterClassTokenMask(
+                  repeated_character_class->character_class_expr_id,
+                  repeated_character_class->max_characters
+              )
+            : &compiled_grammar_->GetAdaptiveTokenMask(
+                  state, state.rule_id == grammar_->GetRootRuleId()
+              );
     if (state.char_budget_deadline >= 0) {
       int32_t remaining_chars = state.char_budget_deadline - GetCurrentCharIndex();
       if (remaining_chars <= tokenizer_info_.ImplPtr()->GetMaxTokenChars()) {
