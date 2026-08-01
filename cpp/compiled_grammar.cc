@@ -196,6 +196,7 @@ std::optional<SerializationError> DeserializeJSONValue(
     );
   }
   impl->tokenizer_info = tokenizer_info;
+  impl->earley_parser_metadata = EarleyParserGrammarMetadata(impl->grammar);
   if (object.find("adaptive_token_mask_cache") == object.end()) {
     return ConstructDeserializeError("Expect a 'adaptive_token_mask_cache' field", type_name);
   }
@@ -206,7 +207,8 @@ std::optional<SerializationError> DeserializeJSONValue(
 /************** CompiledGrammar **************/
 
 std::size_t MemorySize(const CompiledGrammar::Impl& impl) {
-  return MemorySize(impl.grammar) + MemorySize(impl.adaptive_token_mask_cache);
+  return MemorySize(impl.grammar) + MemorySize(impl.earley_parser_metadata) +
+         MemorySize(impl.adaptive_token_mask_cache);
 }
 
 std::size_t CompiledGrammar::MemorySizeBytes() const { return MemorySize(*pimpl_); }

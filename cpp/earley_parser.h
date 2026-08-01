@@ -238,6 +238,32 @@ class StateHashForParsing {
   }
 };
 
+/*!
+ * \brief Immutable Earley parser metadata shared by every parser for one optimized grammar.
+ */
+struct EarleyParserGrammarMetadata {
+  enum FsmStateFlag : uint8_t {
+    kFsmStateInitialized = 1 << 0,
+    kFsmStateScanable = 1 << 1,
+    kFsmStateNonTerminal = 1 << 2,
+    kFsmStateEnd = 1 << 3,
+    kFsmStateHasEdges = 1 << 4,
+  };
+
+  /*! \brief Precomputed FSM state properties, indexed by complete-FSM state id. */
+  std::vector<uint8_t> fsm_state_flags;
+
+  /*! \brief Whether each rule can match the empty string. */
+  std::vector<uint8_t> rule_is_nullable;
+
+  EarleyParserGrammarMetadata() = default;
+  explicit EarleyParserGrammarMetadata(const Grammar& grammar);
+
+  friend std::size_t MemorySize(const EarleyParserGrammarMetadata& metadata) {
+    return MemorySize(metadata.fsm_state_flags) + MemorySize(metadata.rule_is_nullable);
+  }
+};
+
 /*! \brief This class is used to detect the repeated states. */
 class RepeatDetector {
  private:
@@ -359,37 +385,26 @@ class EarleyParser {
   /*! \brief Check if the stop token is accepted. */
   bool stop_token_is_accepted_ = false;
 
-  enum FsmStateFlag : uint8_t {
-    kFsmStateInitialized = 1 << 0,
-    kFsmStateScanable = 1 << 1,
-    kFsmStateNonTerminal = 1 << 2,
-    kFsmStateEnd = 1 << 3,
-    kFsmStateHasEdges = 1 << 4,
-  };
+  static constexpr uint8_t kFsmStateScanable = EarleyParserGrammarMetadata::kFsmStateScanable;
+  static constexpr uint8_t kFsmStateNonTerminal = EarleyParserGrammarMetadata::kFsmStateNonTerminal;
+  static constexpr uint8_t kFsmStateEnd = EarleyParserGrammarMetadata::kFsmStateEnd;
+  static constexpr uint8_t kFsmStateHasEdges = EarleyParserGrammarMetadata::kFsmStateHasEdges;
 
-  /*! \brief Lazily-computed FSM state properties, indexed by rule id and state id. */
-  std::vector<std::vector<uint8_t>> fsm_state_flags_cache_;
-
-  /*! \brief Whether each rule can match the empty string. */
-  std::vector<uint8_t> rule_is_nullable_;
-
-  /*! \brief Compute and cache properties for a state in a per-rule FSM. */
-  uint8_t InitializeFsmStateFlags(int32_t rule_id, int32_t state_id);
+  /*! \brief Grammar-only metadata shared by every parser for this grammar. */
+  const EarleyParserGrammarMetadata* grammar_metadata_;
 
   /*! \brief Return cached properties for a state in a per-rule FSM. */
-  uint8_t GetFsmStateFlags(int32_t rule_id, int32_t state_id) {
-    XGRAMMAR_DCHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(fsm_state_flags_cache_.size()));
-    auto& flags_cache = fsm_state_flags_cache_[rule_id];
-    if (!flags_cache.empty()) {
-      XGRAMMAR_DCHECK(state_id >= 0 && state_id < static_cast<int32_t>(flags_cache.size()));
-      if (flags_cache[state_id] != 0) {
-        return flags_cache[state_id];
-      }
-    }
-    return InitializeFsmStateFlags(rule_id, state_id);
+  uint8_t GetFsmStateFlags(int32_t rule_id, int32_t state_id) const {
+    XGRAMMAR_DCHECK(rule_id >= 0 && rule_id < grammar_->NumRules());
+    XGRAMMAR_DCHECK(
+        state_id >= 0 && state_id < static_cast<int32_t>(grammar_metadata_->fsm_state_flags.size())
+    );
+    return grammar_metadata_->fsm_state_flags[state_id];
   }
 
-  bool IsRuleNullable(int32_t rule_id) const { return rule_is_nullable_[rule_id] != 0; }
+  bool IsRuleNullable(int32_t rule_id) const {
+    return grammar_metadata_->rule_is_nullable[rule_id] != 0;
+  }
 
   /*! \brief The index of the LLM token currently being accepted, set by the matcher; -1
    * before any token. budget_deadline values are compared against it. */
@@ -665,11 +680,14 @@ class EarleyParser {
   /*!
    * \brief Constructor of the Earley parser.
    * \param grammar The grammar to be parsed. It must be optimized.
+   * \param grammar_metadata Immutable metadata derived from grammar.
    * \param initial_state The state to start parsing from. If not provided, parsing starts
    * from the root rule of the grammar.
    */
   explicit EarleyParser(
-      const Grammar& grammar, std::optional<ParserState> initial_state = std::nullopt
+      const Grammar& grammar,
+      const EarleyParserGrammarMetadata& grammar_metadata,
+      std::optional<ParserState> initial_state = std::nullopt
   );
 
   /*!
