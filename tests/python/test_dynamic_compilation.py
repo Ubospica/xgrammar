@@ -6,6 +6,7 @@ import torch
 
 import xgrammar as xgr
 from xgrammar.base import _core
+from xgrammar.testing import bitmask_to_bool_mask
 
 VOCABULARY = [chr(value) for value in range(32, 127)] + ["Ada", "hello", "42", "<call>"]
 
@@ -212,3 +213,35 @@ def test_rule_mask_sharing_does_not_cross_context_dependent_rules():
     for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
         assert actual_apply == expected_apply
         torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "repeat_range,value",
+    [
+        ("{0}", ""),
+        ("{1}", "a"),
+        ("{0,1}", ""),
+        ("{1,3}", "ab"),
+        ("{63,65}", "a" * 64),
+        ("{127,129}", "a" * 128),
+        ("{255,257}", "a" * 256),
+        ("{2,}", "abc"),
+    ],
+)
+def test_preserved_repetition_ranges_match_eager_masks(repeat_range: str, value: str):
+    vocabulary = [">", "<", "a", "aa", "ab", "abc", "b", "ba", "c", b"\xc3", b"\xff"]
+    grammar = f'root ::= ">" [a-z]{repeat_range} "<"'
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_grammar(grammar)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar(grammar)
+    expected = _mask_trace(eager, ">" + value + "<")
+    actual = _mask_trace(dynamic, ">" + value + "<")
+    for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
+        assert actual_apply == expected_apply
+        expected_tokens = bitmask_to_bool_mask(expected_mask, tokenizer_info.vocab_size)
+        actual_tokens = bitmask_to_bool_mask(actual_mask, tokenizer_info.vocab_size)
+        torch.testing.assert_close(actual_tokens, expected_tokens, rtol=0, atol=0)
