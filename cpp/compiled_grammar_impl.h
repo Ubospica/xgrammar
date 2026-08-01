@@ -130,6 +130,12 @@ class TokenMaskCache {
   /*! \brief Whether missing token masks should be generated on first use. */
   bool IsDynamic() const { return dynamic_; }
 
+  /*! \brief Whether the rule mask is independent of runtime parser context. */
+  bool IsRuleLevelCacheable(int32_t rule_id) const {
+    return rule_id >= 0 && rule_id < static_cast<int32_t>(rule_level_cacheable_.size()) &&
+           rule_level_cacheable_[rule_id];
+  }
+
   /*! \brief Insert a precomputed mask during eager compilation. Not thread-safe; the compiler
    * synchronizes concurrent insertions itself. */
   void Insert(const ParserState& state, AdaptiveTokenMask mask) { masks_[state] = std::move(mask); }
