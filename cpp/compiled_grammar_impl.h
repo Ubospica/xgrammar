@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -24,6 +25,8 @@
 #include "xgrammar/exception.h"
 
 namespace xgrammar {
+
+class RuleLevelCache;
 
 /******************* CompiledGrammar Datastructures *******************/
 
@@ -169,6 +172,9 @@ class CompiledGrammar::Impl {
 
   /*! \brief Whether missing token masks should be generated on first use. */
   bool jit_mode{false};
+
+  /*! \brief Cache shared by grammars compiled by the same compiler. */
+  std::shared_ptr<RuleLevelCache> rule_level_cache;
 
   /*! \brief Tag dispatch data retained for token mask generation. */
   std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
