@@ -10,6 +10,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -22,6 +24,8 @@
 #include "xgrammar/exception.h"
 
 namespace xgrammar {
+
+class RuleLevelCache;
 
 /******************* CompiledGrammar Datastructures *******************/
 
@@ -121,6 +125,24 @@ class CompiledGrammar::Impl {
   /*! \brief Mapping from the parser state to the adaptive token mask. */
   std::unordered_map<ParserState, AdaptiveTokenMask, StateHashForCache, StateEqualForCache>
       adaptive_token_mask_cache;
+
+  /*! \brief Protects token masks generated after compilation. */
+  mutable std::mutex adaptive_token_mask_cache_mutex;
+
+  /*! \brief Whether missing token masks should be generated on first use. */
+  bool jit_mode{false};
+
+  /*! \brief Reusable rule-level cache retained for token mask generation. */
+  std::shared_ptr<RuleLevelCache> rule_level_cache;
+
+  /*! \brief Tag dispatch data retained for token mask generation. */
+  std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
+
+  /*! \brief Get a cached token mask, generating it when jit_mode is enabled. */
+  const AdaptiveTokenMask& GetAdaptiveTokenMask(const ParserState& state, bool is_root_rule);
+
+  /*! \brief Generate every token mask before serialization. */
+  void MaterializeAdaptiveTokenMaskCache();
 
   Grammar GetGrammar() const { return grammar; }
 
