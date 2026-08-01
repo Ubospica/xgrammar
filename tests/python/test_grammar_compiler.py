@@ -565,6 +565,77 @@ def _compile_structural_tag_for_dynamic_test(compiler: xgr.GrammarCompiler) -> x
     )
 
 
+def test_structural_tag_slicing_cache_isolated_and_concurrent():
+    vocabulary = [chr(value) for value in range(32, 127)] + [
+        "<alpha>",
+        "x<alpha>",
+        "<beta>",
+        "x<beta>",
+        "<guard>",
+        "x<guard>",
+        "<block>",
+        "x<block>",
+        b"\xc3",
+        b"\xff",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+
+    def compile_dispatch(compiler, trigger, exclude):
+        return compiler.compile_structural_tag(
+            {
+                "type": "structural_tag",
+                "format": {
+                    "type": "dispatch",
+                    "rules": [[trigger, {"type": "const_string", "value": "X"}]],
+                    "loop": False,
+                    "excludes": [exclude],
+                },
+            }
+        )
+
+    # Swapped pairs share the same normalized cache key even though trigger and exclude semantics
+    # differ, so they verify that only the vocabulary-slicing result is reused.
+    specs = [
+        ("<alpha>", "<guard>"),
+        ("<guard>", "<alpha>"),
+        ("<beta>", "<block>"),
+        ("<block>", "<beta>"),
+    ] * 4
+    shared_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=False)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        shared_results = list(
+            pool.map(lambda spec: compile_dispatch(shared_compiler, *spec), specs)
+        )
+
+    fresh_results = {
+        spec: compile_dispatch(
+            xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=False), *spec
+        )
+        for spec in set(specs)
+    }
+
+    def assert_mask_matches_token_acceptance(compiled):
+        prefix = "prefix"
+        matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        assert matcher.accept_string(prefix)
+        bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        assert matcher.fill_next_token_bitmask(bitmask)
+        for token_id in range(tokenizer_info.vocab_size):
+            oracle = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+            assert oracle.accept_string(prefix)
+            assert _token_is_allowed(bitmask, token_id) == oracle.accept_token(token_id)
+
+    for spec, shared_result in zip(specs, shared_results):
+        _assert_mask_traces_equal(fresh_results[spec], shared_result, "prefix" + spec[0] + "X")
+        assert_mask_matches_token_acceptance(shared_result)
+
+    shared_compiler.clear_cache()
+    for spec in reversed(list(fresh_results)):
+        rebuilt = compile_dispatch(shared_compiler, *spec)
+        _assert_mask_traces_equal(fresh_results[spec], rebuilt, "prefix" + spec[0] + "X")
+        assert_mask_matches_token_acceptance(rebuilt)
+
+
 DYNAMIC_COMPILATION_CASES = [
     (_compile_ebnf_for_dynamic_test, "hello!"),
     (_compile_json_schema_for_dynamic_test, '{"name":"Ada","scores":[1,2]}'),
