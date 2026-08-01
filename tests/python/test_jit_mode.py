@@ -130,7 +130,7 @@ def test_jit_mode_serialization_materializes_masks():
         )
 
 
-def test_jit_mode_respects_limited_compiler_cache():
+def test_jit_mode_reuses_limited_compiler_cache():
     tokenizer_info = xgr.TokenizerInfo(JIT_MODE_VOCABULARY, stop_token_ids=[])
     cache_limit = 64 * 1024
     compiler = xgr.GrammarCompiler(
@@ -142,12 +142,13 @@ def test_jit_mode_respects_limited_compiler_cache():
     )
     jit_grammar = _compile_builtin_json(compiler)
 
-    assert compiler.get_cache_size_bytes() == 0
+    cached_size = compiler.get_cache_size_bytes()
+    assert cached_size > 0
     _mask_trace(jit_grammar, '{"name":"Ada"}')
-    assert 0 <= compiler.get_cache_size_bytes() <= cache_limit
+    assert compiler.get_cache_size_bytes() == cached_size
 
     second_grammar = _compile_builtin_json(compiler)
-    assert second_grammar.memory_size_bytes < jit_grammar.memory_size_bytes
+    assert second_grammar.memory_size_bytes == jit_grammar.memory_size_bytes
 
 
 def test_jit_mode_empty_vocabulary_round_trip():

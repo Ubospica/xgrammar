@@ -68,7 +68,7 @@ TEST(JitModeTest, ConcurrentGenerationReusesOneMask) {
   for (const AdaptiveTokenMask* mask : generated_masks) {
     EXPECT_EQ(mask, generated_masks[0]);
   }
-  EXPECT_EQ(compiled_grammar->adaptive_token_mask_cache.size(), 1);
+  EXPECT_EQ(compiled_grammar->adaptive_token_mask_cache.Size(/*lock_required=*/true), 1);
 }
 
 }  // namespace

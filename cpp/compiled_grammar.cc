@@ -5,6 +5,12 @@
 
 #include <xgrammar/compiler.h>
 
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
+
 #include "compiled_grammar_impl.h"
 #include "support/json_serializer.h"
 #include "testing.h"
@@ -162,17 +168,93 @@ std::string AdaptiveTokenMask::Print(const TokenizerInfo& tokenizer_info) const 
   return ss.str();
 }
 
+/************** TokenMaskCache **************/
+
+const AdaptiveTokenMask* TokenMaskCache::Find(const ParserState& state) const {
+  auto iterator = masks_.find(state);
+  return iterator == masks_.end() ? nullptr : &iterator->second;
+}
+
+const AdaptiveTokenMask& TokenMaskCache::GetOrCreate(
+    const ParserState& state, Generator generator
+) {
+  MaskFuture future;
+  std::shared_ptr<std::promise<const AdaptiveTokenMask*>> promise;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto mask_iterator = masks_.find(state);
+    if (mask_iterator != masks_.end()) {
+      return mask_iterator->second;
+    }
+    auto in_flight_iterator = in_flight_masks_.find(state);
+    if (in_flight_iterator != in_flight_masks_.end()) {
+      future = in_flight_iterator->second;
+    } else {
+      promise = std::make_shared<std::promise<const AdaptiveTokenMask*>>();
+      future = promise->get_future().share();
+      in_flight_masks_.emplace(state, future);
+    }
+  }
+
+  if (promise != nullptr) {
+    try {
+      auto generated_mask = generator();
+      const AdaptiveTokenMask* cached_mask;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cached_mask = &masks_.try_emplace(state, std::move(generated_mask)).first->second;
+      }
+      promise->set_value(cached_mask);
+    } catch (...) {
+      promise->set_exception(std::current_exception());
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    in_flight_masks_.erase(state);
+  }
+  return *future.get();
+}
+
+void TokenMaskCache::Insert(const ParserState& state, AdaptiveTokenMask mask) {
+  masks_.try_emplace(state, std::move(mask));
+}
+
+AdaptiveTokenMaskMap TokenMaskCache::Snapshot(bool lock_required) const {
+  std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+  if (lock_required) {
+    lock.lock();
+  }
+  return masks_;
+}
+
+void TokenMaskCache::Assign(AdaptiveTokenMaskMap masks) {
+  masks_ = std::move(masks);
+  in_flight_masks_.clear();
+}
+
+std::size_t TokenMaskCache::Size(bool lock_required) const {
+  std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+  if (lock_required) {
+    lock.lock();
+  }
+  return masks_.size();
+}
+
+std::size_t TokenMaskCache::MemorySizeBytes(bool lock_required) const {
+  std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+  if (lock_required) {
+    lock.lock();
+  }
+  return MemorySize(masks_);
+}
+
 /************** CompiledGrammar::Impl **************/
 
 picojson::value SerializeJSONValue(const CompiledGrammar::Impl& impl) {
   auto result = picojson::object{};
   result["grammar"] = AutoSerializeJSONValue(impl.grammar);
   result["tokenizer_metadata"] = impl.tokenizer_info->DumpMetadataValue();
-  std::unique_lock<std::mutex> lock(impl.adaptive_token_mask_cache_mutex, std::defer_lock);
-  if (impl.jit_mode) {
-    lock.lock();
-  }
-  result["adaptive_token_mask_cache"] = AutoSerializeJSONValue(impl.adaptive_token_mask_cache);
+  result["adaptive_token_mask_cache"] =
+      AutoSerializeJSONValue(impl.adaptive_token_mask_cache.Snapshot(impl.jit_mode));
   return picojson::value(result);
 }
 
@@ -204,19 +286,17 @@ std::optional<SerializationError> DeserializeJSONValue(
   if (object.find("adaptive_token_mask_cache") == object.end()) {
     return ConstructDeserializeError("Expect a 'adaptive_token_mask_cache' field", type_name);
   }
-  AutoDeserializeJSONValue(&(impl->adaptive_token_mask_cache), object["adaptive_token_mask_cache"]);
+  AdaptiveTokenMaskMap adaptive_token_masks;
+  AutoDeserializeJSONValue(&adaptive_token_masks, object["adaptive_token_mask_cache"]);
+  impl->adaptive_token_mask_cache.Assign(std::move(adaptive_token_masks));
   return std::nullopt;
 }
 
 /************** CompiledGrammar **************/
 
 std::size_t MemorySize(const CompiledGrammar::Impl& impl) {
-  std::unique_lock<std::mutex> lock(impl.adaptive_token_mask_cache_mutex, std::defer_lock);
-  if (impl.jit_mode) {
-    lock.lock();
-  }
   return MemorySize(impl.grammar) + MemorySize(impl.earley_parser_metadata) +
-         MemorySize(impl.adaptive_token_mask_cache) +
+         impl.adaptive_token_mask_cache.MemorySizeBytes(impl.jit_mode) +
          MemorySize(impl.tag_dispatch_rule_id_to_second_slicing_bitset);
 }
 

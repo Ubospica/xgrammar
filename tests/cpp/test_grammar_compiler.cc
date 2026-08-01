@@ -45,15 +45,15 @@ TEST(GrammarCompilerTest, EagerCompilationCachesEveryScanableState) {
       const ParserState state(
           rule_id, rule.body_expr_id, element_id, ParserState::kNoPrevInputPos, 0
       );
-      EXPECT_NE(
-          compiled_grammar->adaptive_token_mask_cache.find(state),
-          compiled_grammar->adaptive_token_mask_cache.end()
-      );
+      EXPECT_NE(compiled_grammar->adaptive_token_mask_cache.Find(state), nullptr);
       ++scanable_state_count;
     }
   }
 
-  EXPECT_EQ(compiled_grammar->adaptive_token_mask_cache.size(), scanable_state_count);
+  EXPECT_EQ(
+      compiled_grammar->adaptive_token_mask_cache.Size(/*lock_required=*/false),
+      scanable_state_count
+  );
 }
 
 }  // namespace

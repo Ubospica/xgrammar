@@ -139,18 +139,11 @@ class GrammarCompiler(XGRObject):
                 "to GrammarCompiler."
             )
 
-        if jit_mode:
-            self._init_handle(
-                _core.GrammarCompiler.create_with_jit_mode(
-                    tokenizer_info._handle, max_threads, cache_enabled, cache_limit_bytes
-                )
+        self._init_handle(
+            _core.GrammarCompiler(
+                tokenizer_info._handle, max_threads, cache_enabled, cache_limit_bytes, jit_mode
             )
-        else:
-            self._init_handle(
-                _core.GrammarCompiler(
-                    tokenizer_info._handle, max_threads, cache_enabled, cache_limit_bytes
-                )
-            )
+        )
 
     def compile_json_schema(
         self,

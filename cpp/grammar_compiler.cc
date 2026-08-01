@@ -1028,10 +1028,10 @@ const AdaptiveTokenMask& CompiledGrammar::Impl::GetAdaptiveTokenMask(
     const ParserState& state, bool is_root_rule
 ) {
   if (!jit_mode) {
-    auto iterator = adaptive_token_mask_cache.find(state);
-    XGRAMMAR_CHECK(iterator != adaptive_token_mask_cache.end())
+    const auto* cached_mask = adaptive_token_mask_cache.Find(state);
+    XGRAMMAR_CHECK(cached_mask != nullptr)
         << "The token mask cache is incomplete while jit_mode is disabled: " << state;
-    return iterator->second;
+    return *cached_mask;
   }
 
   const auto cache_state = ParserState(
@@ -1042,27 +1042,17 @@ const AdaptiveTokenMask& CompiledGrammar::Impl::GetAdaptiveTokenMask(
       -1,
       state.sub_element_id
   );
-  {
-    std::lock_guard<std::mutex> lock(adaptive_token_mask_cache_mutex);
-    auto iterator = adaptive_token_mask_cache.find(cache_state);
-    if (iterator != adaptive_token_mask_cache.end()) {
-      return iterator->second;
-    }
-  }
-
-  auto generated_mask = GenerateAdaptiveTokenMask(
-      grammar,
-      earley_parser_metadata,
-      tokenizer_info,
-      cache_state,
-      is_root_rule,
-      tag_dispatch_rule_id_to_second_slicing_bitset,
-      std::nullopt
-  );
-
-  std::lock_guard<std::mutex> lock(adaptive_token_mask_cache_mutex);
-  return adaptive_token_mask_cache.try_emplace(cache_state, std::move(generated_mask))
-      .first->second;
+  return adaptive_token_mask_cache.GetOrCreate(cache_state, [this, cache_state, is_root_rule] {
+    return GenerateAdaptiveTokenMask(
+        grammar,
+        earley_parser_metadata,
+        tokenizer_info,
+        cache_state,
+        is_root_rule,
+        tag_dispatch_rule_id_to_second_slicing_bitset,
+        std::nullopt
+    );
+  });
 }
 
 template <typename Callback>
@@ -1207,9 +1197,13 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
     );
     if (max_threads_ > 1) {
       std::lock_guard<std::mutex> lock(adaptive_token_mask_cache_mutex.value());
-      compiled_grammar_impl->adaptive_token_mask_cache[state] = std::move(adaptive_token_mask);
+      compiled_grammar_impl->adaptive_token_mask_cache.Insert(
+          state, std::move(adaptive_token_mask)
+      );
     } else {
-      compiled_grammar_impl->adaptive_token_mask_cache[state] = std::move(adaptive_token_mask);
+      compiled_grammar_impl->adaptive_token_mask_cache.Insert(
+          state, std::move(adaptive_token_mask)
+      );
     }
   };
 
@@ -1433,7 +1427,7 @@ class GrammarCompiler::Impl {
       int64_t max_memory_bytes,
       bool jit_mode
   )
-      : grammar_level_cache_enabled_(cache_enabled && (!jit_mode || max_memory_bytes == -1)),
+      : grammar_level_cache_enabled_(cache_enabled),
         rule_level_cache_(
             cache_enabled
                 ? std::optional<RuleLevelCache>(
@@ -1622,14 +1616,6 @@ int64_t GrammarCompiler::Impl::CacheLimitBytes() const {
 }
 
 /******************* GrammarCompiler *******************/
-
-GrammarCompiler::GrammarCompiler(
-    const TokenizerInfo& tokenizer_info,
-    int max_threads,
-    bool cache_enabled,
-    int64_t max_memory_bytes
-)
-    : GrammarCompiler(tokenizer_info, max_threads, cache_enabled, max_memory_bytes, false) {}
 
 GrammarCompiler::GrammarCompiler(
     const TokenizerInfo& tokenizer_info,
