@@ -336,9 +336,10 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
       const DynamicBitset* tag_dispatch_second_slicing_bitset,
       const TokenizerInfo& tokenizer_info,
       std::optional<RuleLevelCache>& rule_level_cache,
-      bool is_root_rule
+      bool is_root_rule,
+      const std::shared_ptr<const EarleyParserGrammarFeatures>& grammar_features
   )
-      : EarleyParser(grammar, init_state),
+      : EarleyParser(grammar, init_state, grammar_features),
         init_rule_id_(init_state.rule_id),
         initial_state_(init_state),
         is_root_rule_(is_root_rule),
@@ -1319,7 +1320,8 @@ const AdaptiveTokenMask& TokenMaskCache::Get(
     const ParserState& state,
     bool is_root_rule,
     const Grammar& grammar,
-    const TokenizerInfo& tokenizer_info
+    const TokenizerInfo& tokenizer_info,
+    const std::shared_ptr<const EarleyParserGrammarFeatures>& grammar_features
 ) {
   if (!dynamic_) {
     const auto it = masks_.find(state);
@@ -1366,7 +1368,8 @@ const AdaptiveTokenMask& TokenMaskCache::Get(
                                tag_dispatch_second_slicing_bitset,
                                tokenizer_info,
                                retained_rule_level_cache,
-                               is_root_rule
+                               is_root_rule,
+                               grammar_features
   )
                                .GetAdaptiveTokenMask();
 
@@ -1433,6 +1436,8 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   auto compiled_grammar_impl = std::make_shared<CompiledGrammar::Impl>(enable_dynamic_compilation_);
   compiled_grammar_impl->grammar = std::move(grammar);
   compiled_grammar_impl->tokenizer_info = tokenizer_info_;
+  compiled_grammar_impl->earley_parser_grammar_features =
+      std::make_shared<const EarleyParserGrammarFeatures>(compiled_grammar_impl->grammar);
   if (tokenizer_info_.GetVocabSize() == 0) {
     return CompiledGrammar(compiled_grammar_impl);
   }
@@ -1483,7 +1488,8 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
         tag_dispatch_second_slicing_bitset,
         tokenizer_info_,
         rule_level_cache_,
-        is_root_rule
+        is_root_rule,
+        compiled_grammar_impl->earley_parser_grammar_features
     );
     auto cur_adaptive_token_mask_cache = grammar_matcher.GetAdaptiveTokenMask();
     if (max_threads_ > 1) {

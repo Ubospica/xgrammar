@@ -139,7 +139,8 @@ class TokenMaskCache {
       const ParserState& state,
       bool is_root_rule,
       const Grammar& grammar,
-      const TokenizerInfo& tokenizer_info
+      const TokenizerInfo& tokenizer_info,
+      const std::shared_ptr<const EarleyParserGrammarFeatures>& grammar_features
   );
 
  private:
@@ -216,6 +217,9 @@ class CompiledGrammar::Impl {
 
   /*! \brief The adaptive token masks, precomputed or generated on first use. */
   TokenMaskCache token_mask_cache;
+
+  /*! \brief Grammar-wide flags and nullable rules shared by Earley parsers. */
+  std::shared_ptr<const EarleyParserGrammarFeatures> earley_parser_grammar_features;
 
   Grammar GetGrammar() const { return grammar; }
 
