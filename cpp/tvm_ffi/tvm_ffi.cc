@@ -205,6 +205,21 @@ class GrammarCompilerObj : public ffi::Object {
             max_memory_bytes
         ) {}
 
+  GrammarCompilerObj(
+      ffi::ObjectRef tokenizer_ref,
+      int64_t max_threads,
+      bool cache_enabled,
+      int64_t max_memory_bytes,
+      bool jit_mode
+  )
+      : value(
+            tokenizer_ref.as<TokenizerInfoObj>()->value,
+            static_cast<int>(max_threads),
+            cache_enabled,
+            max_memory_bytes,
+            jit_mode
+        ) {}
+
   static constexpr bool _type_mutable = true;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL(
       "xgrammar.tvm_ffi_binding.GrammarCompiler", GrammarCompilerObj, ffi::Object
@@ -505,6 +520,14 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   // GrammarCompiler: init(tokenizer_info, max_threads, cache_enabled, max_memory_bytes)
   refl::ObjectDef<GrammarCompilerObj>()
       .def(refl::init<O, int64_t, bool, int64_t>())
+      .def_static(
+          "create_with_jit_mode",
+          [](O tokenizer_ref, int64_t max_threads, bool cache_enabled, int64_t max_memory_bytes) {
+            return ffi::ObjectRef(ffi::make_object<GrammarCompilerObj>(
+                tokenizer_ref, max_threads, cache_enabled, max_memory_bytes, true
+            ));
+          }
+      )
       .def(
           "compile_json_schema",
           [](GrammarCompilerObj* o,

@@ -46,7 +46,7 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
       const std::unordered_map<int32_t, DynamicBitset>&
           tag_dispatch_rule_id_to_second_slicing_bitset,
       const TokenizerInfo& tokenizer_info,
-      const std::optional<RuleLevelCache>& rule_level_cache
+      const std::shared_ptr<RuleLevelCache>& rule_level_cache
   )
       : EarleyParser(grammar, grammar_metadata, init_state),
         init_rule_id_(init_state.rule_id),
@@ -130,7 +130,7 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
 
   const TokenizerInfo& tokenizer_info_;
 
-  std::optional<RuleLevelCache> rule_level_cache_;
+  std::shared_ptr<RuleLevelCache> rule_level_cache_;
 
   // Temporary data for GetAdaptiveTokenMask.
   std::vector<int32_t> tmp_accepted_indices_;
@@ -805,7 +805,7 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   tmp_can_reach_end_prefix_or_stack_.push_back(false);
 
   // Try to get the crossing cache.
-  bool rule_level_cache_is_available = !has_char_budget_rules_ && rule_level_cache_.has_value() &&
+  bool rule_level_cache_is_available = !has_char_budget_rules_ && rule_level_cache_ != nullptr &&
                                        grammar_->per_rule_fsm_hashes[init_rule_id_].has_value();
   std::optional<uint64_t> fsm_hash = std::nullopt;
   int32_t new_state_id = -1;
@@ -1011,7 +1011,7 @@ AdaptiveTokenMask GenerateAdaptiveTokenMask(
     const ParserState& state,
     bool is_root_rule,
     const std::unordered_map<int32_t, DynamicBitset>& tag_dispatch_rule_id_to_second_slicing_bitset,
-    const std::optional<RuleLevelCache>& rule_level_cache
+    const std::shared_ptr<RuleLevelCache>& rule_level_cache
 ) {
   return GrammarMatcherForTokenMaskCache(
              grammar,
@@ -1022,6 +1022,47 @@ AdaptiveTokenMask GenerateAdaptiveTokenMask(
              rule_level_cache
   )
       .GetAdaptiveTokenMask(is_root_rule);
+}
+
+const AdaptiveTokenMask& CompiledGrammar::Impl::GetAdaptiveTokenMask(
+    const ParserState& state, bool is_root_rule
+) {
+  if (!jit_mode) {
+    auto iterator = adaptive_token_mask_cache.find(state);
+    XGRAMMAR_CHECK(iterator != adaptive_token_mask_cache.end())
+        << "The token mask cache is incomplete while jit_mode is disabled: " << state;
+    return iterator->second;
+  }
+
+  const auto cache_state = ParserState(
+      state.rule_id,
+      state.sequence_id,
+      state.element_id,
+      ParserState::kNoPrevInputPos,
+      -1,
+      state.sub_element_id
+  );
+  {
+    std::lock_guard<std::mutex> lock(adaptive_token_mask_cache_mutex);
+    auto iterator = adaptive_token_mask_cache.find(cache_state);
+    if (iterator != adaptive_token_mask_cache.end()) {
+      return iterator->second;
+    }
+  }
+
+  auto generated_mask = GenerateAdaptiveTokenMask(
+      grammar,
+      earley_parser_metadata,
+      tokenizer_info,
+      cache_state,
+      is_root_rule,
+      tag_dispatch_rule_id_to_second_slicing_bitset,
+      rule_level_cache
+  );
+
+  std::lock_guard<std::mutex> lock(adaptive_token_mask_cache_mutex);
+  return adaptive_token_mask_cache.try_emplace(cache_state, std::move(generated_mask))
+      .first->second;
 }
 
 template <typename Callback>
@@ -1044,6 +1085,15 @@ void ForEachAdaptiveTokenMaskState(const Grammar& grammar, Callback&& callback) 
   }
 }
 
+void CompiledGrammar::Impl::MaterializeAdaptiveTokenMaskCache() {
+  if (tokenizer_info.GetVocabSize() == 0) {
+    return;
+  }
+  ForEachAdaptiveTokenMaskState(grammar, [this](const ParserState& state, bool is_root_rule) {
+    GetAdaptiveTokenMask(state, is_root_rule);
+  });
+}
+
 /******************* GrammarCompilerNoCache *******************/
 
 /*!
@@ -1054,11 +1104,13 @@ class GrammarCompilerSub {
   GrammarCompilerSub(
       const TokenizerInfo& tokenizer_info,
       int max_threads,
-      std::optional<RuleLevelCache> rule_level_cache
+      std::shared_ptr<RuleLevelCache> rule_level_cache,
+      bool jit_mode
   )
       : tokenizer_info_(tokenizer_info),
         max_threads_(max_threads),
-        rule_level_cache_(rule_level_cache) {}
+        rule_level_cache_(std::move(rule_level_cache)),
+        jit_mode_(jit_mode) {}
 
   CompiledGrammar CompileBuiltinJSONGrammar();
 
@@ -1099,7 +1151,10 @@ class GrammarCompilerSub {
   const int max_threads_;
 
   /*! \brief The manager of the rule level cache.*/
-  std::optional<RuleLevelCache> rule_level_cache_;
+  std::shared_ptr<RuleLevelCache> rule_level_cache_;
+
+  /*! \brief Whether token masks are generated on first use. */
+  const bool jit_mode_;
 };
 
 CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_unoptimized) {
@@ -1108,6 +1163,7 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   compiled_grammar_impl->earley_parser_metadata =
       EarleyParserGrammarMetadata(compiled_grammar_impl->grammar);
   compiled_grammar_impl->tokenizer_info = tokenizer_info_;
+  compiled_grammar_impl->jit_mode = jit_mode_;
   if (tokenizer_info_.GetVocabSize() == 0) {
     return CompiledGrammar(compiled_grammar_impl);
   }
@@ -1115,8 +1171,14 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   TagDispatchOptimization(compiled_grammar_impl, &tag_dispatch_rule_id_to_second_slicing_bitset);
 
   // If the compiler is cache-enabled, then we hash the grammars for crossing-grammar caching.
-  if (rule_level_cache_.has_value()) {
+  if (rule_level_cache_ != nullptr) {
     GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar);
+  }
+  if (jit_mode_) {
+    compiled_grammar_impl->rule_level_cache = rule_level_cache_;
+    compiled_grammar_impl->tag_dispatch_rule_id_to_second_slicing_bitset =
+        std::move(tag_dispatch_rule_id_to_second_slicing_bitset);
+    return CompiledGrammar(compiled_grammar_impl);
   }
   // Step 3. Compute the adaptive token mask cache
   // The token mask cache is computed for these positions in the grammar:
@@ -1369,19 +1431,20 @@ class GrammarCompiler::Impl {
       const TokenizerInfo& tokenizer_info,
       int max_threads,
       bool cache_enabled,
-      int64_t max_memory_bytes
+      int64_t max_memory_bytes,
+      bool jit_mode
   )
-      : cache_enabled_(cache_enabled),
+      : grammar_level_cache_enabled_(cache_enabled && (!jit_mode || max_memory_bytes == -1)),
         rule_level_cache_(
             cache_enabled
-                ? std::optional<RuleLevelCache>(
+                ? std::make_shared<RuleLevelCache>(
                       max_memory_bytes == -1
                           ? static_cast<std::size_t>(-1)
                           : static_cast<std::size_t>(max_memory_bytes - max_memory_bytes / 3 * 2)
                   )
-                : std::nullopt
+                : nullptr
         ),
-        no_cache_compiler_(tokenizer_info, max_threads, rule_level_cache_),
+        no_cache_compiler_(tokenizer_info, max_threads, rule_level_cache_, jit_mode),
         grammar_level_cache_(
             max_memory_bytes == -1 ? static_cast<std::size_t>(-1)
                                    : static_cast<std::size_t>(max_memory_bytes / 3 * 2),
@@ -1440,11 +1503,11 @@ class GrammarCompiler::Impl {
     std::size_t operator()(const CompiledGrammar& value) const { return value.MemorySizeBytes(); }
   };
 
-  /*! \brief Whether the cache is enabled. */
-  const bool cache_enabled_;
+  /*! \brief Whether the grammar-level cache is enabled. */
+  const bool grammar_level_cache_enabled_;
 
   /*! \brief The crossing cache manager for compiled grammars. */
-  std::optional<RuleLevelCache> rule_level_cache_ = std::nullopt;
+  std::shared_ptr<RuleLevelCache> rule_level_cache_;
 
   /*! \brief The no cache compiler. */
   GrammarCompilerSub no_cache_compiler_;
@@ -1483,7 +1546,7 @@ CompiledGrammar GrammarCompiler::Impl::Compute(const UnionKey& key) {
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileBuiltinJSONGrammar() {
-  if (!cache_enabled_) {
+  if (!grammar_level_cache_enabled_) {
     return no_cache_compiler_.CompileBuiltinJSONGrammar();
   }
   return grammar_level_cache_.Get(BuiltinJSONGrammarKey{});
@@ -1498,7 +1561,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileJSONSchema(
     std::optional<int> max_whitespace_cnt,
     bool any_order
 ) {
-  if (!cache_enabled_) {
+  if (!grammar_level_cache_enabled_) {
     return no_cache_compiler_.CompileJSONSchema(
         schema, any_whitespace, indent, separators, strict_mode, max_whitespace_cnt, any_order
     );
@@ -1510,21 +1573,21 @@ CompiledGrammar GrammarCompiler::Impl::CompileJSONSchema(
 
 CompiledGrammar GrammarCompiler::Impl::CompileStructuralTag(const std::string& structural_tag_json
 ) {
-  if (!cache_enabled_) {
+  if (!grammar_level_cache_enabled_) {
     return no_cache_compiler_.CompileStructuralTag(structural_tag_json);
   }
   return grammar_level_cache_.Get(StructuralTagKey{structural_tag_json});
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileRegex(const std::string& regex) {
-  if (!cache_enabled_) {
+  if (!grammar_level_cache_enabled_) {
     return no_cache_compiler_.CompileRegex(regex);
   }
   return grammar_level_cache_.Get(RegexKey{regex});
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileGrammar(const Grammar& grammar) {
-  if (!cache_enabled_) {
+  if (!grammar_level_cache_enabled_) {
     return no_cache_compiler_.CompileGrammar(grammar);
   }
   return grammar_level_cache_.Get(GrammarKey{grammar.ToString(), grammar->GetRootRule().name});
@@ -1533,7 +1596,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileGrammar(const Grammar& grammar) {
 CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
     const std::string& ebnf_str, std::string root_rule_name
 ) {
-  if (!cache_enabled_) {
+  if (!grammar_level_cache_enabled_) {
     return no_cache_compiler_.CompileGrammar(ebnf_str, root_rule_name);
   }
   return grammar_level_cache_.Get(GrammarKey{ebnf_str, root_rule_name});
@@ -1541,22 +1604,21 @@ CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
 
 void GrammarCompiler::Impl::ClearCache() {
   grammar_level_cache_.Clear();
-  if (rule_level_cache_.has_value()) {
+  if (rule_level_cache_ != nullptr) {
     rule_level_cache_->ClearCache();
   }
 }
 
 int64_t GrammarCompiler::Impl::GetCacheSizeBytes() const {
   return static_cast<int64_t>(grammar_level_cache_.MemorySize()) +
-         static_cast<int64_t>(MemorySize(rule_level_cache_));
+         static_cast<int64_t>(rule_level_cache_ == nullptr ? 0 : MemorySize(*rule_level_cache_));
 }
 
 int64_t GrammarCompiler::Impl::CacheLimitBytes() const {
   const auto size = grammar_level_cache_.MaxMemorySize();
   if (size == grammar_level_cache_.kUnlimitedSize) return -1;
-  return static_cast<int64_t>(size) + (rule_level_cache_.has_value()
-                                           ? static_cast<int64_t>(rule_level_cache_->GetMaxSize())
-                                           : 0);
+  return static_cast<int64_t>(size) +
+         (rule_level_cache_ != nullptr ? static_cast<int64_t>(rule_level_cache_->GetMaxSize()) : 0);
 }
 
 /******************* GrammarCompiler *******************/
@@ -1567,8 +1629,18 @@ GrammarCompiler::GrammarCompiler(
     bool cache_enabled,
     int64_t max_memory_bytes
 )
-    : pimpl_(std::make_shared<Impl>(tokenizer_info, max_threads, cache_enabled, max_memory_bytes)) {
-}
+    : GrammarCompiler(tokenizer_info, max_threads, cache_enabled, max_memory_bytes, false) {}
+
+GrammarCompiler::GrammarCompiler(
+    const TokenizerInfo& tokenizer_info,
+    int max_threads,
+    bool cache_enabled,
+    int64_t max_memory_bytes,
+    bool jit_mode
+)
+    : pimpl_(std::make_shared<Impl>(
+          tokenizer_info, max_threads, cache_enabled, max_memory_bytes, jit_mode
+      )) {}
 
 CompiledGrammar GrammarCompiler::CompileJSONSchema(
     const std::string& schema,
