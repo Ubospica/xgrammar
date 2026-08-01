@@ -81,6 +81,22 @@ class FirstByteTokenMaskCache {
     return result;
   }
 
+  static std::shared_ptr<const std::vector<int32_t>> BuildAsciiStringSafeIndices(
+      const std::vector<std::pair<int32_t, std::string>>& sorted_decoded_vocab
+  ) {
+    auto result = std::make_shared<std::vector<int32_t>>();
+    result->reserve(sorted_decoded_vocab.size() / 2);
+    for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
+      const auto& token = sorted_decoded_vocab[index].second;
+      if (!token.empty() && std::all_of(token.begin(), token.end(), [](uint8_t byte) {
+            return byte >= 0x20 && byte < 0x7f && byte != '"' && byte != '\\';
+          })) {
+        result->push_back(index);
+      }
+    }
+    return result;
+  }
+
   struct Key {
     uint8_t first_byte;
     bool collect_rejected;
@@ -112,12 +128,20 @@ class FirstByteTokenMaskCache {
   };
 
   FirstByteTokenMaskCache(
-      size_t max_memory_bytes, std::shared_ptr<const VocabBuckets> vocab_buckets
+      size_t max_memory_bytes,
+      std::shared_ptr<const VocabBuckets> vocab_buckets,
+      std::shared_ptr<const std::vector<int32_t>> ascii_string_safe_indices
   )
-      : max_memory_bytes_(max_memory_bytes), vocab_buckets_(std::move(vocab_buckets)) {}
+      : max_memory_bytes_(max_memory_bytes),
+        vocab_buckets_(std::move(vocab_buckets)),
+        ascii_string_safe_indices_(std::move(ascii_string_safe_indices)) {}
 
   const VocabBucket& GetVocabBucket(uint8_t first_byte) const {
     return (*vocab_buckets_)[first_byte];
+  }
+
+  const std::vector<int32_t>& GetAsciiStringSafeIndices() const {
+    return *ascii_string_safe_indices_;
   }
 
   std::shared_ptr<const Result> Get(const Key& key) {
@@ -165,6 +189,7 @@ class FirstByteTokenMaskCache {
   size_t memory_bytes_ = 0;
   std::unordered_map<Key, std::shared_ptr<const Result>, KeyHash> cache_;
   std::shared_ptr<const VocabBuckets> vocab_buckets_;
+  std::shared_ptr<const std::vector<int32_t>> ascii_string_safe_indices_;
 };
 
 /*!
@@ -1613,6 +1638,18 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
   const std::string* prev_token = nullptr;
   int32_t skip_ptr = 0;
   const int32_t skip_size = static_cast<int32_t>(token_edge_accepted.size());
+  bool accepts_ascii_string_safe_slice =
+      speculative_calculation && !definite_accepted_bitset.has_value();
+  if (accepts_ascii_string_safe_slice) {
+    for (int32_t byte = 0x20; byte < 0x7f; ++byte) {
+      if (byte != '"' && byte != '\\' && !speculative_mask[byte]) {
+        accepts_ascii_string_safe_slice = false;
+        break;
+      }
+    }
+  }
+  const auto& ascii_string_safe_indices = first_byte_cache_->GetAsciiStringSafeIndices();
+  size_t ascii_string_safe_position = 0;
   for (size_t interval_idx = 0; interval_idx < possible_intervals.size(); ++interval_idx) {
     const auto& interval = possible_intervals[interval_idx];
     int group_begin = interval.first;
@@ -1738,6 +1775,17 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
           continue;
         }
         const auto& token = sorted_decoded_vocab[i].second;
+        if (accepts_ascii_string_safe_slice) {
+          while (ascii_string_safe_position < ascii_string_safe_indices.size() &&
+                 ascii_string_safe_indices[ascii_string_safe_position] < i) {
+            ++ascii_string_safe_position;
+          }
+          if (ascii_string_safe_position < ascii_string_safe_indices.size() &&
+              ascii_string_safe_indices[ascii_string_safe_position] == i) {
+            tmp_accepted_indices_.push_back(i);
+            continue;
+          }
+        }
         // This optimization is useful for simple self-recursive rules, like string content.
         if (speculative_calculation) {
           // Optimization for tag dispatch rules.
@@ -2349,6 +2397,9 @@ class GrammarCompilerSub {
         first_byte_vocab_buckets_(
             FirstByteTokenMaskCache::BuildVocabBuckets(tokenizer_info.GetSortedDecodedVocab())
         ),
+        ascii_string_safe_indices_(FirstByteTokenMaskCache::BuildAsciiStringSafeIndices(
+            tokenizer_info.GetSortedDecodedVocab()
+        )),
         max_threads_(max_threads),
         thread_pool_(
             max_threads > 1 && !enable_dynamic_compilation
@@ -2400,6 +2451,8 @@ class GrammarCompilerSub {
   const TokenizerInfo tokenizer_info_;
   /*! \brief Immutable first-byte ranges shared by every grammar compiled for this tokenizer. */
   const std::shared_ptr<const FirstByteTokenMaskCache::VocabBuckets> first_byte_vocab_buckets_;
+  /*! \brief Printable ASCII tokens that cannot terminate or escape a JSON string. */
+  const std::shared_ptr<const std::vector<int32_t>> ascii_string_safe_indices_;
   /*! \brief The maximum number of threads to use. */
   const int max_threads_;
   /*! \brief Reused workers so each compile avoids thread startup and teardown. */
@@ -2465,8 +2518,9 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
     active_rule_level_cache = std::make_shared<RuleLevelCache>(kLocalRuleCacheMaxBytes);
   }
   constexpr size_t kFirstByteCacheMaxBytes = 64 * 1024 * 1024;
-  auto first_byte_cache =
-      std::make_shared<FirstByteTokenMaskCache>(kFirstByteCacheMaxBytes, first_byte_vocab_buckets_);
+  auto first_byte_cache = std::make_shared<FirstByteTokenMaskCache>(
+      kFirstByteCacheMaxBytes, first_byte_vocab_buckets_, ascii_string_safe_indices_
+  );
   auto optional_character_class_token_summary_cache = optional_character_class_token_summary_cache_;
   GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar, !enable_dynamic_compilation_);
   if (enable_dynamic_compilation_) {
