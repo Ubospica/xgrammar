@@ -110,6 +110,7 @@ class GrammarCompiler(XGRObject):
         max_threads: int = 8,
         cache_enabled: bool = True,
         cache_limit_bytes: int = -1,
+        jit_mode: bool = False,
     ):
         """Construct the compiler.
 
@@ -127,6 +128,10 @@ class GrammarCompiler(XGRObject):
         cache_limit_bytes : int, default: -1
             The maximum memory usage for the cache in the specified unit.
             Note that the actual memory usage may slightly exceed this value.
+
+        jit_mode : bool, default: False
+            Whether to generate token masks when they are first needed.
+            When False, all token masks are generated while compiling the grammar.
         """
         if not isinstance(tokenizer_info, TokenizerInfo):
             raise ValueError(
@@ -136,7 +141,7 @@ class GrammarCompiler(XGRObject):
 
         self._init_handle(
             _core.GrammarCompiler(
-                tokenizer_info._handle, max_threads, cache_enabled, cache_limit_bytes
+                tokenizer_info._handle, max_threads, cache_enabled, cache_limit_bytes, jit_mode
             )
         )
 

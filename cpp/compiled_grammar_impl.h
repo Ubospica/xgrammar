@@ -10,6 +10,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <future>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -99,6 +102,44 @@ XGRAMMAR_MEMBER_TABLE(
     &AdaptiveTokenMask::uncertain_indices
 );
 
+using AdaptiveTokenMaskMap =
+    std::unordered_map<ParserState, AdaptiveTokenMask, StateHashForCache, StateEqualForCache>;
+
+/*! \brief Storage and runtime generation coordination for adaptive token masks. */
+class TokenMaskCache {
+ public:
+  using Generator = std::function<AdaptiveTokenMask()>;
+
+  /*! \brief Return the cached mask, or nullptr when absent. No writes may run concurrently. */
+  const AdaptiveTokenMask* Find(const ParserState& state) const;
+
+  /*! \brief Return the cached mask, generating it once when absent. */
+  const AdaptiveTokenMask& GetOrCreate(const ParserState& state, Generator generator);
+
+  /*! \brief Insert a mask during grammar compilation. The caller coordinates concurrent writes. */
+  void Insert(const ParserState& state, AdaptiveTokenMask mask);
+
+  /*! \brief Return a stable copy of all generated masks. */
+  AdaptiveTokenMaskMap Snapshot() const;
+
+  /*! \brief Replace all masks during deserialization. No access may run concurrently. */
+  void Assign(AdaptiveTokenMaskMap masks);
+
+  /*! \brief Return the number of generated masks. */
+  std::size_t Size(bool lock_required) const;
+
+  /*! \brief Return the approximate memory usage of generated masks. */
+  std::size_t MemorySizeBytes(bool lock_required) const;
+
+ private:
+  using MaskFuture = std::shared_future<const AdaptiveTokenMask*>;
+
+  AdaptiveTokenMaskMap masks_;
+  std::unordered_map<ParserState, MaskFuture, StateHashForCache, StateEqualForCache>
+      in_flight_masks_;
+  mutable std::mutex mutex_;
+};
+
 /*!
  * \brief All information that we need to match tokens in the tokenizer to the specified grammar.
  * It is the result of preprocessing.
@@ -118,9 +159,17 @@ class CompiledGrammar::Impl {
   /*! \brief Default constructor. */
   Impl() = default;
 
-  /*! \brief Mapping from the parser state to the adaptive token mask. */
-  std::unordered_map<ParserState, AdaptiveTokenMask, StateHashForCache, StateEqualForCache>
-      adaptive_token_mask_cache;
+  /*! \brief Mapping from parser states to adaptive token masks. */
+  TokenMaskCache adaptive_token_mask_cache;
+
+  /*! \brief Whether missing token masks should be generated on first use. */
+  bool jit_mode{false};
+
+  /*! \brief Tag dispatch data retained for token mask generation. */
+  std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
+
+  /*! \brief Get a cached token mask, generating it when jit_mode is enabled. */
+  const AdaptiveTokenMask& GetAdaptiveTokenMask(const ParserState& state, bool is_root_rule);
 
   Grammar GetGrammar() const { return grammar; }
 

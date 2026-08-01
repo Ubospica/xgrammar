@@ -63,12 +63,14 @@ class GrammarCompiler {
    * \param max_threads The maximum number of threads to use for compiling grammars.
    * \param cache_enabled Whether to enable the cache.
    * \param max_memory_bytes The maximum memory usage in bytes.
+   * \param jit_mode Whether to generate token masks when they are first needed.
    */
   GrammarCompiler(
       const TokenizerInfo& tokenizer_info,
       int max_threads = 8,
       bool cache_enabled = true,
-      int64_t max_memory_bytes = -1  // unlimited
+      int64_t max_memory_bytes = -1,  // unlimited
+      bool jit_mode = false
   );
 
   /*! \brief Get the compiled grammar for a JSON schema string. */
