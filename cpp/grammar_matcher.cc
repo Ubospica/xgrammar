@@ -916,11 +916,11 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
     Complete(state, debug_print, /*marker_present=*/false);
   }
   while (!tmp_process_state_queue_.empty()) {
-    const auto state = std::move(tmp_process_state_queue_.front());
+    const ParserState* state = tmp_process_state_queue_.front();
     tmp_process_state_queue_.pop();
-    auto [scanable, completable] = Predict(state, debug_print);
+    auto [scanable, completable] = Predict(*state, debug_print);
     if (completable) {
-      Complete(state, debug_print);
+      Complete(*state, debug_print);
     }
     if (scanable) {
       tmp_states_to_be_added_.push_back(state);
@@ -933,7 +933,7 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
   bool any_expired = false;
   bool any_alive = false;
   for (const auto& state : tmp_states_to_be_added_) {
-    if (IsExpiredState(state)) {
+    if (IsExpiredState(*state)) {
       any_expired = true;
     } else {
       any_alive = true;
@@ -947,7 +947,7 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
         std::remove_if(
             tmp_states_to_be_added_.begin(),
             tmp_states_to_be_added_.end(),
-            [&](const ParserState& state) { return IsExpiredState(state); }
+            [&](const ParserState* state) { return IsExpiredState(*state); }
         ),
         tmp_states_to_be_added_.end()
     );
@@ -958,7 +958,7 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
     return false;
   }
   scanable_state_history_.PopBack(1);
-  scanable_state_history_.PushBack(tmp_states_to_be_added_);
+  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
   is_completed_.back() = tmp_accept_stop_token_;
   return true;
 }
@@ -1002,11 +1002,11 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
     Complete(state, debug_print, /*marker_present=*/false);
   }
   while (!tmp_process_state_queue_.empty()) {
-    const auto state = std::move(tmp_process_state_queue_.front());
+    const ParserState* state = tmp_process_state_queue_.front();
     tmp_process_state_queue_.pop();
-    auto [scanable, completable] = Predict(state, debug_print);
+    auto [scanable, completable] = Predict(*state, debug_print);
     if (completable) {
-      Complete(state, debug_print);
+      Complete(*state, debug_print);
     }
     if (scanable) {
       tmp_states_to_be_added_.push_back(state);
@@ -1019,7 +1019,7 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
   bool any_expired = false;
   bool any_alive = false;
   for (const auto& state : tmp_states_to_be_added_) {
-    if (IsCharExpiredState(state)) {
+    if (IsCharExpiredState(*state)) {
       any_expired = true;
     } else {
       any_alive = true;
@@ -1030,7 +1030,7 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
         std::remove_if(
             tmp_states_to_be_added_.begin(),
             tmp_states_to_be_added_.end(),
-            [&](const ParserState& state) { return IsCharExpiredState(state); }
+            [&](const ParserState* state) { return IsCharExpiredState(*state); }
         ),
         tmp_states_to_be_added_.end()
     );
@@ -1047,7 +1047,7 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
     return false;
   }
   scanable_state_history_.PopBack(1);
-  scanable_state_history_.PushBack(tmp_states_to_be_added_);
+  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
   is_completed_.back() = tmp_accept_stop_token_;
   return true;
 }

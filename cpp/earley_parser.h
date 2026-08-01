@@ -23,6 +23,29 @@
 
 namespace xgrammar {
 
+struct ParserState;
+
+class ReusableStatePointerQueue {
+ public:
+  bool empty() const { return head_ == entries_.size(); }
+
+  const ParserState* front() const { return entries_[head_]; }
+
+  void pop() { ++head_; }
+
+  void push(const ParserState* state) {
+    if (empty()) {
+      entries_.clear();
+      head_ = 0;
+    }
+    entries_.push_back(state);
+  }
+
+ private:
+  std::vector<const ParserState*> entries_;
+  size_t head_ = 0;
+};
+
 /*!
  * \brief The state of the Earley parser.
  * In the implementation, a rule can only be a kchoices or a ktagdispatch.
@@ -248,6 +271,11 @@ class RepeatDetector {
   std::unordered_set<ParserState, StateHashForParsing, StateEqualForParsing> visited_set_;
 
   int size_ = 0;
+  bool using_set_ = false;
+
+  const ParserState* InsertInSet(const ParserState& state);
+
+  void ClearSet();
 
  public:
   RepeatDetector(const int transition_threshold = 50)
@@ -255,20 +283,57 @@ class RepeatDetector {
     visited_vector_.resize(transition_threshold_);
   }
 
-  /*!
-   * \brief Check if the element is visited.
-   * \return True if visited, false otherwise.
-   */
-  bool IsVisited(const ParserState& state) const;
+  /*! \brief Insert a state only if absent and return its stable address, or nullptr. */
+  const ParserState* InsertIfAbsent(const ParserState& state) {
+    if (!using_set_ && size_ < transition_threshold_) {
+      for (int i = 0; i < size_; ++i) {
+        if (StateEqualForParsing()(state, visited_vector_[i])) {
+          return nullptr;
+        }
+      }
+      visited_vector_[size_] = state;
+      return &visited_vector_[size_++];
+    }
+    return InsertInSet(state);
+  }
 
-  /*!
-   * \brief Add the state into the visited states.
-   * \param state The state to be added.
-   */
-  void Insert(const ParserState& state);
+  /*! \brief Insert a copy of an FSM state with a new element id. */
+  const ParserState* InsertFsmTransitionIfAbsent(
+      const ParserState& state, int32_t target_element_id
+  ) {
+    if (!using_set_ && size_ < transition_threshold_) {
+      for (int i = 0; i < size_; ++i) {
+        const ParserState& existing = visited_vector_[i];
+        if (existing.rule_id == state.rule_id && existing.sequence_id == state.sequence_id &&
+            existing.element_id == target_element_id &&
+            existing.rule_start_pos == state.rule_start_pos &&
+            existing.budget_deadline == state.budget_deadline &&
+            existing.sub_element_id == state.sub_element_id &&
+            existing.repeat_count == state.repeat_count &&
+            existing.partial_codepoint == state.partial_codepoint &&
+            existing.active_temperature_rule_id == state.active_temperature_rule_id &&
+            existing.char_budget_deadline == state.char_budget_deadline) {
+          return nullptr;
+        }
+      }
+      ParserState* inserted = &visited_vector_[size_++];
+      *inserted = state;
+      inserted->element_id = target_element_id;
+      return inserted;
+    }
+    ParserState transitioned = state;
+    transitioned.element_id = target_element_id;
+    return InsertInSet(transitioned);
+  }
 
   /*! \brief Reset the detector. */
-  void Clear();
+  void Clear() {
+    if (using_set_) {
+      ClearSet();
+    }
+    size_ = 0;
+    using_set_ = false;
+  }
 };
 
 struct StateEqualForCompletionContext {
@@ -389,10 +454,10 @@ class EarleyParser {
    * \brief A temporary vector only used in Advance, used to add states in the
    * scanable_state_history.
    */
-  std::vector<ParserState> tmp_states_to_be_added_;
+  std::vector<const ParserState*> tmp_states_to_be_added_;
 
-  /*! \brief It's the processing queue of the earley parser. */
-  std::queue<ParserState> tmp_process_state_queue_;
+  /*! \brief Stable pointers to visited states awaiting prediction/completion. */
+  ReusableStatePointerQueue tmp_process_state_queue_;
 
   /*! \brief The class is used to check if a state has been added into the queue. */
   RepeatDetector tmp_states_visited_in_queue_;
@@ -533,15 +598,6 @@ class EarleyParser {
   void RemoveCommittedLazyStates();
 
   /*!
-   * \brief Check if the state has been added into the queue.
-   * \param state The state to check.
-   * \return True if in the vector, false otherwise.
-   */
-  bool IsStateVisitedInQueue(const ParserState& state) const {
-    return tmp_states_visited_in_queue_.IsVisited(state);
-  }
-
-  /*!
    * \brief The scanning operation of the Earley parser. Put the new states in the queue.
    */
   void Scan(const ParserState& state, const uint8_t ch);
@@ -659,9 +715,8 @@ class EarleyParser {
    * \details The state is enqueued if it is not visited in the queue.
    */
   void Enqueue(const ParserState& state) {
-    if (!IsStateVisitedInQueue(state)) {
-      tmp_process_state_queue_.push(state);
-      tmp_states_visited_in_queue_.Insert(state);
+    if (const ParserState* inserted = tmp_states_visited_in_queue_.InsertIfAbsent(state)) {
+      tmp_process_state_queue_.push(inserted);
     }
   }
 
@@ -670,9 +725,22 @@ class EarleyParser {
    * \param state The state to be enqueued.
    */
   void EnqueueWithoutProcessing(const ParserState& state) {
-    if (!IsStateVisitedInQueue(state)) {
-      tmp_states_visited_in_queue_.Insert(state);
-      tmp_states_to_be_added_.push_back(state);
+    if (const ParserState* inserted = tmp_states_visited_in_queue_.InsertIfAbsent(state)) {
+      tmp_states_to_be_added_.push_back(inserted);
+    }
+  }
+
+  void EnqueueFsmTransition(const ParserState& state, int32_t target_element_id) {
+    if (const ParserState* inserted =
+            tmp_states_visited_in_queue_.InsertFsmTransitionIfAbsent(state, target_element_id)) {
+      tmp_process_state_queue_.push(inserted);
+    }
+  }
+
+  void EnqueueFsmTransitionWithoutProcessing(const ParserState& state, int32_t target_element_id) {
+    if (const ParserState* inserted =
+            tmp_states_visited_in_queue_.InsertFsmTransitionIfAbsent(state, target_element_id)) {
+      tmp_states_to_be_added_.push_back(inserted);
     }
   }
 
