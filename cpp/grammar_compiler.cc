@@ -233,14 +233,49 @@ class OptionalCharacterClassTokenSummaryCache {
     }
   }
 
+  template <typename Builder>
+  std::shared_ptr<const AdaptiveTokenMask> GetOrCreateSingleCharacterMask(
+      const Key& key, Builder&& builder
+  ) {
+    using SharedResult = std::shared_ptr<const AdaptiveTokenMask>;
+    std::shared_future<SharedResult> future;
+    std::promise<SharedResult> producer;
+    bool should_build = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto it = single_character_masks_.find(key);
+      if (it != single_character_masks_.end()) {
+        future = it->second;
+      } else {
+        future = producer.get_future().share();
+        single_character_masks_.emplace(key, future);
+        should_build = true;
+      }
+    }
+    if (!should_build) {
+      return future.get();
+    }
+    try {
+      SharedResult result = std::make_shared<const AdaptiveTokenMask>(builder());
+      producer.set_value(result);
+      return result;
+    } catch (...) {
+      producer.set_exception(std::current_exception());
+      throw;
+    }
+  }
+
   void Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     cache_.clear();
+    single_character_masks_.clear();
   }
 
  private:
   std::mutex mutex_;
   std::unordered_map<Key, std::shared_future<std::shared_ptr<const Result>>, KeyHash> cache_;
+  std::unordered_map<Key, std::shared_future<std::shared_ptr<const AdaptiveTokenMask>>, KeyHash>
+      single_character_masks_;
 };
 
 struct OptionalCharacterClassChain {
@@ -847,27 +882,33 @@ std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetSingleChara
   OptionalCharacterClassTokenSummaryCache::Key summary_key;
   summary_key.character_class.assign(character_class.begin(), character_class.end());
   const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
-  const auto summaries =
-      optional_character_class_token_summary_cache_->GetOrCreate(summary_key, [&]() {
-        return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
-      });
-  std::vector<int32_t> accepted_indices;
-  std::vector<int32_t> uncertain_indices;
-  accepted_indices.reserve(summaries->size() / 16);
-  uncertain_indices.reserve(summaries->size());
-  for (const auto& summary : *summaries) {
-    if (summary.consumed_whole_token && summary.locally_consumed_characters <= 1) {
-      accepted_indices.push_back(summary.sorted_vocab_index);
-    } else if (summary.has_completed_character_prefix) {
-      uncertain_indices.push_back(summary.sorted_vocab_index);
-    }
-  }
-  return AdaptiveTokenMask(
-      tokenizer_info_.GetVocabSize(),
-      sorted_vocab,
-      std::move(accepted_indices),
-      std::move(uncertain_indices)
+  const auto mask = optional_character_class_token_summary_cache_->GetOrCreateSingleCharacterMask(
+      summary_key,
+      [&]() {
+        const auto summaries =
+            optional_character_class_token_summary_cache_->GetOrCreate(summary_key, [&]() {
+              return BuildOptionalCharacterClassTokenSummaries(character_class, sorted_vocab);
+            });
+        std::vector<int32_t> accepted_indices;
+        std::vector<int32_t> uncertain_indices;
+        accepted_indices.reserve(summaries->size() / 16);
+        uncertain_indices.reserve(summaries->size());
+        for (const auto& summary : *summaries) {
+          if (summary.consumed_whole_token && summary.locally_consumed_characters <= 1) {
+            accepted_indices.push_back(summary.sorted_vocab_index);
+          } else if (summary.has_completed_character_prefix) {
+            uncertain_indices.push_back(summary.sorted_vocab_index);
+          }
+        }
+        return AdaptiveTokenMask(
+            tokenizer_info_.GetVocabSize(),
+            sorted_vocab,
+            std::move(accepted_indices),
+            std::move(uncertain_indices)
+        );
+      }
   );
+  return *mask;
 }
 
 std::optional<AdaptiveTokenMask>
