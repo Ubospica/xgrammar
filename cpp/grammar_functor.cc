@@ -3721,7 +3721,6 @@ class RuleLevelCache::Impl {
   friend size_t MemorySize(const Impl* impl) {
     int64_t total = 0;
     for (const auto& shard : impl->shards_) {
-      std::lock_guard<std::mutex> lock(shard.mutex);
       total += shard.current_cache_memory_size;
     }
     return total;
@@ -3738,7 +3737,7 @@ class RuleLevelCache::Impl {
   static constexpr size_t kNumShards = 16;
 
   struct Shard {
-    mutable std::mutex mutex;
+    std::mutex mutex;
     int64_t current_cache_memory_size = 0;
     // The cache map: (fsm_hash, node_id, ...) -> index in cache_list
     List<NodeType> cache_list;
