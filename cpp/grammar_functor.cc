@@ -1457,6 +1457,12 @@ class GrammarFSMBuilderImpl {
       int start_state,
       std::vector<int32_t>* end_states
   );
+  bool BuildByteStringRuleRefChoices(
+      const GrammarExpr& expr,
+      const Grammar& grammar,
+      int start_state,
+      std::vector<int32_t>* end_states
+  );
   void AddCharacterClassTransitions(const GrammarExpr& expr, int start_state, int end_state);
   void BuildNegativeCharacterClass(const GrammarExpr& expr, int start_state, int end_state);
   void AppendFSM(FSMWithStartEnd fsm, int start_state, std::vector<int32_t>* end_states);
@@ -1468,6 +1474,7 @@ class GrammarFSMBuilderImpl {
   FSM& target_fsm_;
   const std::string* rule_name_;
   RegexFSMCache* regex_fsm_cache_;
+  bool skip_equivalent_state_merge_{false};
 };
 
 // This function will add a range [min, max] of characters to the FSM, and the length
@@ -1783,7 +1790,9 @@ FSMWithStartEnd GrammarFSMBuilderImpl::BuildExpressionFSM(
   FSMWithStartEnd result(result_fsm, start_state, std::move(end_states));
   if (expr.type != ExprType::kTagDispatch && expr.type != ExprType::kTokenTagDispatch) {
     result = result.SimplifyEpsilon();
-    result = result.MergeEquivalentStates();
+    if (!builder.skip_equivalent_state_merge_) {
+      result = result.MergeEquivalentStates();
+    }
   }
   return result;
 }
@@ -2028,6 +2037,10 @@ void GrammarFSMBuilderImpl::BuildChoices(
     XGRAMMAR_UNREACHABLE();
   }
 
+  if (!nullable && BuildByteStringRuleRefChoices(expr, grammar, start_state, end_states)) {
+    return;
+  }
+
   std::vector<int32_t> branch_end_states;
   for (int32_t choice_id : expr) {
     const auto& choice_expr = grammar->GetGrammarExpr(choice_id);
@@ -2045,6 +2058,79 @@ void GrammarFSMBuilderImpl::BuildChoices(
     target_fsm_.AddEpsilonEdge(start_state, nullable_branch_state);
     end_states->push_back(nullable_branch_state);
   }
+}
+
+bool GrammarFSMBuilderImpl::BuildByteStringRuleRefChoices(
+    const GrammarExpr& expr,
+    const Grammar& grammar,
+    int start_state,
+    std::vector<int32_t>* end_states
+) {
+  struct Branch {
+    std::string prefix;
+    int32_t rule_id;
+    std::string suffix;
+  };
+
+  std::vector<Branch> branches;
+  branches.reserve(expr.size());
+  std::vector<std::string> prefixes;
+  prefixes.reserve(expr.size());
+  for (int32_t choice_id : expr) {
+    const auto& sequence = grammar->GetGrammarExpr(choice_id);
+    if (sequence.type != ExprType::kSequence || sequence.size() != 3) {
+      return false;
+    }
+    const auto& prefix = grammar->GetGrammarExpr(sequence[0]);
+    const auto& rule_ref = grammar->GetGrammarExpr(sequence[1]);
+    const auto& suffix = grammar->GetGrammarExpr(sequence[2]);
+    if (prefix.type != ExprType::kByteString || rule_ref.type != ExprType::kRuleRef ||
+        suffix.type != ExprType::kByteString) {
+      return false;
+    }
+
+    Branch branch;
+    branch.prefix.reserve(prefix.size());
+    for (int32_t byte : prefix) {
+      branch.prefix.push_back(static_cast<char>(static_cast<uint8_t>(byte)));
+    }
+    branch.rule_id = rule_ref[0];
+    branch.suffix.reserve(suffix.size());
+    for (int32_t byte : suffix) {
+      branch.suffix.push_back(static_cast<char>(static_cast<uint8_t>(byte)));
+    }
+    prefixes.push_back(branch.prefix);
+    branches.push_back(std::move(branch));
+  }
+
+  std::vector<int32_t> prefix_end_states;
+  auto trie = TrieFSMBuilder::Build(prefixes, {}, &prefix_end_states, true, false);
+  XGRAMMAR_DCHECK(trie.has_value());
+
+  std::vector<int> state_mapping;
+  target_fsm_.AddFSM(trie->GetFsm(), &state_mapping);
+  target_fsm_.AddEpsilonEdge(start_state, state_mapping[trie->GetStart()]);
+
+  std::unordered_map<std::string, int32_t> suffix_start_states;
+  suffix_start_states.reserve(branches.size());
+  end_states->clear();
+  for (int index = 0; index < static_cast<int>(branches.size()); ++index) {
+    const auto& branch = branches[index];
+    auto [it, inserted] = suffix_start_states.emplace(branch.suffix, -1);
+    if (inserted) {
+      int32_t current_state = target_fsm_.AddState();
+      it->second = current_state;
+      for (uint8_t byte : branch.suffix) {
+        int32_t next_state = target_fsm_.AddState();
+        target_fsm_.AddEdge(current_state, next_state, byte, byte);
+        current_state = next_state;
+      }
+      end_states->push_back(current_state);
+    }
+    target_fsm_.AddRuleEdge(state_mapping[prefix_end_states[index]], it->second, branch.rule_id);
+  }
+  skip_equivalent_state_merge_ = true;
+  return true;
 }
 
 std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::Choices(
