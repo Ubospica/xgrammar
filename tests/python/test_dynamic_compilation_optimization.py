@@ -388,3 +388,27 @@ def test_reusable_parser_work_queue_survives_reset_fork_failure_and_rollback():
         assert matcher.accept_token(token_ids["c"])
         assert matcher.accept_token(token_ids["d"])
         assert matcher.is_terminated()
+
+
+def test_reused_mask_state_scratch_is_isolated_across_matchers():
+    vocabulary = ["a", "b", "c", "d", "ab", "bc", "abc", "cd", "x", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar('root ::= [a-c]{0,8} "d"')
+    token_ids = [vocabulary.index(token) for token in ["a", "b", "c", "d"]]
+
+    def run_trace(_):
+        matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        trace = []
+        for token_id in token_ids:
+            trace.append(_next_token_mask(matcher, tokenizer_info.vocab_size))
+            assert matcher.accept_token(token_id)
+        assert matcher.is_terminated()
+        return trace
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        traces = list(pool.map(run_trace, range(64)))
+    for trace in traces[1:]:
+        for expected, actual in zip(traces[0], trace):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
