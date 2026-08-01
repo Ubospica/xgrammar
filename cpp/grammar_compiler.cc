@@ -17,6 +17,7 @@
 #include <variant>
 #include <vector>
 
+#include "character_class_token_summary.h"
 #include "compiled_grammar_impl.h"
 #include "earley_parser.h"
 #include "fsm.h"
@@ -1088,6 +1089,61 @@ const AdaptiveTokenMask& CompiledGrammar::Impl::GetAdaptiveTokenMask(
   )
                                .GetAdaptiveTokenMask(is_root_rule);
   return adaptive_token_mask_cache.emplace(cache_state, std::move(mask)).first->second;
+}
+
+const CharacterClassRepeatTokenMask& CompiledGrammar::Impl::GetCharacterClassRepeatTokenMask(
+    int32_t character_class_expr_id, int32_t max_characters
+) {
+  std::lock_guard<std::mutex> lock(character_class_repeat_token_masks_mutex);
+  const uint64_t cache_key = (static_cast<uint64_t>(character_class_expr_id) << 32) |
+                             static_cast<uint32_t>(max_characters + 1);
+  const auto existing = character_class_repeat_token_masks.find(cache_key);
+  if (existing != character_class_repeat_token_masks.end()) {
+    return existing->second;
+  }
+
+  const auto& sorted_vocab = tokenizer_info.GetSortedDecodedVocab();
+  const auto summary_it = character_class_token_summaries.find(character_class_expr_id);
+  const auto& summaries =
+      summary_it != character_class_token_summaries.end()
+          ? summary_it->second
+          : character_class_token_summaries
+                .emplace(
+                    character_class_expr_id,
+                    BuildCharacterClassTokenSummaries(
+                        grammar->GetGrammarExpr(character_class_expr_id), sorted_vocab
+                    )
+                )
+                .first->second;
+  std::vector<int32_t> accepted_indices;
+  std::vector<int32_t> uncertain_indices;
+  DynamicBitset accepted_prefix_tokens(tokenizer_info.GetVocabSize());
+  for (const auto& summary : summaries) {
+    if (max_characters < 0) {
+      if (summary.consumed_whole_token) {
+        accepted_indices.push_back(summary.sorted_vocab_index);
+      } else if (summary.has_completed_character_prefix) {
+        uncertain_indices.push_back(summary.sorted_vocab_index);
+      }
+    } else if (!summary.consumed_whole_token ||
+               summary.locally_consumed_characters > max_characters) {
+      uncertain_indices.push_back(summary.sorted_vocab_index);
+    } else {
+      accepted_prefix_tokens.Set(sorted_vocab[summary.sorted_vocab_index].first);
+    }
+  }
+
+  return character_class_repeat_token_masks
+      .emplace(
+          cache_key,
+          CharacterClassRepeatTokenMask{
+              AdaptiveTokenMask(
+                  tokenizer_info.GetVocabSize(), sorted_vocab, accepted_indices, uncertain_indices
+              ),
+              std::move(accepted_prefix_tokens)
+          }
+      )
+      .first->second;
 }
 
 void CompiledGrammar::Impl::MaterializeAdaptiveTokenMaskCache() {

@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "character_class_token_summary.h"
 #include "earley_parser.h"
 #include "support/dynamic_bitset.h"
 #include "support/reflection.h"
@@ -103,6 +104,11 @@ XGRAMMAR_MEMBER_TABLE(
     &AdaptiveTokenMask::uncertain_indices
 );
 
+struct CharacterClassRepeatTokenMask {
+  AdaptiveTokenMask adaptive_token_mask;
+  DynamicBitset accepted_prefix_tokens;
+};
+
 /*!
  * \brief All information that we need to match tokens in the tokenizer to the specified grammar.
  * It is the result of preprocessing.
@@ -135,10 +141,20 @@ class CompiledGrammar::Impl {
   /*! \brief Whether each rule is independent of runtime parser context. */
   std::vector<uint8_t> rule_level_cacheable;
 
+  /*! \brief Character-class repeat masks shared by matchers using this grammar. */
+  std::unordered_map<int32_t, std::vector<CharacterClassTokenSummary>>
+      character_class_token_summaries;
+  std::unordered_map<uint64_t, CharacterClassRepeatTokenMask> character_class_repeat_token_masks;
+  mutable std::mutex character_class_repeat_token_masks_mutex;
+
   /*! \brief Tag-dispatch data retained for on-demand token mask generation. */
   std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
 
   const AdaptiveTokenMask& GetAdaptiveTokenMask(const ParserState& state, bool is_root_rule);
+
+  const CharacterClassRepeatTokenMask& GetCharacterClassRepeatTokenMask(
+      int32_t character_class_expr_id, int32_t max_characters
+  );
 
   void MaterializeAdaptiveTokenMaskCache();
 
