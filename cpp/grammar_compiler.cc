@@ -1299,18 +1299,76 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask() {
   }
 }
 
+class TagDispatchSlicingCache {
+ public:
+  DynamicBitset Get(
+      std::vector<std::string> patterns, const TokenizerInfo& tokenizer_info
+  );
+
+  void Clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bitsets_.clear();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unordered_map<std::vector<std::string>, DynamicBitset> bitsets_;
+};
+
+DynamicBitset TagDispatchSlicingCache::Get(
+    std::vector<std::string> patterns, const TokenizerInfo& tokenizer_info
+) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto existing = bitsets_.find(patterns);
+    if (existing != bitsets_.end()) {
+      return existing->second;
+    }
+  }
+
+  const auto& sorted_decoded_vocab = tokenizer_info.GetSortedDecodedVocab();
+  DynamicBitset computed(sorted_decoded_vocab.size());
+  for (int32_t token_index = 0;
+       token_index < static_cast<int32_t>(sorted_decoded_vocab.size());
+       ++token_index) {
+    const auto& token = sorted_decoded_vocab[token_index].second;
+    const bool definitely_accepted =
+        token.empty() ||
+        std::none_of(patterns.begin(), patterns.end(), [&](const std::string& pattern) {
+          return token.find(pattern, 1) != std::string::npos;
+        });
+    if (definitely_accepted) {
+      computed.Set(token_index);
+    }
+  }
+
+  constexpr size_t kMaxTagDispatchSlicingCacheEntries = 64;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (bitsets_.size() < kMaxTagDispatchSlicingCacheEntries) {
+    bitsets_.emplace(std::move(patterns), computed);
+  }
+  return computed;
+}
+
 const DynamicBitset* TokenMaskCache::GetTagDispatchSecondSlicingBitset(
     int32_t rule_id, const Grammar& grammar, const TokenizerInfo& tokenizer_info
 ) {
+  std::shared_ptr<TagDispatchSlicingCache> tag_dispatch_slicing_cache;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto existing = tag_dispatch_rule_id_to_second_slicing_bitset_.find(rule_id);
     if (existing != tag_dispatch_rule_id_to_second_slicing_bitset_.end()) {
       return &existing->second;
     }
+    if (tag_dispatch_slicing_cache_ == nullptr) {
+      tag_dispatch_slicing_cache_ = std::make_shared<TagDispatchSlicingCache>();
+    }
+    tag_dispatch_slicing_cache = tag_dispatch_slicing_cache_;
   }
 
-  DynamicBitset bitset = ComputeTagDispatchSecondSlicingBitset(grammar, tokenizer_info, rule_id);
+  DynamicBitset bitset = ComputeTagDispatchSecondSlicingBitset(
+      grammar, tokenizer_info, rule_id, *tag_dispatch_slicing_cache
+  );
 
   std::lock_guard<std::mutex> lock(mutex_);
   return &tag_dispatch_rule_id_to_second_slicing_bitset_.try_emplace(rule_id, std::move(bitset))
@@ -1394,7 +1452,8 @@ class GrammarCompilerSub {
       : tokenizer_info_(tokenizer_info),
         max_threads_(max_threads),
         rule_level_cache_(rule_level_cache),
-        enable_dynamic_compilation_(enable_dynamic_compilation) {}
+        enable_dynamic_compilation_(enable_dynamic_compilation),
+        tag_dispatch_slicing_cache_(std::make_shared<TagDispatchSlicingCache>()) {}
 
   CompiledGrammar CompileBuiltinJSONGrammar();
 
@@ -1416,6 +1475,8 @@ class GrammarCompilerSub {
 
   CompiledGrammar CompileGrammar(const std::string& ebnf_str, std::string root_rule_name);
 
+  void ClearTagDispatchSlicingCache() { tag_dispatch_slicing_cache_->Clear(); }
+
  private:
   /*! \brief The main logic. Compile the grammar with multi-threading. */
   CompiledGrammar MultiThreadCompileGrammar(Grammar grammar);
@@ -1430,11 +1491,16 @@ class GrammarCompilerSub {
 
   /*! \brief Whether token masks are generated on first use. */
   const bool enable_dynamic_compilation_;
+
+  /*! \brief Cache for equivalent tag-dispatch slicing bitsets. */
+  std::shared_ptr<TagDispatchSlicingCache> tag_dispatch_slicing_cache_;
 };
 
 CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_unoptimized) {
   Grammar grammar = GrammarOptimizer::Apply(grammar_unoptimized);
-  auto compiled_grammar_impl = std::make_shared<CompiledGrammar::Impl>(enable_dynamic_compilation_);
+  auto compiled_grammar_impl = std::make_shared<CompiledGrammar::Impl>(
+      enable_dynamic_compilation_, tag_dispatch_slicing_cache_
+  );
   compiled_grammar_impl->grammar = std::move(grammar);
   compiled_grammar_impl->tokenizer_info = tokenizer_info_;
   compiled_grammar_impl->earley_parser_features =
@@ -1458,7 +1524,9 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   }
 
   auto tag_dispatch_rule_id_to_second_slicing_bitset =
-      ComputeTagDispatchSecondSlicingBitsets(compiled_grammar_impl->grammar, tokenizer_info_);
+      ComputeTagDispatchSecondSlicingBitsets(
+          compiled_grammar_impl->grammar, tokenizer_info_, *tag_dispatch_slicing_cache_
+      );
 
   // Step 3. Compute the adaptive token mask cache
   // The token mask cache is computed for these positions in the grammar:
@@ -1590,49 +1658,31 @@ CompiledGrammar GrammarCompilerSub::CompileGrammar(
 }
 
 DynamicBitset ComputeTagDispatchSecondSlicingBitset(
-    const Grammar& grammar, const TokenizerInfo& tokenizer_info, int32_t rule_id
+    const Grammar& grammar,
+    const TokenizerInfo& tokenizer_info,
+    int32_t rule_id,
+    TagDispatchSlicingCache& tag_dispatch_slicing_cache
 ) {
   using GrammarExprType = Grammar::Impl::GrammarExprType;
   const auto& rule = grammar->GetRule(rule_id);
   const auto& rule_body = grammar->GetGrammarExpr(rule.body_expr_id);
   XGRAMMAR_DCHECK(rule_body.type == GrammarExprType::kTagDispatch);
   Grammar::Impl::TagDispatch tag_dispatch = grammar->GetTagDispatch(rule.body_expr_id);
-  const auto& sorted_decoded_vocab = tokenizer_info.GetSortedDecodedVocab();
-  DynamicBitset definite_accepted_tokens_since_second_char(sorted_decoded_vocab.size());
-  for (int token_index = 0; token_index < static_cast<int32_t>(sorted_decoded_vocab.size());
-       ++token_index) {
-    bool definite_accept_since_second_char = true;
-    const auto& token = sorted_decoded_vocab[token_index].second;
-    if (token.empty()) {
-      definite_accepted_tokens_since_second_char.Set(token_index);
-      continue;
-    }
-
-    // Check if the token contains any string trigger or exclude string after first char.
-    for (const auto& tag_rule_pair : tag_dispatch.tag_rule_pairs) {
-      if (token.find(tag_rule_pair.first, 1) != std::string::npos) {
-        definite_accept_since_second_char = false;
-        break;
-      }
-    }
-    if (definite_accept_since_second_char) {
-      for (const auto& exclude : tag_dispatch.excludes) {
-        if (token.find(exclude, 1) != std::string::npos) {
-          definite_accept_since_second_char = false;
-          break;
-        }
-      }
-    }
-
-    if (definite_accept_since_second_char) {
-      definite_accepted_tokens_since_second_char.Set(token_index);
-    }
+  std::vector<std::string> patterns;
+  patterns.reserve(tag_dispatch.tag_rule_pairs.size() + tag_dispatch.excludes.size());
+  for (const auto& tag_rule_pair : tag_dispatch.tag_rule_pairs) {
+    patterns.push_back(tag_rule_pair.first);
   }
-  return definite_accepted_tokens_since_second_char;
+  patterns.insert(patterns.end(), tag_dispatch.excludes.begin(), tag_dispatch.excludes.end());
+  std::sort(patterns.begin(), patterns.end());
+  patterns.erase(std::unique(patterns.begin(), patterns.end()), patterns.end());
+  return tag_dispatch_slicing_cache.Get(std::move(patterns), tokenizer_info);
 }
 
 std::unordered_map<int32_t, DynamicBitset> ComputeTagDispatchSecondSlicingBitsets(
-    const Grammar& grammar, const TokenizerInfo& tokenizer_info
+    const Grammar& grammar,
+    const TokenizerInfo& tokenizer_info,
+    TagDispatchSlicingCache& tag_dispatch_slicing_cache
 ) {
   using GrammarExprType = Grammar::Impl::GrammarExprType;
   std::unordered_map<int32_t, DynamicBitset> result;
@@ -1640,7 +1690,10 @@ std::unordered_map<int32_t, DynamicBitset> ComputeTagDispatchSecondSlicingBitset
     const auto& rule = grammar->GetRule(rule_id);
     if (grammar->GetGrammarExpr(rule.body_expr_id).type == GrammarExprType::kTagDispatch) {
       result.emplace(
-          rule_id, ComputeTagDispatchSecondSlicingBitset(grammar, tokenizer_info, rule_id)
+          rule_id,
+          ComputeTagDispatchSecondSlicingBitset(
+              grammar, tokenizer_info, rule_id, tag_dispatch_slicing_cache
+          )
       );
     }
   }
@@ -1921,6 +1974,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
 
 void GrammarCompiler::Impl::ClearCache() {
   grammar_level_cache_.Clear();
+  no_cache_compiler_.ClearTagDispatchSlicingCache();
   if (rule_level_cache_.has_value()) {
     rule_level_cache_->ClearCache();
   }
