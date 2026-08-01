@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -1039,6 +1040,11 @@ class GrammarCompilerSub {
 
   CompiledGrammar CompileGrammar(const std::string& ebnf_str, std::string root_rule_name);
 
+  void ClearTagDispatchSlicingCache() {
+    std::lock_guard<std::mutex> lock(tag_dispatch_slicing_cache_mutex_);
+    tag_dispatch_slicing_cache_.clear();
+  }
+
  private:
   /*! \brief The main logic. Compile the grammar with multi-threading. */
   CompiledGrammar MultiThreadCompileGrammar(Grammar grammar);
@@ -1052,6 +1058,10 @@ class GrammarCompilerSub {
       std::unordered_map<int32_t, DynamicBitset>* tag_dispatch_rule_id_to_second_slicing_bitset
   );
 
+  std::shared_ptr<const DynamicBitset> GetTagDispatchSecondSlicingBitset(
+      std::vector<std::string> patterns
+  );
+
   /*! \brief The vocabulary associated with this storage class. */
   const TokenizerInfo tokenizer_info_;
   /*! \brief The maximum number of threads to use. */
@@ -1059,6 +1069,22 @@ class GrammarCompilerSub {
 
   /*! \brief The manager of the rule level cache.*/
   std::optional<RuleLevelCache> rule_level_cache_;
+
+  struct StringVectorHash {
+    size_t operator()(const std::vector<std::string>& strings) const {
+      uint64_t result = 0;
+      for (const auto& string : strings) {
+        HashCombineBinary(result, std::hash<std::string>{}(string));
+      }
+      return result;
+    }
+  };
+  std::mutex tag_dispatch_slicing_cache_mutex_;
+  std::unordered_map<
+      std::vector<std::string>,
+      std::shared_ptr<const DynamicBitset>,
+      StringVectorHash>
+      tag_dispatch_slicing_cache_;
 };
 
 CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_unoptimized) {
@@ -1209,39 +1235,56 @@ void GrammarCompilerSub::TagDispatchOptimization(
     XGRAMMAR_DCHECK(rule_body.type == GrammarExprType::kTagDispatch);
     Grammar::Impl::TagDispatch tag_dispatch =
         compiled_grammar_impl->GetGrammar()->GetTagDispatch(rule.body_expr_id);
-    const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
-    DynamicBitset definite_accepted_tokens_since_second_char(sorted_decoded_vocab.size());
-    for (int j = 0; j < static_cast<int32_t>(sorted_decoded_vocab.size()); j++) {
-      bool definite_accept_since_second_char = true;
-      const auto& token = sorted_decoded_vocab[j].second;
-      if (token.empty()) {
-        definite_accepted_tokens_since_second_char.Set(j);
-        continue;
-      }
-
-      // Check if the token contains any string trigger or exclude string after first char.
-      for (const auto& [trigger, rule_id] : tag_dispatch.tag_rule_pairs) {
-        if (token.find(trigger, 1) != std::string::npos) {
-          definite_accept_since_second_char = false;
-          break;
-        }
-      }
-      if (definite_accept_since_second_char) {
-        for (const auto& excl : tag_dispatch.excludes) {
-          if (token.find(excl, 1) != std::string::npos) {
-            definite_accept_since_second_char = false;
-            break;
-          }
-        }
-      }
-
-      if (definite_accept_since_second_char) {
-        definite_accepted_tokens_since_second_char.Set(j);
-      }
+    std::vector<std::string> patterns;
+    patterns.reserve(tag_dispatch.tag_rule_pairs.size() + tag_dispatch.excludes.size());
+    for (const auto& [trigger, rule_id] : tag_dispatch.tag_rule_pairs) {
+      patterns.push_back(trigger);
     }
+    patterns.insert(patterns.end(), tag_dispatch.excludes.begin(), tag_dispatch.excludes.end());
+    std::sort(patterns.begin(), patterns.end());
+    patterns.erase(std::unique(patterns.begin(), patterns.end()), patterns.end());
     (*tag_dispatch_rule_id_to_second_slicing_bitset)[i] =
-        definite_accepted_tokens_since_second_char;
+        *GetTagDispatchSecondSlicingBitset(std::move(patterns));
   }
+}
+
+std::shared_ptr<const DynamicBitset> GrammarCompilerSub::GetTagDispatchSecondSlicingBitset(
+    std::vector<std::string> patterns
+) {
+  {
+    std::lock_guard<std::mutex> lock(tag_dispatch_slicing_cache_mutex_);
+    auto it = tag_dispatch_slicing_cache_.find(patterns);
+    if (it != tag_dispatch_slicing_cache_.end()) {
+      return it->second;
+    }
+  }
+
+  const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
+  auto computed = std::make_shared<DynamicBitset>(sorted_decoded_vocab.size());
+  for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
+    const auto& token = sorted_decoded_vocab[index].second;
+    bool definitely_accepted = token.empty();
+    if (!definitely_accepted) {
+      definitely_accepted =
+          std::none_of(patterns.begin(), patterns.end(), [&](const std::string& pattern) {
+            return token.find(pattern, 1) != std::string::npos;
+          });
+    }
+    if (definitely_accepted) {
+      computed->Set(index);
+    }
+  }
+
+  constexpr size_t kMaxTagDispatchSlicingCacheEntries = 64;
+  std::lock_guard<std::mutex> lock(tag_dispatch_slicing_cache_mutex_);
+  auto it = tag_dispatch_slicing_cache_.find(patterns);
+  if (it != tag_dispatch_slicing_cache_.end()) {
+    return it->second;
+  }
+  if (tag_dispatch_slicing_cache_.size() < kMaxTagDispatchSlicingCacheEntries) {
+    tag_dispatch_slicing_cache_.emplace(std::move(patterns), computed);
+  }
+  return computed;
 }
 
 /******************* GrammarCompiler::Impl *******************/
@@ -1515,6 +1558,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
 
 void GrammarCompiler::Impl::ClearCache() {
   grammar_level_cache_.Clear();
+  no_cache_compiler_.ClearTagDispatchSlicingCache();
   if (rule_level_cache_.has_value()) {
     rule_level_cache_->ClearCache();
   }
