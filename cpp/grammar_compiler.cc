@@ -46,7 +46,7 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
       const std::unordered_map<int32_t, DynamicBitset>&
           tag_dispatch_rule_id_to_second_slicing_bitset,
       const TokenizerInfo& tokenizer_info,
-      std::optional<RuleLevelCache>& rule_level_cache
+      const std::optional<RuleLevelCache>& rule_level_cache
   )
       : EarleyParser(grammar, grammar_metadata, init_state),
         init_rule_id_(init_state.rule_id),
@@ -1004,6 +1004,46 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   }
 }
 
+AdaptiveTokenMask GenerateAdaptiveTokenMask(
+    const Grammar& grammar,
+    const EarleyParserGrammarMetadata& grammar_metadata,
+    const TokenizerInfo& tokenizer_info,
+    const ParserState& state,
+    bool is_root_rule,
+    const std::unordered_map<int32_t, DynamicBitset>& tag_dispatch_rule_id_to_second_slicing_bitset,
+    const std::optional<RuleLevelCache>& rule_level_cache
+) {
+  return GrammarMatcherForTokenMaskCache(
+             grammar,
+             grammar_metadata,
+             state,
+             tag_dispatch_rule_id_to_second_slicing_bitset,
+             tokenizer_info,
+             rule_level_cache
+  )
+      .GetAdaptiveTokenMask(is_root_rule);
+}
+
+template <typename Callback>
+void ForEachAdaptiveTokenMaskState(const Grammar& grammar, Callback&& callback) {
+  const int32_t root_rule_id = grammar->GetRootRuleId();
+  for (int32_t rule_id = 0; rule_id < static_cast<int32_t>(grammar->NumRules()); ++rule_id) {
+    const auto rule = grammar->GetRule(rule_id);
+    const auto& rule_fsm = grammar->per_rule_fsms[rule_id];
+    XGRAMMAR_DCHECK(rule_fsm.has_value());
+    auto state = ParserState(rule_id, rule.body_expr_id, 0, ParserState::kNoPrevInputPos, 0);
+    std::unordered_set<int> reachable_states;
+    rule_fsm->GetFsm().GetReachableStates(&reachable_states);
+    for (int32_t element_id : reachable_states) {
+      if (!rule_fsm->GetFsm().IsScanableState(element_id)) {
+        continue;
+      }
+      state.element_id = element_id;
+      callback(state, rule_id == root_rule_id);
+    }
+  }
+}
+
 /******************* GrammarCompilerNoCache *******************/
 
 /*!
@@ -1095,20 +1135,20 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   }
 
   auto add_adaptive_token_mask = [&](const ParserState& state, bool is_root_rule) {
-    auto grammar_matcher = GrammarMatcherForTokenMaskCache(
+    auto adaptive_token_mask = GenerateAdaptiveTokenMask(
         compiled_grammar_impl->grammar,
         compiled_grammar_impl->earley_parser_metadata,
-        state,
-        tag_dispatch_rule_id_to_second_slicing_bitset,
         tokenizer_info_,
+        state,
+        is_root_rule,
+        tag_dispatch_rule_id_to_second_slicing_bitset,
         rule_level_cache_
     );
-    auto cur_adaptive_token_mask_cache = grammar_matcher.GetAdaptiveTokenMask(is_root_rule);
     if (max_threads_ > 1) {
       std::lock_guard<std::mutex> lock(adaptive_token_mask_cache_mutex.value());
-      compiled_grammar_impl->adaptive_token_mask_cache[state] = cur_adaptive_token_mask_cache;
+      compiled_grammar_impl->adaptive_token_mask_cache[state] = std::move(adaptive_token_mask);
     } else {
-      compiled_grammar_impl->adaptive_token_mask_cache[state] = cur_adaptive_token_mask_cache;
+      compiled_grammar_impl->adaptive_token_mask_cache[state] = std::move(adaptive_token_mask);
     }
   };
 
@@ -1123,25 +1163,7 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
     }
   };
 
-  auto root_rule_id = compiled_grammar_impl->grammar->GetRootRuleId();
-
-  for (int32_t rule_id = 0; rule_id < static_cast<int>(compiled_grammar_impl->grammar->NumRules());
-       ++rule_id) {
-    auto rule = compiled_grammar_impl->grammar->GetRule(rule_id);
-    const auto& rule_fsm = compiled_grammar_impl->grammar->per_rule_fsms[rule_id];
-    XGRAMMAR_DCHECK(rule_fsm.has_value());
-    auto cur_stack_element =
-        ParserState(rule_id, rule.body_expr_id, 0, ParserState::kNoPrevInputPos, 0);
-    std::unordered_set<int> reachable_states;
-    rule_fsm->GetFsm().GetReachableStates(&reachable_states);
-    for (int i : reachable_states) {
-      cur_stack_element.element_id = i;
-      if (!rule_fsm->GetFsm().IsScanableState(i)) {
-        continue;
-      }
-      add_task_adaptive_token_mask(cur_stack_element, rule_id == root_rule_id);
-    }
-  }
+  ForEachAdaptiveTokenMaskState(compiled_grammar_impl->grammar, add_task_adaptive_token_mask);
 
   if (max_threads_ > 1) {
     thread_pool->Join();
