@@ -285,6 +285,12 @@ struct EarleyParserGrammarMetadata {
   /*! \brief Dense byte transitions selected by deterministic_byte_transition_ids. */
   std::vector<std::array<int32_t, 256>> deterministic_byte_transitions;
 
+  /*! \brief Grammar-wide parser features reused by every parser instance. */
+  bool has_budget_rules = false;
+  bool has_char_budget_rules = false;
+  bool capture_tracking = false;
+  bool has_hidden_capture_rules = false;
+
   EarleyParserGrammarMetadata() = default;
   explicit EarleyParserGrammarMetadata(const Grammar& grammar);
 

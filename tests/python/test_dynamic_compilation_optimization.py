@@ -190,3 +190,42 @@ def test_first_byte_vocab_buckets_are_safe_for_concurrent_compilation():
     )
     for (grammar, value), dynamic in zip(cases * 8, dynamic_grammars):
         _assert_mask_traces_equal(eager_compiler.compile_grammar(grammar), dynamic, value)
+
+
+def test_shared_parser_feature_metadata_preserves_matcher_behavior():
+    tokenizer_info = xgr.TokenizerInfo(["ab ", "cd", " ", "</t>", "1", "<t>", "x"])
+    token_budget_grammar = xgr.Grammar.from_lark(
+        'start: r "<t>"\nr[max_tokens=3, capture]: TEXT\nTEXT: /(\\n|.)*/',
+        tokenizer_info=tokenizer_info,
+    )
+    token_budget_compiled = xgr.GrammarCompiler(tokenizer_info).compile_grammar(
+        token_budget_grammar
+    )
+    for _ in range(4):
+        matcher = xgr.GrammarMatcher(token_budget_compiled, terminate_without_stop_token=True)
+        assert all(matcher.accept_token(token_id) for token_id in [0, 1, 2])
+        bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        assert matcher.fill_next_token_bitmask(bitmask)
+        assert bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size).nonzero().tolist() == [
+            [0, 5]
+        ]
+        assert matcher.accept_token(5)
+        assert matcher.is_terminated()
+        assert matcher.get_captures() == [("r", b"ab cd ")]
+
+    character_budget_grammar = xgr.Grammar.from_lark(
+        'start[capture="outer"]: r "z"\nr[max_chars=2, capture="inner", suffix="!"]: /[a-z]*/'
+    )
+    character_budget_compiled = xgr.GrammarCompiler(xgr.TokenizerInfo([])).compile_grammar(
+        character_budget_grammar
+    )
+    for _ in range(4):
+        for value, expected_captures in [
+            ("a!z", [("inner", b"a"), ("outer", b"a!z")]),
+            ("abz", [("inner", b"ab"), ("outer", b"abz")]),
+        ]:
+            matcher = xgr.GrammarMatcher(
+                character_budget_compiled, terminate_without_stop_token=True
+            )
+            assert matcher.accept_string(value) and matcher.is_terminated()
+            assert matcher.get_captures() == expected_captures
