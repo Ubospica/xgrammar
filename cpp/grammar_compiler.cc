@@ -36,6 +36,52 @@ namespace xgrammar {
 
 /************** AdaptiveTokenMaskCache Generator **************/
 
+std::vector<uint8_t> GetRuleLevelCacheableRules(const Grammar& grammar) {
+  const int32_t num_rules = grammar->NumRules();
+  std::vector<uint8_t> context_dependent(num_rules, 0);
+  std::vector<std::vector<int32_t>> referenced_rules(num_rules);
+  for (int32_t rule_id = 0; rule_id < num_rules; ++rule_id) {
+    const auto& rule = grammar->GetRule(rule_id);
+    context_dependent[rule_id] = rule.max_tokens >= 0 || rule.max_chars >= 0 || rule.is_lazy ||
+                                 rule.temperature.has_value() ||
+                                 grammar->GetSuffixStopInfo(rule_id) != nullptr;
+    const auto& fsm = grammar->per_rule_fsms[rule_id]->GetFsm();
+    std::unordered_set<int32_t> reachable_states;
+    fsm.GetReachableStates(&reachable_states);
+    for (int32_t state_id : reachable_states) {
+      for (const auto& edge : fsm.GetFsm().GetEdges(state_id)) {
+        if (edge.IsRuleRef()) {
+          referenced_rules[rule_id].push_back(edge.GetRefRuleId());
+        } else if (edge.IsRepeatRef()) {
+          referenced_rules[rule_id].push_back(
+              grammar->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex()).RuleId()
+          );
+        }
+      }
+    }
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (int32_t rule_id = 0; rule_id < num_rules; ++rule_id) {
+      if (!context_dependent[rule_id]) {
+        continue;
+      }
+      for (int32_t referenced_rule_id : referenced_rules[rule_id]) {
+        if (!context_dependent[referenced_rule_id]) {
+          context_dependent[referenced_rule_id] = 1;
+          changed = true;
+        }
+      }
+    }
+  }
+  for (uint8_t& value : context_dependent) {
+    value = !value;
+  }
+  return context_dependent;
+}
+
 /*! \brief The concrete implementation of GrammarMatcherNode. */
 class GrammarMatcherForTokenMaskCache : public EarleyParser {
  public:
@@ -1027,13 +1073,18 @@ const AdaptiveTokenMask& CompiledGrammar::Impl::GetAdaptiveTokenMask(
       -1,
       state.sub_element_id
   );
-  std::optional<RuleLevelCache> no_rule_level_cache;
+  std::optional<RuleLevelCache> retained_rule_level_cache;
+  if (rule_level_cache != nullptr && state.rule_id >= 0 &&
+      state.rule_id < static_cast<int32_t>(rule_level_cacheable.size()) &&
+      rule_level_cacheable[state.rule_id]) {
+    retained_rule_level_cache = *rule_level_cache;
+  }
   AdaptiveTokenMask mask = GrammarMatcherForTokenMaskCache(
                                grammar,
                                cache_state,
                                tag_dispatch_rule_id_to_second_slicing_bitset,
                                tokenizer_info,
-                               no_rule_level_cache
+                               retained_rule_level_cache
   )
                                .GetAdaptiveTokenMask(is_root_rule);
   return adaptive_token_mask_cache.emplace(cache_state, std::move(mask)).first->second;
@@ -1136,16 +1187,22 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
   TagDispatchOptimization(compiled_grammar_impl, &tag_dispatch_rule_id_to_second_slicing_bitset);
 
+  // Rule hashes are needed by both eager and on-demand cross-grammar mask reuse.
+  if (rule_level_cache_.has_value()) {
+    GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar);
+  }
   if (enable_dynamic_compilation_) {
+    if (rule_level_cache_.has_value()) {
+      compiled_grammar_impl->rule_level_cache =
+          std::make_shared<RuleLevelCache>(rule_level_cache_.value());
+      compiled_grammar_impl->rule_level_cacheable =
+          GetRuleLevelCacheableRules(compiled_grammar_impl->grammar);
+    }
     compiled_grammar_impl->tag_dispatch_rule_id_to_second_slicing_bitset =
         std::move(tag_dispatch_rule_id_to_second_slicing_bitset);
     return CompiledGrammar(compiled_grammar_impl);
   }
 
-  // If the compiler is cache-enabled, then we hash the grammars for crossing-grammar caching.
-  if (rule_level_cache_.has_value()) {
-    GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar);
-  }
   // Step 3. Compute the adaptive token mask cache
   // The token mask cache is computed for these positions in the grammar:
   // 1. All character class or character class star (with last_utf8_bytes=0, 1, 2, 3)
