@@ -43,6 +43,29 @@ def _assert_dynamic_masks_equal_eager(grammar: str, vocabulary, input_string: st
     _assert_mask_traces_equal(eager, dynamic, input_string)
 
 
+def _assert_mask_matches_token_acceptance(
+    compiled_grammar: xgr.CompiledGrammar, prefix: str, skip_token_ids=()
+) -> None:
+    matcher = xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True)
+    assert matcher.accept_string(prefix)
+    bitmask = xgr.allocate_token_bitmask(1, compiled_grammar.tokenizer_info.vocab_size)
+    xgr.reset_token_bitmask(bitmask)
+    need_apply = matcher.fill_next_token_bitmask(bitmask)
+    if need_apply:
+        allowed_tokens = bitmask_to_bool_mask(bitmask, compiled_grammar.tokenizer_info.vocab_size)[
+            0
+        ]
+
+    for token_id in range(compiled_grammar.tokenizer_info.vocab_size):
+        if token_id in skip_token_ids:
+            continue
+        oracle = xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True)
+        assert oracle.accept_string(prefix)
+        expected = oracle.accept_token(token_id)
+        actual = bool(allowed_tokens[token_id]) if need_apply else True
+        assert actual == expected, (prefix, token_id)
+
+
 @pytest.mark.parametrize(
     "repeat_range,value",
     [
@@ -257,3 +280,53 @@ def test_single_character_class_masks_are_reused_safely():
             dynamic_compiler.compile_grammar(grammar),
             value,
         )
+
+
+ASCII_JSON_VOCABULARY = [
+    "",
+    '"',
+    "\\",
+    "safe",
+    "safe ASCII",
+    "AZ09 !#[]{}",
+    'quote"',
+    "slash\\",
+    "\n",
+    b"\x00",
+    b"\x1f",
+    b"\x7f",
+    "é",
+    b"\xc3",
+    b"\xff",
+]
+
+
+@pytest.mark.parametrize(
+    "schema,value,prefixes",
+    [
+        ({"type": "string", "minLength": 1}, '"safe ASCII"', ['"', '"safe']),
+        ({"type": "string", "minLength": 2, "maxLength": 4}, '"safe"', ['"', '"sa', '"safe']),
+        ({"type": "string", "pattern": "^[A-Z0-9 ]+$"}, '"AZ09"', ['"', '"AZ']),
+        ({"enum": ["safe ASCII", 'quote"', "slash\\", "é"]}, '"safe ASCII"', ['"', '"safe']),
+    ],
+)
+def test_json_safe_ascii_token_classification_preserves_masks(schema, value, prefixes):
+    tokenizer_info = xgr.TokenizerInfo(ASCII_JSON_VOCABULARY, stop_token_ids=[])
+    eager_compiler = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    )
+    dynamic_compiler = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    )
+
+    for clear_cache in [False, True]:
+        if clear_cache:
+            eager_compiler.clear_cache()
+            dynamic_compiler.clear_cache()
+        eager = eager_compiler.compile_json_schema(schema)
+        dynamic = dynamic_compiler.compile_json_schema(schema)
+        _assert_mask_traces_equal(eager, dynamic, value)
+        for prefix in prefixes:
+            # Token 0 is empty and treated as a special token. The full eager/dynamic mask
+            # comparison above covers it without asking accept_token to emit a warning.
+            _assert_mask_matches_token_acceptance(dynamic, prefix, skip_token_ids=(0,))
