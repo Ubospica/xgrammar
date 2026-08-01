@@ -466,7 +466,7 @@ class GrammarMatcher::Impl : public EarleyParser {
       int max_rollback_tokens = -1,
       std::optional<float> default_temperature = std::nullopt
   )
-      : EarleyParser(compiled_grammar->grammar),
+      : EarleyParser(compiled_grammar->grammar, compiled_grammar->earley_parser_metadata),
         compiled_grammar_(compiled_grammar),
         tokenizer_info_(compiled_grammar->tokenizer_info),
         stop_token_ids_(override_stop_tokens.value_or(tokenizer_info_.GetStopTokenIds())),

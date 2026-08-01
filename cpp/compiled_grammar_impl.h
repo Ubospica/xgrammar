@@ -112,6 +112,9 @@ class CompiledGrammar::Impl {
   /*! \brief The tokenizer information. */
   TokenizerInfo tokenizer_info{NullObj{}};
 
+  /*! \brief Immutable Earley parser metadata shared by token mask generators and matchers. */
+  EarleyParserGrammarMetadata earley_parser_metadata;
+
   /*! \brief Default constructor. */
   Impl() = default;
 

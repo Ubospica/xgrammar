@@ -460,6 +460,37 @@ def _mask_trace(compiled_grammar: xgr.CompiledGrammar, input_str: str):
     return trace
 
 
+def test_compiled_grammar_metadata_shared_by_multiple_matchers():
+    tokenizer_info = xgr.TokenizerInfo(["a", "b", "z", "ab", "bz", "abz"])
+    compiled_grammar = xgr.GrammarCompiler(tokenizer_info).compile_grammar(
+        """
+root ::= optional "z"
+optional ::= "ab" | ""
+"""
+    )
+    matchers = [
+        xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True) for _ in range(8)
+    ]
+    bitmasks = [
+        xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size) for _ in range(len(matchers))
+    ]
+
+    for char in "abz":
+        reference = None
+        for matcher, bitmask in zip(matchers, bitmasks):
+            xgr.reset_token_bitmask(bitmask)
+            need_apply = matcher.fill_next_token_bitmask(bitmask)
+            current = (need_apply, bitmask.clone())
+            if reference is None:
+                reference = current
+            else:
+                assert current[0] == reference[0]
+                torch.testing.assert_close(current[1], reference[1], rtol=0, atol=0)
+            assert matcher.accept_string(char)
+
+    assert all(matcher.is_terminated() for matcher in matchers)
+
+
 @pytest.mark.parametrize(
     "grammar_str,accepted_inputs,rejected_inputs",
     HASHER_GRAPH_CASES,
