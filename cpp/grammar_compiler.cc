@@ -6,6 +6,7 @@
 #include <xgrammar/compiler.h>
 
 #include <algorithm>
+#include <array>
 #include <bitset>
 #include <cctype>
 #include <cstddef>
@@ -23,6 +24,7 @@
 #include "grammar_functor.h"
 #include "grammar_impl.h"
 #include "support/dynamic_bitset.h"
+#include "support/encoding.h"
 #include "support/int_set.h"
 #include "support/logging.h"
 #include "support/thread_pool.h"
@@ -35,6 +37,181 @@
 namespace xgrammar {
 
 /************** AdaptiveTokenMaskCache Generator **************/
+
+std::vector<CharacterClassTokenSummary> BuildCharacterClassTokenSummaries(
+    const Grammar::Impl::GrammarExpr& character_class,
+    const std::vector<std::pair<int32_t, std::string>>& sorted_vocabulary
+) {
+  XGRAMMAR_DCHECK(character_class.type == Grammar::Impl::GrammarExprType::kCharacterClass);
+  const bool is_negative = static_cast<bool>(character_class[0]);
+  const auto codepoint_is_in_ranges = [&](TCodepoint codepoint) {
+    for (int32_t range_index = 1; range_index < character_class.size(); range_index += 2) {
+      if (codepoint >= character_class[range_index] &&
+          codepoint <= character_class[range_index + 1]) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const auto partial_codepoint_can_match =
+      [&](TCodepoint partial_codepoint, int32_t remaining_bytes, int32_t total_bytes) {
+        if (is_negative) {
+          return true;
+        }
+        static constexpr std::array<TCodepoint, 5> kMinCodepointByUtf8Length = {
+            0, 0, 0x80, 0x800, 0x10000
+        };
+        const TCodepoint raw_min_codepoint = partial_codepoint << (6 * remaining_bytes);
+        const TCodepoint min_codepoint =
+            std::max(raw_min_codepoint, kMinCodepointByUtf8Length[total_bytes]);
+        const TCodepoint max_codepoint = std::min<TCodepoint>(
+            raw_min_codepoint | ((TCodepoint{1} << (6 * remaining_bytes)) - 1), 0x10FFFF
+        );
+        if (min_codepoint > max_codepoint) {
+          return false;
+        }
+        for (int32_t range_index = 1; range_index < character_class.size(); range_index += 2) {
+          if (max_codepoint >= character_class[range_index] &&
+              min_codepoint <= character_class[range_index + 1]) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+  std::vector<CharacterClassTokenSummary> result;
+  result.reserve(sorted_vocabulary.size());
+  for (int32_t sorted_vocab_index = 0;
+       sorted_vocab_index < static_cast<int32_t>(sorted_vocabulary.size());
+       ++sorted_vocab_index) {
+    const auto& token = sorted_vocabulary[sorted_vocab_index].second;
+    int32_t byte_offset = 0;
+    int32_t completed_characters = 0;
+    bool incomplete_character = false;
+    bool mismatch = false;
+    while (byte_offset < static_cast<int32_t>(token.size())) {
+      const uint8_t first_byte = static_cast<uint8_t>(token[byte_offset]);
+      auto [valid_first_byte, total_bytes, partial_codepoint] = HandleUTF8FirstByte(first_byte);
+      if (!valid_first_byte) {
+        mismatch = true;
+        break;
+      }
+      if (total_bytes == 1) {
+        const bool in_ranges = codepoint_is_in_ranges(partial_codepoint);
+        if (in_ranges == is_negative) {
+          mismatch = true;
+          break;
+        }
+        ++completed_characters;
+        ++byte_offset;
+        continue;
+      }
+
+      int32_t consumed_bytes = 1;
+      bool valid_continuations = true;
+      while (consumed_bytes < total_bytes &&
+             byte_offset + consumed_bytes < static_cast<int32_t>(token.size())) {
+        const uint8_t continuation = static_cast<uint8_t>(token[byte_offset + consumed_bytes]);
+        if ((continuation & 0xC0) != 0x80) {
+          valid_continuations = false;
+          break;
+        }
+        partial_codepoint = (partial_codepoint << 6) | (continuation & 0x3F);
+        ++consumed_bytes;
+      }
+      if (!valid_continuations) {
+        mismatch = true;
+        break;
+      }
+      if (consumed_bytes < total_bytes) {
+        incomplete_character = partial_codepoint_can_match(
+            partial_codepoint, total_bytes - consumed_bytes, total_bytes
+        );
+        mismatch = !incomplete_character;
+        byte_offset = token.size();
+        break;
+      }
+      static constexpr std::array<TCodepoint, 5> kMinCodepointByUtf8Length = {
+          0, 0, 0x80, 0x800, 0x10000
+      };
+      if (!is_negative && (partial_codepoint < kMinCodepointByUtf8Length[total_bytes] ||
+                           partial_codepoint > 0x10FFFF)) {
+        mismatch = true;
+        break;
+      }
+      const bool in_ranges = codepoint_is_in_ranges(partial_codepoint);
+      if (in_ranges == is_negative) {
+        mismatch = true;
+        break;
+      }
+      ++completed_characters;
+      byte_offset += total_bytes;
+    }
+
+    const bool consumed_whole_token =
+        byte_offset == static_cast<int32_t>(token.size()) && !mismatch;
+    if (consumed_whole_token || completed_characters > 0) {
+      result.push_back(CharacterClassTokenSummary{
+          sorted_vocab_index,
+          completed_characters + static_cast<int32_t>(incomplete_character),
+          consumed_whole_token,
+          completed_characters > 0
+      });
+    }
+  }
+  return result;
+}
+
+const AdaptiveTokenMask& CompiledGrammar::Impl::GetRepeatedCharacterClassTokenMask(
+    int32_t character_class_expr_id, int32_t max_characters
+) {
+  const auto& character_class = grammar->GetGrammarExpr(character_class_expr_id);
+  XGRAMMAR_DCHECK(character_class.type == Grammar::Impl::GrammarExprType::kCharacterClass);
+  std::vector<int32_t> character_class_key(character_class.begin(), character_class.end());
+  if (max_characters >= 0) {
+    max_characters = std::min(max_characters, tokenizer_info.ImplPtr()->GetMaxTokenChars());
+  }
+  const RepeatedCharacterClassTokenMaskKey mask_key{character_class_key, max_characters};
+
+  std::lock_guard<std::mutex> lock(repeated_character_class_token_masks_mutex);
+  const auto existing = repeated_character_class_token_masks.find(mask_key);
+  if (existing != repeated_character_class_token_masks.end()) {
+    return existing->second;
+  }
+
+  const auto [summary_iterator, inserted] = character_class_token_summaries.try_emplace(
+      character_class_key, std::vector<CharacterClassTokenSummary>{}
+  );
+  if (inserted) {
+    summary_iterator->second =
+        BuildCharacterClassTokenSummaries(character_class, tokenizer_info.GetSortedDecodedVocab());
+  }
+
+  std::vector<int32_t> accepted_indices;
+  std::vector<int32_t> uncertain_indices;
+  accepted_indices.reserve(summary_iterator->second.size());
+  uncertain_indices.reserve(summary_iterator->second.size() / 8);
+  for (const auto& summary : summary_iterator->second) {
+    if (summary.consumed_whole_token &&
+        (max_characters == -1 || summary.consumed_characters <= max_characters)) {
+      accepted_indices.push_back(summary.sorted_vocab_index);
+    } else if (summary.consumed_whole_token || summary.has_completed_character_prefix) {
+      uncertain_indices.push_back(summary.sorted_vocab_index);
+    }
+  }
+
+  return repeated_character_class_token_masks
+      .emplace(
+          mask_key,
+          AdaptiveTokenMask(
+              tokenizer_info.GetVocabSize(),
+              tokenizer_info.GetSortedDecodedVocab(),
+              accepted_indices,
+              uncertain_indices
+          )
+      )
+      .first->second;
+}
 
 /*! \brief The concrete implementation of GrammarMatcherNode. */
 class GrammarMatcherForTokenMaskCache : public EarleyParser {
