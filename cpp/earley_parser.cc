@@ -454,14 +454,63 @@ void EarleyParser::RemoveCommittedLazyStates() {
   );
 }
 
-EarleyParser::EarleyParser(const Grammar& grammar, std::optional<ParserState> initial_state)
-    : grammar_(grammar),
-      fsm_state_flags_cache_(grammar->NumRules()),
-      rule_is_nullable_(grammar->NumRules(), 0) {
+EarleyParserGrammarMetadata::EarleyParserGrammarMetadata(const Grammar& grammar)
+    : fsm_state_flags(
+          grammar->complete_fsm.NumStates(), EarleyParserGrammarMetadata::kFsmStateInitialized
+      ),
+      rule_is_nullable(grammar->NumRules(), 0) {
+  XGRAMMAR_CHECK(grammar->optimized)
+      << "Cannot build Earley parser metadata for an unoptimized grammar";
+
+  for (int32_t rule_id : grammar->allow_empty_rule_ids) {
+    rule_is_nullable[rule_id] = true;
+  }
+
+  const auto& complete_fsm_edges = grammar->complete_fsm.GetEdges();
+  for (int32_t state_id = 0; state_id < grammar->complete_fsm.NumStates(); ++state_id) {
+    uint8_t& flags = fsm_state_flags[state_id];
+    const auto edges = complete_fsm_edges[state_id];
+    if (edges.size() != 0) {
+      flags |= EarleyParserGrammarMetadata::kFsmStateHasEdges;
+    }
+    for (const auto& edge : edges) {
+      if (edge.IsCharRange() || edge.IsToken() || edge.IsExcludeToken()) {
+        flags |= EarleyParserGrammarMetadata::kFsmStateScanable;
+      } else if (edge.IsRuleRef() || edge.IsEpsilon() || edge.IsRepeatRef()) {
+        flags |= EarleyParserGrammarMetadata::kFsmStateNonTerminal;
+      }
+    }
+  }
+
+  for (const auto& optional_rule_fsm : grammar->per_rule_fsms) {
+    XGRAMMAR_DCHECK(optional_rule_fsm.has_value());
+    std::unordered_set<int> reachable_states;
+    optional_rule_fsm->GetFsm().GetReachableStates(&reachable_states);
+    for (int32_t state_id : reachable_states) {
+      if (optional_rule_fsm->GetFsm().IsEndState(state_id)) {
+        fsm_state_flags[state_id] |= EarleyParserGrammarMetadata::kFsmStateEnd;
+      }
+    }
+  }
+}
+
+EarleyParser::EarleyParser(
+    const Grammar& grammar,
+    const EarleyParserGrammarMetadata& grammar_metadata,
+    std::optional<ParserState> initial_state
+)
+    : grammar_(grammar), grammar_metadata_(&grammar_metadata) {
   if (!grammar->optimized) {
     XGRAMMAR_LOG(FATAL) << "The grammar is not optimized. Please optimize the grammar before using "
                            "the Earley parser.";
   }
+  XGRAMMAR_CHECK(
+      grammar_metadata_->fsm_state_flags.size() ==
+      static_cast<size_t>(grammar->complete_fsm.NumStates())
+  ) << "The Earley parser metadata does not match the grammar's FSM";
+  XGRAMMAR_CHECK(
+      grammar_metadata_->rule_is_nullable.size() == static_cast<size_t>(grammar->NumRules())
+  ) << "The Earley parser metadata does not match the grammar's rules";
   for (int32_t i = 0; i < grammar_->NumRules(); ++i) {
     has_budget_rules_ = has_budget_rules_ || grammar_->GetRule(i).max_tokens >= 0;
     has_char_budget_rules_ = has_char_budget_rules_ || grammar_->GetRule(i).max_chars >= 0;
@@ -483,41 +532,7 @@ EarleyParser::EarleyParser(const Grammar& grammar, std::optional<ParserState> in
       break;
     }
   }
-  for (int32_t rule_id : grammar_->allow_empty_rule_ids) {
-    rule_is_nullable_[rule_id] = true;
-  }
   PushStateAndExpand(initial_state.has_value() ? *initial_state : RootInitialState());
-}
-
-uint8_t EarleyParser::InitializeFsmStateFlags(int32_t rule_id, int32_t state_id) {
-  XGRAMMAR_DCHECK(grammar_->per_rule_fsms[rule_id].has_value());
-  const auto& fsm = grammar_->per_rule_fsms[rule_id]->GetFsm();
-  auto& flags_cache = fsm_state_flags_cache_[rule_id];
-  if (flags_cache.empty()) {
-    flags_cache.resize(fsm.NumStates());
-  }
-  XGRAMMAR_DCHECK(state_id >= 0 && state_id < static_cast<int32_t>(flags_cache.size()));
-  uint8_t& flags = flags_cache[state_id];
-  if (flags & kFsmStateInitialized) {
-    return flags;
-  }
-
-  flags = kFsmStateInitialized;
-  if (fsm.IsEndState(state_id)) {
-    flags |= kFsmStateEnd;
-  }
-  const auto& edges = fsm.GetFsm().GetEdges(state_id);
-  if (edges.size() != 0) {
-    flags |= kFsmStateHasEdges;
-  }
-  for (const auto& edge : edges) {
-    if (edge.IsCharRange() || edge.IsToken() || edge.IsExcludeToken()) {
-      flags |= kFsmStateScanable;
-    } else if (edge.IsRuleRef() || edge.IsEpsilon() || edge.IsRepeatRef()) {
-      flags |= kFsmStateNonTerminal;
-    }
-  }
-  return flags;
 }
 
 ParserState EarleyParser::RootInitialState() const {
