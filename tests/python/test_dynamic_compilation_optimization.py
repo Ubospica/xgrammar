@@ -229,3 +229,31 @@ def test_shared_parser_feature_metadata_preserves_matcher_behavior():
             )
             assert matcher.accept_string(value) and matcher.is_terminated()
             assert matcher.get_captures() == expected_captures
+
+
+def test_single_character_class_masks_are_reused_safely():
+    vocabulary = [">", "<", "[", "]", "a", "ab", "abc", "z", "é", b"\xc3", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    eager_compiler = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    )
+    dynamic_compiler = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    )
+    cases = [('root ::= ">" [a-z] "<"', ">a<"), ('root ::= "[" [a-z] "]"', "[z]")]
+
+    def compile_dynamic(case):
+        return dynamic_compiler.compile_grammar(case[0])
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        compiled = list(executor.map(compile_dynamic, cases * 8))
+    for (grammar, value), dynamic in zip(cases * 8, compiled):
+        _assert_mask_traces_equal(eager_compiler.compile_grammar(grammar), dynamic, value)
+
+    dynamic_compiler.clear_cache()
+    for grammar, value in reversed(cases):
+        _assert_mask_traces_equal(
+            eager_compiler.compile_grammar(grammar),
+            dynamic_compiler.compile_grammar(grammar),
+            value,
+        )
