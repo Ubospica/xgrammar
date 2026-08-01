@@ -6,6 +6,7 @@ import torch
 
 import xgrammar as xgr
 from xgrammar.base import _core
+from xgrammar.testing import bitmask_to_bool_mask
 
 VOCABULARY = [chr(value) for value in range(32, 127)] + ["Ada", "hello", "42", "<call>"]
 
