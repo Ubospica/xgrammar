@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import torch
 
@@ -113,21 +115,28 @@ def test_jit_mode_populates_and_reuses_masks():
     assert jit_grammar.memory_size_bytes == populated_size
 
 
-def test_jit_mode_serialization_materializes_masks():
+@pytest.mark.parametrize(
+    "compile_grammar,input_string",
+    [(_compile_ebnf, "hello!"), (_compile_structural_tag, "prefix<call>X")],
+    ids=["ebnf", "structural-tag"],
+)
+def test_jit_mode_serialization_preserves_jit_mode(compile_grammar, input_string):
     tokenizer_info = xgr.TokenizerInfo(JIT_MODE_VOCABULARY, stop_token_ids=[])
-    jit_grammar = _compile_ebnf(
+    jit_grammar = compile_grammar(
         xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=False, jit_mode=True)
     )
     initial_size = jit_grammar.memory_size_bytes
 
     serialized = jit_grammar.serialize_json()
-    assert jit_grammar.memory_size_bytes > initial_size
+    serialized_data = json.loads(serialized)
+    assert serialized_data["jit_mode"]
+    assert serialized_data["adaptive_token_mask_cache"] == []
+    assert jit_grammar.memory_size_bytes == initial_size
     restored_grammar = xgr.CompiledGrammar.deserialize_json(serialized, tokenizer_info)
 
-    for input_string in ["hello!", "hi?"]:
-        _assert_traces_equal(
-            _mask_trace(jit_grammar, input_string), _mask_trace(restored_grammar, input_string)
-        )
+    _assert_traces_equal(
+        _mask_trace(jit_grammar, input_string), _mask_trace(restored_grammar, input_string)
+    )
 
 
 def test_jit_mode_reuses_limited_compiler_cache():

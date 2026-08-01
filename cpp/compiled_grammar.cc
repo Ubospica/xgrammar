@@ -218,13 +218,7 @@ void TokenMaskCache::Insert(const ParserState& state, AdaptiveTokenMask mask) {
   masks_.try_emplace(state, std::move(mask));
 }
 
-AdaptiveTokenMaskMap TokenMaskCache::Snapshot(bool lock_required) const {
-  std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
-  if (lock_required) {
-    lock.lock();
-  }
-  return masks_;
-}
+AdaptiveTokenMaskMap TokenMaskCache::Snapshot() const { return masks_; }
 
 void TokenMaskCache::Assign(AdaptiveTokenMaskMap masks) {
   masks_ = std::move(masks);
@@ -253,8 +247,14 @@ picojson::value SerializeJSONValue(const CompiledGrammar::Impl& impl) {
   auto result = picojson::object{};
   result["grammar"] = AutoSerializeJSONValue(impl.grammar);
   result["tokenizer_metadata"] = impl.tokenizer_info->DumpMetadataValue();
-  result["adaptive_token_mask_cache"] =
-      AutoSerializeJSONValue(impl.adaptive_token_mask_cache.Snapshot(impl.jit_mode));
+  result["adaptive_token_mask_cache"] = AutoSerializeJSONValue(
+      impl.jit_mode ? AdaptiveTokenMaskMap{} : impl.adaptive_token_mask_cache.Snapshot()
+  );
+  if (impl.jit_mode) {
+    result["jit_mode"] = AutoSerializeJSONValue(impl.jit_mode);
+    result["tag_dispatch_rule_id_to_second_slicing_bitset"] =
+        AutoSerializeJSONValue(impl.tag_dispatch_rule_id_to_second_slicing_bitset);
+  }
   return picojson::value(result);
 }
 
@@ -268,6 +268,11 @@ std::optional<SerializationError> DeserializeJSONValue(
     return ConstructDeserializeError("Expect an object", type_name);
   }
   const auto& object = json_value.get<picojson::object>();
+  if (auto iterator = object.find("jit_mode"); iterator != object.end()) {
+    if (auto error = AutoDeserializeJSONValue(&(impl->jit_mode), iterator->second, type_name)) {
+      return error;
+    }
+  }
   if (object.find("grammar") == object.end()) {
     return ConstructDeserializeError("Expect a 'grammar' field", type_name);
   }
@@ -289,6 +294,19 @@ std::optional<SerializationError> DeserializeJSONValue(
   AdaptiveTokenMaskMap adaptive_token_masks;
   AutoDeserializeJSONValue(&adaptive_token_masks, object["adaptive_token_mask_cache"]);
   impl->adaptive_token_mask_cache.Assign(std::move(adaptive_token_masks));
+  if (impl->jit_mode) {
+    auto iterator = object.find("tag_dispatch_rule_id_to_second_slicing_bitset");
+    if (iterator == object.end()) {
+      return ConstructDeserializeError(
+          "Expect a 'tag_dispatch_rule_id_to_second_slicing_bitset' field", type_name
+      );
+    }
+    if (auto error = AutoDeserializeJSONValue(
+            &(impl->tag_dispatch_rule_id_to_second_slicing_bitset), iterator->second, type_name
+        )) {
+      return error;
+    }
+  }
   return std::nullopt;
 }
 
@@ -307,12 +325,7 @@ Grammar CompiledGrammar::GetGrammar() const { return pimpl_->GetGrammar(); }
 TokenizerInfo CompiledGrammar::GetTokenizerInfo() const { return pimpl_->GetTokenizerInfo(); }
 
 /*! \brief Return the serialized JSON string of the compiled grammar. */
-std::string CompiledGrammar::SerializeJSON() const {
-  if (pimpl_->jit_mode) {
-    pimpl_->MaterializeAdaptiveTokenMaskCache();
-  }
-  return AutoSerializeJSON(*this, true);
-}
+std::string CompiledGrammar::SerializeJSON() const { return AutoSerializeJSON(*this, true); }
 
 /*! \brief Deserialize a compiled grammar from a JSON string and tokenizer info. */
 std::variant<CompiledGrammar, SerializationError> CompiledGrammar::DeserializeJSON(

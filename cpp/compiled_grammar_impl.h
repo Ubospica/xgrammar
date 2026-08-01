@@ -120,7 +120,7 @@ class TokenMaskCache {
   void Insert(const ParserState& state, AdaptiveTokenMask mask);
 
   /*! \brief Return a stable copy of all generated masks. */
-  AdaptiveTokenMaskMap Snapshot(bool lock_required) const;
+  AdaptiveTokenMaskMap Snapshot() const;
 
   /*! \brief Replace all masks during deserialization. No access may run concurrently. */
   void Assign(AdaptiveTokenMaskMap masks);
@@ -170,9 +170,6 @@ class CompiledGrammar::Impl {
 
   /*! \brief Get a cached token mask, generating it when jit_mode is enabled. */
   const AdaptiveTokenMask& GetAdaptiveTokenMask(const ParserState& state, bool is_root_rule);
-
-  /*! \brief Generate every token mask before serialization. */
-  void MaterializeAdaptiveTokenMaskCache();
 
   Grammar GetGrammar() const { return grammar; }
 

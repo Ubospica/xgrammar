@@ -1075,15 +1075,6 @@ void ForEachAdaptiveTokenMaskState(const Grammar& grammar, Callback&& callback) 
   }
 }
 
-void CompiledGrammar::Impl::MaterializeAdaptiveTokenMaskCache() {
-  if (tokenizer_info.GetVocabSize() == 0) {
-    return;
-  }
-  ForEachAdaptiveTokenMaskState(grammar, [this](const ParserState& state, bool is_root_rule) {
-    GetAdaptiveTokenMask(state, is_root_rule);
-  });
-}
-
 /******************* GrammarCompilerNoCache *******************/
 
 /*!
@@ -1427,7 +1418,7 @@ class GrammarCompiler::Impl {
       int64_t max_memory_bytes,
       bool jit_mode
   )
-      : grammar_level_cache_enabled_(cache_enabled),
+      : cache_enabled_(cache_enabled),
         rule_level_cache_(
             cache_enabled
                 ? std::optional<RuleLevelCache>(
@@ -1496,8 +1487,8 @@ class GrammarCompiler::Impl {
     std::size_t operator()(const CompiledGrammar& value) const { return value.MemorySizeBytes(); }
   };
 
-  /*! \brief Whether the grammar-level cache is enabled. */
-  const bool grammar_level_cache_enabled_;
+  /*! \brief Whether the cache is enabled. */
+  const bool cache_enabled_;
 
   /*! \brief The crossing cache manager for compiled grammars. */
   std::optional<RuleLevelCache> rule_level_cache_ = std::nullopt;
@@ -1539,7 +1530,7 @@ CompiledGrammar GrammarCompiler::Impl::Compute(const UnionKey& key) {
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileBuiltinJSONGrammar() {
-  if (!grammar_level_cache_enabled_) {
+  if (!cache_enabled_) {
     return no_cache_compiler_.CompileBuiltinJSONGrammar();
   }
   return grammar_level_cache_.Get(BuiltinJSONGrammarKey{});
@@ -1554,7 +1545,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileJSONSchema(
     std::optional<int> max_whitespace_cnt,
     bool any_order
 ) {
-  if (!grammar_level_cache_enabled_) {
+  if (!cache_enabled_) {
     return no_cache_compiler_.CompileJSONSchema(
         schema, any_whitespace, indent, separators, strict_mode, max_whitespace_cnt, any_order
     );
@@ -1566,21 +1557,21 @@ CompiledGrammar GrammarCompiler::Impl::CompileJSONSchema(
 
 CompiledGrammar GrammarCompiler::Impl::CompileStructuralTag(const std::string& structural_tag_json
 ) {
-  if (!grammar_level_cache_enabled_) {
+  if (!cache_enabled_) {
     return no_cache_compiler_.CompileStructuralTag(structural_tag_json);
   }
   return grammar_level_cache_.Get(StructuralTagKey{structural_tag_json});
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileRegex(const std::string& regex) {
-  if (!grammar_level_cache_enabled_) {
+  if (!cache_enabled_) {
     return no_cache_compiler_.CompileRegex(regex);
   }
   return grammar_level_cache_.Get(RegexKey{regex});
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileGrammar(const Grammar& grammar) {
-  if (!grammar_level_cache_enabled_) {
+  if (!cache_enabled_) {
     return no_cache_compiler_.CompileGrammar(grammar);
   }
   return grammar_level_cache_.Get(GrammarKey{grammar.ToString(), grammar->GetRootRule().name});
@@ -1589,7 +1580,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileGrammar(const Grammar& grammar) {
 CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
     const std::string& ebnf_str, std::string root_rule_name
 ) {
-  if (!grammar_level_cache_enabled_) {
+  if (!cache_enabled_) {
     return no_cache_compiler_.CompileGrammar(ebnf_str, root_rule_name);
   }
   return grammar_level_cache_.Get(GrammarKey{ebnf_str, root_rule_name});
