@@ -599,6 +599,31 @@ def test_dynamic_compilation_matches_precompiled_masks(compile_grammar, input_st
     _assert_mask_traces_equal(precompiled_grammar, dynamically_compiled_grammar, input_string)
 
 
+def test_dynamic_compilation_without_state_cache_keys_matches_eager_masks():
+    tokenizer_info = xgr.TokenizerInfo(
+        [chr(value) for value in range(32, 127)] + ["ab", "abc", "bc", "xyz"], stop_token_ids=[]
+    )
+    grammar = xgr.Grammar.from_ebnf(
+        """
+root ::= prefix payload suffix
+prefix ::= "a" | "ab" | "abc"
+payload ::= atom{1, 4}
+atom ::= [0-9] | nested
+nested ::= "(" payload ")"
+suffix ::= "!" | "?"
+"""
+    )
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=False, enable_dynamic_compilation=False
+    ).compile_grammar(grammar)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=False, enable_dynamic_compilation=True
+    ).compile_grammar(grammar)
+
+    for value in ["a0!", "ab12?", "abc(3)4!", "a((5))?"]:
+        _assert_mask_traces_equal(eager, dynamic, value)
+
+
 @pytest.mark.parametrize(
     ("character_class", "accepted_character", "rejected_character"),
     [("[a-z]", "a", "A"), ("[^b]", "é", "b"), ("[a-zа-я一-龥]", "中", "!")],

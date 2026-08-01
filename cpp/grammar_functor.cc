@@ -3323,7 +3323,7 @@ class RootRuleRenamerImpl {
 
 class GrammarFSMHasherImpl {
  public:
-  void Apply(Grammar* grammar);
+  void Apply(Grammar* grammar, bool build_state_cache_keys);
   static std::optional<uint64_t> HashSequence(const Grammar& grammar, int32_t sequence_id);
 
   static constexpr int16_t kNotEndStateFlag = -0x100;
@@ -3479,7 +3479,7 @@ void GrammarFSMHasherImpl::RemoveHashedFsmFromRefGraph(int32_t fsm_index) {
   }
 }
 
-void GrammarFSMHasherImpl::Apply(Grammar* grammar) {
+void GrammarFSMHasherImpl::Apply(Grammar* grammar, bool build_state_cache_keys) {
   grammar_ = grammar;
   grammar->ImplPtr()->per_rule_fsm_hashes =
       std::vector<std::optional<uint64_t>>((*grammar)->NumRules());
@@ -3578,7 +3578,11 @@ void GrammarFSMHasherImpl::Apply(Grammar* grammar) {
     grammar->ImplPtr()->per_rule_fsm_hashes[rule_id] = hash_value;
   }
 
+  grammar->ImplPtr()->per_rule_fsm_state_cache_keys.clear();
   grammar->ImplPtr()->per_rule_fsm_state_cache_keys.resize((*grammar)->NumRules());
+  if (!build_state_cache_keys) {
+    return;
+  }
   for (int32_t rule_id = 0; rule_id < (*grammar)->NumRules(); ++rule_id) {
     if (!grammar_->ImplPtr()->per_rule_fsm_hashes[rule_id].has_value() ||
         !grammar_->ImplPtr()->per_rule_fsms[rule_id].has_value()) {
@@ -4201,7 +4205,9 @@ void GrammarFSMBuilder::Apply(Grammar* grammar) { GrammarFSMBuilderImpl::Apply(g
 
 void RepetitionNormalizer::Apply(Grammar* grammar) { RepetitionNormalizerImpl().Apply(grammar); }
 
-void GrammarFSMHasher::Apply(Grammar* grammar) { GrammarFSMHasherImpl().Apply(grammar); }
+void GrammarFSMHasher::Apply(Grammar* grammar, bool build_state_cache_keys) {
+  GrammarFSMHasherImpl().Apply(grammar, build_state_cache_keys);
+}
 
 std::optional<uint64_t> GrammarFSMHasher::HashSequence(
     const Grammar& grammar, int32_t sequence_id

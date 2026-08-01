@@ -2427,7 +2427,7 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   auto first_byte_cache =
       std::make_shared<FirstByteTokenMaskCache>(kFirstByteCacheMaxBytes, first_byte_vocab_buckets_);
   auto optional_character_class_token_summary_cache = optional_character_class_token_summary_cache_;
-  GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar);
+  GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar, !enable_dynamic_compilation_);
   if (enable_dynamic_compilation_) {
     compiled_grammar_impl->rule_level_cache = std::move(active_rule_level_cache);
     compiled_grammar_impl->first_byte_cache = std::move(first_byte_cache);
