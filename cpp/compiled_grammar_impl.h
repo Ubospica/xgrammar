@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "character_class_token_summary.h"
 #include "earley_parser.h"
 #include "support/dynamic_bitset.h"
 #include "support/reflection.h"
@@ -26,6 +27,7 @@
 namespace xgrammar {
 
 class RuleLevelCache;
+class CharacterClassTokenSummaryCache;
 
 /******************* CompiledGrammar Datastructures *******************/
 
@@ -103,6 +105,11 @@ XGRAMMAR_MEMBER_TABLE(
     &AdaptiveTokenMask::uncertain_indices
 );
 
+struct CharacterClassRepeatTokenMask {
+  AdaptiveTokenMask adaptive_token_mask;
+  DynamicBitset accepted_prefix_tokens;
+};
+
 /*!
  * \brief Manages the adaptive token masks of a compiled grammar. In eager mode (the default),
  * all masks are precomputed at compile time. In dynamic mode, masks are generated and cached on
@@ -127,6 +134,13 @@ class TokenMaskCache {
     rule_level_cacheable_ = std::move(rule_level_cacheable);
   }
 
+  /*! \brief Configure cross-grammar character-class summary sharing. */
+  void SetCharacterClassTokenSummaryCache(
+      std::shared_ptr<CharacterClassTokenSummaryCache> character_class_token_summary_cache
+  ) {
+    character_class_token_summary_cache_ = std::move(character_class_token_summary_cache);
+  }
+
   /*! \brief Whether missing token masks should be generated on first use. */
   bool IsDynamic() const { return dynamic_; }
 
@@ -148,6 +162,14 @@ class TokenMaskCache {
       const TokenizerInfo& tokenizer_info
   );
 
+  /*! \brief Return the shared mask for a repeated character class. */
+  const CharacterClassRepeatTokenMask& GetCharacterClassRepeatTokenMask(
+      int32_t character_class_expr_id,
+      int32_t max_characters,
+      const Grammar& grammar,
+      const TokenizerInfo& tokenizer_info
+  );
+
  private:
   /*! \brief Return the tag-dispatch bitset for a rule, computing and caching it on first use. */
   const DynamicBitset* GetTagDispatchSecondSlicingBitset(
@@ -162,6 +184,13 @@ class TokenMaskCache {
 
   /*! \brief Whether each rule is independent of runtime parser context. */
   std::vector<uint8_t> rule_level_cacheable_;
+
+  /*! \brief Character-class summaries shared by grammars compiled with the same compiler. */
+  std::shared_ptr<CharacterClassTokenSummaryCache> character_class_token_summary_cache_;
+
+  /*! \brief Character-class repeat masks shared by matchers using this grammar. */
+  std::unordered_map<uint64_t, CharacterClassRepeatTokenMask> character_class_repeat_token_masks_;
+  mutable std::mutex character_class_repeat_token_masks_mutex_;
 
   /*! \brief Mapping from the parser state to the adaptive token mask. */
   std::unordered_map<ParserState, AdaptiveTokenMask, StateHashForCache, StateEqualForCache> masks_;
