@@ -466,7 +466,11 @@ class GrammarMatcher::Impl : public EarleyParser {
       int max_rollback_tokens = -1,
       std::optional<float> default_temperature = std::nullopt
   )
-      : EarleyParser(compiled_grammar->grammar),
+      : EarleyParser(
+            compiled_grammar->grammar,
+            std::nullopt,
+            compiled_grammar->earley_parser_grammar_features
+        ),
         compiled_grammar_(compiled_grammar),
         tokenizer_info_(compiled_grammar->tokenizer_info),
         stop_token_ids_(override_stop_tokens.value_or(tokenizer_info_.GetStopTokenIds())),
@@ -1861,7 +1865,11 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
 
   for (const auto& state : latest_states) {
     const AdaptiveTokenMask& adaptive_token_mask = compiled_grammar_->token_mask_cache.Get(
-        state, state.rule_id == grammar_->GetRootRuleId(), grammar_, tokenizer_info_
+        state,
+        state.rule_id == grammar_->GetRootRuleId(),
+        grammar_,
+        tokenizer_info_,
+        compiled_grammar_->earley_parser_grammar_features
     );
     if (state.char_budget_deadline >= 0) {
       int32_t remaining_chars = state.char_budget_deadline - GetCurrentCharIndex();

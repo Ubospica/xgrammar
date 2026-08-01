@@ -307,6 +307,30 @@ struct CaptureEvent {
   std::vector<CaptureOccurrence> stop_capture_targets;
 };
 
+/*! \brief Immutable grammar-wide features shared by short-lived Earley parsers. */
+struct EarleyParserGrammarFeatures {
+  enum FsmStateFlag : uint8_t {
+    kFsmStateInitialized = 1 << 0,
+    kFsmStateScanable = 1 << 1,
+    kFsmStateNonTerminal = 1 << 2,
+    kFsmStateEnd = 1 << 3,
+    kFsmStateHasEdges = 1 << 4,
+  };
+
+  std::vector<uint8_t> fsm_state_flags;
+  std::vector<uint8_t> rule_is_nullable;
+  bool has_budget_rules = false;
+  bool has_char_budget_rules = false;
+  bool capture_tracking = false;
+  bool has_hidden_capture_rules = false;
+
+  explicit EarleyParserGrammarFeatures(const Grammar& grammar);
+
+  friend std::size_t MemorySize(const EarleyParserGrammarFeatures& features) {
+    return MemorySize(features.fsm_state_flags) + MemorySize(features.rule_is_nullable);
+  }
+};
+
 class EarleyParser {
   /*!
    * \brief Here is an article about Earley Parser.
@@ -325,6 +349,9 @@ class EarleyParser {
 
   /*! \brief The grammar to be parsed. */
   Grammar grammar_;
+
+  /*! \brief Direct view of the shared complete-FSM edges. */
+  const Compact2DArray<FSMEdge>* complete_fsm_edges_;
 
   /*! \brief In this round of advancing, check if the stop token can be accepted. */
   bool tmp_accept_stop_token_ = false;
@@ -359,37 +386,28 @@ class EarleyParser {
   /*! \brief Check if the stop token is accepted. */
   bool stop_token_is_accepted_ = false;
 
-  enum FsmStateFlag : uint8_t {
-    kFsmStateInitialized = 1 << 0,
-    kFsmStateScanable = 1 << 1,
-    kFsmStateNonTerminal = 1 << 2,
-    kFsmStateEnd = 1 << 3,
-    kFsmStateHasEdges = 1 << 4,
-  };
+  using FsmStateFlag = EarleyParserGrammarFeatures::FsmStateFlag;
+  static constexpr uint8_t kFsmStateInitialized = EarleyParserGrammarFeatures::kFsmStateInitialized;
+  static constexpr uint8_t kFsmStateScanable = EarleyParserGrammarFeatures::kFsmStateScanable;
+  static constexpr uint8_t kFsmStateNonTerminal = EarleyParserGrammarFeatures::kFsmStateNonTerminal;
+  static constexpr uint8_t kFsmStateEnd = EarleyParserGrammarFeatures::kFsmStateEnd;
+  static constexpr uint8_t kFsmStateHasEdges = EarleyParserGrammarFeatures::kFsmStateHasEdges;
 
-  /*! \brief Lazily-computed FSM state properties, indexed by rule id and state id. */
-  std::vector<std::vector<uint8_t>> fsm_state_flags_cache_;
+  /*! \brief Grammar-wide parser features shared by every parser for this grammar. */
+  std::shared_ptr<const EarleyParserGrammarFeatures> grammar_features_;
 
-  /*! \brief Whether each rule can match the empty string. */
-  std::vector<uint8_t> rule_is_nullable_;
-
-  /*! \brief Compute and cache properties for a state in a per-rule FSM. */
-  uint8_t InitializeFsmStateFlags(int32_t rule_id, int32_t state_id);
-
-  /*! \brief Return cached properties for a state in a per-rule FSM. */
-  uint8_t GetFsmStateFlags(int32_t rule_id, int32_t state_id) {
-    XGRAMMAR_DCHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(fsm_state_flags_cache_.size()));
-    auto& flags_cache = fsm_state_flags_cache_[rule_id];
-    if (!flags_cache.empty()) {
-      XGRAMMAR_DCHECK(state_id >= 0 && state_id < static_cast<int32_t>(flags_cache.size()));
-      if (flags_cache[state_id] != 0) {
-        return flags_cache[state_id];
-      }
-    }
-    return InitializeFsmStateFlags(rule_id, state_id);
+  /*! \brief Return shared properties for a state in the complete FSM. */
+  uint8_t GetFsmStateFlags(int32_t rule_id, int32_t state_id) const {
+    XGRAMMAR_DCHECK(rule_id >= 0 && rule_id < grammar_->NumRules());
+    XGRAMMAR_DCHECK(
+        state_id >= 0 && state_id < static_cast<int32_t>(grammar_features_->fsm_state_flags.size())
+    );
+    return grammar_features_->fsm_state_flags[state_id];
   }
 
-  bool IsRuleNullable(int32_t rule_id) const { return rule_is_nullable_[rule_id] != 0; }
+  bool IsRuleNullable(int32_t rule_id) const {
+    return grammar_features_->rule_is_nullable[rule_id] != 0;
+  }
 
   /*! \brief The index of the LLM token currently being accepted, set by the matcher; -1
    * before any token. budget_deadline values are compared against it. */
@@ -669,7 +687,9 @@ class EarleyParser {
    * from the root rule of the grammar.
    */
   explicit EarleyParser(
-      const Grammar& grammar, std::optional<ParserState> initial_state = std::nullopt
+      const Grammar& grammar,
+      std::optional<ParserState> initial_state = std::nullopt,
+      std::shared_ptr<const EarleyParserGrammarFeatures> grammar_features = nullptr
   );
 
   /*!
