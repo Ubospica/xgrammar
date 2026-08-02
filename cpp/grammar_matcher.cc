@@ -761,12 +761,16 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       enabled_ = false;
       return;
     }
-    transition_history_.push_back(EncodeAccepted(*initial_row_id, *initial_configuration_id));
+    PushAcceptedTransition(EncodeAccepted(*initial_row_id, *initial_configuration_id));
     RecordMaterializedRow(*initial_row_id);
     materialized_depth_ = 1;
   }
 
-  bool Advance(uint8_t byte) {
+#ifdef _MSC_VER
+  __forceinline bool Advance(uint8_t byte) {
+#else
+  __attribute__((always_inline)) inline bool Advance(uint8_t byte) {
+#endif
     if (!enabled_) {
       return matcher_->EarleyParser::Advance(byte);
     }
@@ -775,24 +779,23 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       return matcher_->EarleyParser::Advance(byte);
     }
     XGRAMMAR_DCHECK(!transition_history_.empty());
-    const int32_t input_configuration_id = DecodeConfigurationId(transition_history_.back());
-    const size_t key = static_cast<size_t>(input_configuration_id) * 256 + byte;
     ++queries_;
-    const uint16_t cached = transition_table_[key];
+    XGRAMMAR_DCHECK(current_transition_row_ != nullptr);
+    const uint16_t cached = current_transition_row_[byte];
     if (cached == kRejected) {
       ++hits_;
       return false;
     }
     if (cached != kEmpty) {
       ++hits_;
-      transition_history_.push_back(cached);
+      PushAcceptedTransition(cached);
       return true;
     }
 
     MaterializeVirtualPrefix();
     const bool accepted = matcher_->EarleyParser::Advance(byte);
     if (!accepted) {
-      transition_table_[key] = kRejected;
+      current_transition_row_[byte] = kRejected;
       return false;
     }
     const auto output_row_id = InternCurrentCompletableRow();
@@ -806,8 +809,8 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       return true;
     }
     const uint16_t output_transition = EncodeAccepted(*output_row_id, *output_configuration_id);
-    transition_table_[key] = output_transition;
-    transition_history_.push_back(output_transition);
+    current_transition_row_[byte] = output_transition;
+    PushAcceptedTransition(output_transition);
     RecordMaterializedRow(*output_row_id);
     ++materialized_depth_;
     return true;
@@ -830,6 +833,11 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       --materialized_depth_;
     }
     transition_history_.resize(target_depth);
+    current_transition_row_ =
+        target_depth == 0
+            ? nullptr
+            : transition_table_.data() +
+                  static_cast<size_t>(DecodeConfigurationId(transition_history_.back())) * 256;
   }
 
   uint64_t Queries() const { return queries_; }
@@ -905,6 +913,12 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
 
   static int32_t DecodeConfigurationId(uint16_t transition) {
     return (transition >> kConfigurationShift) & kIdMask;
+  }
+
+  void PushAcceptedTransition(uint16_t transition) {
+    transition_history_.push_back(transition);
+    current_transition_row_ =
+        transition_table_.data() + static_cast<size_t>(DecodeConfigurationId(transition)) * 256;
   }
 
   std::optional<CachedState> NormalizeState(const ParserState& state, int32_t current_row) const {
@@ -1062,6 +1076,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   void DisableAndMaterialize() {
     MaterializeVirtualPrefix();
     enabled_ = false;
+    current_transition_row_ = nullptr;
   }
 
   Impl* matcher_;
@@ -1070,6 +1085,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   uint64_t queries_{0};
   uint64_t hits_{0};
   std::vector<uint16_t> transition_table_;
+  uint16_t* current_transition_row_{nullptr};
   std::vector<CanonicalRow> rows_;
   std::vector<CanonicalConfiguration> configurations_;
   std::vector<std::vector<int32_t>> absolute_rows_by_id_;
