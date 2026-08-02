@@ -147,6 +147,8 @@ class CompiledGrammar::Impl {
   std::unordered_map<uint64_t, CharacterClassRepeatTokenMask> character_class_repeat_token_masks;
   mutable std::mutex character_class_repeat_token_masks_mutex;
 
+  /*! \brief Grammar-wide flags and nullable rules shared by Earley parsers. */
+  std::shared_ptr<const EarleyParserGrammarFeatures> earley_parser_grammar_features;
   /*! \brief Tag-dispatch data retained for on-demand token mask generation. */
   std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset;
 
