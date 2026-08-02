@@ -12,7 +12,45 @@ from pydantic import BaseModel
 from transformers import AutoTokenizer
 
 import xgrammar as xgr
-from xgrammar.testing import _get_allow_empty_rule_ids
+from xgrammar.testing import _get_allow_empty_rule_ids, bitmask_to_bool_mask
+
+
+@pytest.mark.parametrize(
+    "schema,prefixes",
+    [
+        ({"type": "string", "minLength": 1}, ['"', '"safe']),
+        ({"type": "string", "minLength": 2, "maxLength": 4}, ['"', '"sa']),
+        ({"type": "string", "pattern": "^[A-Z0-9 ]+$"}, ['"', '"AZ']),
+        ({"enum": ["safe ASCII", 'quote"', "slash\\", "é"]}, ['"']),
+    ],
+)
+def test_json_safe_ascii_token_classification_preserves_masks(schema, prefixes):
+    vocabulary = [
+        "",
+        '"',
+        "\\",
+        "safe",
+        "safe ASCII",
+        "AZ09 !#[]{}",
+        'quote"',
+        "slash\\",
+        "\n",
+        "é",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    tokenizer_info = xgr.TokenizerInfo.deserialize_json(tokenizer_info.serialize_json())
+    compiled = xgr.GrammarCompiler(tokenizer_info, max_threads=1).compile_json_schema(schema)
+
+    for prefix in prefixes:
+        matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        assert matcher.accept_string(prefix)
+        bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        assert matcher.fill_next_token_bitmask(bitmask)
+        allowed = bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+        for token_id in range(1, tokenizer_info.vocab_size):
+            oracle = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+            assert oracle.accept_string(prefix)
+            assert bool(allowed[token_id]) == oracle.accept_token(token_id)
 
 
 @pytest.mark.hf_token_required
