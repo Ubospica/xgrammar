@@ -380,6 +380,40 @@ def test_rule_mask_sharing_distinguishes_lookahead_expression_boundaries(
     torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
+def test_continuation_transition_cache_isolated_between_parser_states(capfd):
+    left_suffixes = [
+        chr(first) + chr(second)
+        for first in range(ord("a"), ord("n"))
+        for second in range(ord("a"), ord("n"))
+    ]
+    right_suffixes = [
+        chr(first) + chr(second)
+        for first in range(ord("n"), ord("{"))
+        for second in range(ord("n"), ord("{"))
+    ]
+    vocabulary = (
+        [suffix + "!" for suffix in left_suffixes]
+        + [suffix + "?" for suffix in right_suffixes]
+        + ["a", "n", "!", "?", "x", b"\xff"]
+    )
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar(
+        'root ::= left "!" | right "?"\n' 'left ::= [a-m] left | ""\n' 'right ::= [n-z] right | ""'
+    )
+
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    assert matcher.fill_next_token_bitmask(bitmask, debug_print=True)
+    assert capfd.readouterr().err.count("ContinuationTransitionCache(") == 2
+
+    allowed_tokens = bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+    for token_id in range(tokenizer_info.vocab_size):
+        oracle = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        assert bool(allowed_tokens[token_id]) == oracle.accept_token(token_id), token_id
+
+
 def test_shared_parser_features_preserve_budget_and_capture_behavior():
     tokenizer_info = xgr.TokenizerInfo(["ab ", "cd", " ", "</t>", "1", "<t>", "x"])
     grammar = xgr.Grammar.from_lark(
