@@ -10,6 +10,7 @@
 #include <xgrammar/matcher.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -752,7 +753,6 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       : matcher_(matcher),
         external_row_count_(matcher_->rule_id_to_completable_states_.size() - 1),
         transition_table_(kMaxConfigurations * 256, kEmpty) {
-    transition_history_.reserve(kMaxVirtualDepth);
     const auto initial_row_id = InternCurrentCompletableRow();
     if (!initial_row_id.has_value()) {
       enabled_ = false;
@@ -776,11 +776,11 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
     if (!enabled_) {
       return matcher_->EarleyParser::Advance(byte);
     }
-    if (transition_history_.size() >= kMaxVirtualDepth) {
+    if (transition_depth_ >= kMaxVirtualDepth) {
       DisableAndMaterialize();
       return matcher_->EarleyParser::Advance(byte);
     }
-    XGRAMMAR_DCHECK(!transition_history_.empty());
+    XGRAMMAR_DCHECK(transition_depth_ != 0);
     ++queries_;
     XGRAMMAR_DCHECK(current_transition_row_ != nullptr);
     const uint16_t cached = current_transition_row_[byte];
@@ -823,8 +823,8 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       matcher_->EarleyParser::PopLastStates(count);
       return;
     }
-    XGRAMMAR_DCHECK(count >= 0 && count <= static_cast<int32_t>(transition_history_.size()));
-    const size_t target_depth = transition_history_.size() - count;
+    XGRAMMAR_DCHECK(count >= 0 && count <= static_cast<int32_t>(transition_depth_));
+    const size_t target_depth = transition_depth_ - count;
     if (materialized_depth_ > target_depth) {
       matcher_->EarleyParser::PopLastStates(materialized_depth_ - target_depth);
     }
@@ -834,12 +834,13 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       absolute_rows_by_id_[row_id].pop_back();
       --materialized_depth_;
     }
-    transition_history_.resize(target_depth);
+    transition_depth_ = target_depth;
     current_transition_row_ =
         target_depth == 0
             ? nullptr
             : transition_table_.data() +
-                  static_cast<size_t>(DecodeConfigurationId(transition_history_.back())) * 256;
+                  static_cast<size_t>(DecodeConfigurationId(transition_history_[target_depth - 1])
+                  ) * 256;
   }
 
   uint64_t Queries() const { return queries_; }
@@ -918,7 +919,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   }
 
   void PushAcceptedTransition(uint16_t transition) {
-    transition_history_.push_back(transition);
+    transition_history_[transition_depth_++] = transition;
     current_transition_row_ =
         transition_table_.data() + static_cast<size_t>(DecodeConfigurationId(transition)) * 256;
   }
@@ -934,7 +935,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
         row_ref_kind = RowRefKind::kCurrent;
       } else {
         const int32_t local_index = state.rule_start_pos - external_row_count_;
-        if (local_index < 0 || local_index >= static_cast<int32_t>(transition_history_.size())) {
+        if (local_index < 0 || local_index >= static_cast<int32_t>(transition_depth_)) {
           return std::nullopt;
         }
         row_ref_kind = RowRefKind::kCanonical;
@@ -1067,7 +1068,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   }
 
   void MaterializeVirtualPrefix() {
-    while (materialized_depth_ < transition_history_.size()) {
+    while (materialized_depth_ < transition_depth_) {
       const uint16_t transition = transition_history_[materialized_depth_];
       MaterializeTransition(DecodeRowId(transition), DecodeConfigurationId(transition));
       RecordMaterializedRow(DecodeRowId(transition));
@@ -1091,7 +1092,8 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   std::vector<CanonicalRow> rows_;
   std::vector<CanonicalConfiguration> configurations_;
   std::vector<std::vector<int32_t>> absolute_rows_by_id_;
-  std::vector<uint16_t> transition_history_;
+  std::array<uint16_t, kMaxVirtualDepth> transition_history_;
+  size_t transition_depth_{0};
   size_t materialized_depth_{0};
   std::vector<std::pair<int32_t, ParserState>> tmp_completable_states_;
   std::vector<ParserState> tmp_scanable_states_;
