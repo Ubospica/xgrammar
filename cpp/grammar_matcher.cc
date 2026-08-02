@@ -750,7 +750,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   explicit ContinuationTransitionCache(Impl* matcher)
       : matcher_(matcher),
         external_row_count_(matcher_->rule_id_to_completable_states_.size() - 1),
-        transition_table_(kMaxConfigurations * 256, kEmpty) {
+        transition_table_(new uint16_t[kMaxConfigurations * 256]) {
     const auto initial_row_id = InternCurrentCompletableRow();
     if (!initial_row_id.has_value()) {
       enabled_ = false;
@@ -836,7 +836,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
     current_transition_row_ =
         target_depth == 0
             ? nullptr
-            : transition_table_.data() +
+            : transition_table_.get() +
                   static_cast<size_t>(DecodeConfigurationId(transition_history_[target_depth - 1])
                   ) * 256;
   }
@@ -919,7 +919,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   void PushAcceptedTransition(uint16_t transition) {
     transition_history_[transition_depth_++] = transition;
     current_transition_row_ =
-        transition_table_.data() + static_cast<size_t>(DecodeConfigurationId(transition)) * 256;
+        transition_table_.get() + static_cast<size_t>(DecodeConfigurationId(transition)) * 256;
   }
 
   std::optional<CachedState> NormalizeState(const ParserState& state, int32_t current_row) const {
@@ -1031,6 +1031,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       return std::nullopt;
     }
     configurations_.push_back(std::move(normalized));
+    std::fill_n(transition_table_.get() + (configurations_.size() - 1) * 256, 256, kEmpty);
     return configurations_.size() - 1;
   }
 
@@ -1085,7 +1086,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   bool enabled_{true};
   uint64_t queries_{0};
   uint64_t hits_{0};
-  std::vector<uint16_t> transition_table_;
+  std::unique_ptr<uint16_t[]> transition_table_;
   uint16_t* current_transition_row_{nullptr};
   std::vector<CanonicalRow> rows_;
   std::vector<CanonicalConfiguration> configurations_;
