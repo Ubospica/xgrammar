@@ -1407,7 +1407,8 @@ class GrammarFSMBuilderImpl {
       int start_state,
       std::vector<int32_t>* end_states
   );
-  void BuildChoices(
+  // Returns whether the specialized choice builder handled the whole expression.
+  bool BuildChoices(
       const GrammarExpr& expr,
       const Grammar& grammar,
       int start_state,
@@ -1426,7 +1427,6 @@ class GrammarFSMBuilderImpl {
 
   FSM& target_fsm_;
   const std::string* rule_name_;
-  bool skip_equivalent_state_merge_{false};
 };
 
 // This function will add a range [min, max] of characters to the FSM, and the length
@@ -1731,11 +1731,16 @@ FSMWithStartEnd GrammarFSMBuilderImpl::BuildExpressionFSM(
   int start_state = result_fsm.AddState();
   std::vector<int32_t> end_states;
   GrammarFSMBuilderImpl builder(result_fsm, rule_name);
-  builder.BuildExpression(expr, grammar, start_state, &end_states);
+  bool skip_equivalent_state_merge = false;
+  if (expr.type == ExprType::kChoices) {
+    skip_equivalent_state_merge = builder.BuildChoices(expr, grammar, start_state, &end_states);
+  } else {
+    builder.BuildExpression(expr, grammar, start_state, &end_states);
+  }
   FSMWithStartEnd result(result_fsm, start_state, std::move(end_states));
   if (expr.type != ExprType::kTagDispatch && expr.type != ExprType::kTokenTagDispatch) {
     result = result.SimplifyEpsilon();
-    if (!builder.skip_equivalent_state_merge_) {
+    if (!skip_equivalent_state_merge) {
       result = result.MergeEquivalentStates();
     }
   }
@@ -1828,8 +1833,10 @@ void GrammarFSMBuilderImpl::BuildExpression(
       return BuildExcludeToken(expr, start_state, end_states);
     case ExprType::kSequence:
       return BuildSequence(expr, grammar, start_state, end_states);
-    case ExprType::kChoices:
-      return BuildChoices(expr, grammar, start_state, end_states);
+    case ExprType::kChoices: {
+      BuildChoices(expr, grammar, start_state, end_states);
+      return;
+    }
     case ExprType::kRegex:
       return BuildRegex(
           grammar->GetRegexString(expr),
@@ -1945,7 +1952,7 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::Sequence(
   return FSMWithStartEnd(result_fsm, start_state, std::move(end_states));
 }
 
-void GrammarFSMBuilderImpl::BuildChoices(
+bool GrammarFSMBuilderImpl::BuildChoices(
     const GrammarExpr& expr,
     const Grammar& grammar,
     int start_state,
@@ -1968,7 +1975,7 @@ void GrammarFSMBuilderImpl::BuildChoices(
 
   if (non_empty_choice_count == 0) {
     end_states->push_back(start_state);
-    return;
+    return false;
   }
 
   if (non_empty_choice_count == 1 && !nullable) {
@@ -1976,14 +1983,14 @@ void GrammarFSMBuilderImpl::BuildChoices(
       const auto& choice_expr = grammar->GetGrammarExpr(choice_id);
       if (choice_expr.type != ExprType::kEmptyStr) {
         BuildExpression(choice_expr, grammar, start_state, end_states);
-        return;
+        return false;
       }
     }
     XGRAMMAR_UNREACHABLE();
   }
 
   if (!nullable && BuildByteStringRuleRefChoices(expr, grammar, start_state, end_states)) {
-    return;
+    return true;
   }
 
   std::vector<int32_t> branch_end_states;
@@ -2003,6 +2010,7 @@ void GrammarFSMBuilderImpl::BuildChoices(
     target_fsm_.AddEpsilonEdge(start_state, nullable_branch_state);
     end_states->push_back(nullable_branch_state);
   }
+  return false;
 }
 
 bool GrammarFSMBuilderImpl::BuildByteStringRuleRefChoices(
@@ -2074,7 +2082,6 @@ bool GrammarFSMBuilderImpl::BuildByteStringRuleRefChoices(
     }
     target_fsm_.AddRuleEdge(state_mapping[prefix_end_states[index]], it->second, branch.rule_id);
   }
-  skip_equivalent_state_merge_ = true;
   return true;
 }
 
