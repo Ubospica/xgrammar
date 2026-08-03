@@ -1141,16 +1141,15 @@ class RuleRefGraphFinder : public GrammarVisitor<std::vector<std::vector<int32_t
 static Result<const FSMWithStartEnd*> GetOrBuildRegexFSM(
     const std::string& regex,
     bool json_string,
-    std::unordered_map<std::string, FSMWithStartEnd>* regex_fsm_cache
+    std::unordered_map<std::string, FSMWithStartEnd>& regex_fsm_cache
 ) {
-  XGRAMMAR_DCHECK(regex_fsm_cache != nullptr) << "regex_fsm_cache cannot be nullptr";
   std::string cache_key;
   cache_key.reserve(regex.size() + 1);
   cache_key.push_back(static_cast<char>(json_string));
   cache_key.append(regex);
 
-  auto cached = regex_fsm_cache->find(cache_key);
-  if (cached != regex_fsm_cache->end()) {
+  auto cached = regex_fsm_cache.find(cache_key);
+  if (cached != regex_fsm_cache.end()) {
     return ResultOk<const FSMWithStartEnd*>(&cached->second);
   }
 
@@ -1161,7 +1160,7 @@ static Result<const FSMWithStartEnd*> GetOrBuildRegexFSM(
   if (build_result.IsErr()) {
     return ResultErr(std::move(build_result).UnwrapErr());
   }
-  cached = regex_fsm_cache->emplace(std::move(cache_key), std::move(build_result).Unwrap()).first;
+  cached = regex_fsm_cache.emplace(std::move(cache_key), std::move(build_result).Unwrap()).first;
   return ResultOk<const FSMWithStartEnd*>(&cached->second);
 }
 
@@ -1174,18 +1173,17 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
 
   std::vector<int32_t> Apply(const Grammar& grammar) final {
     std::unordered_map<std::string, FSMWithStartEnd> regex_fsm_cache;
-    return Apply(grammar, &regex_fsm_cache);
+    return Apply(grammar, regex_fsm_cache);
   }
 
   std::vector<int32_t> Apply(
-      const Grammar& grammar, std::unordered_map<std::string, FSMWithStartEnd>* regex_fsm_cache
+      const Grammar& grammar, std::unordered_map<std::string, FSMWithStartEnd>& regex_fsm_cache
   ) {
     InitGrammar(grammar);
-    regex_fsm_cache_ = regex_fsm_cache;
 
     // Step 1: Find rules that explicitly allow empty string
     std::unordered_set<int32_t> empty_rule_id_set;
-    FindExplicitEmptyRules(&empty_rule_id_set);
+    FindExplicitEmptyRules(&empty_rule_id_set, regex_fsm_cache);
 
     // Step 2: Find rules that indirectly allow empty string. Using the Bellman-Ford algorithm
     // on the rule reference graph.
@@ -1197,7 +1195,10 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
     return result;
   }
 
-  void FindExplicitEmptyRules(std::unordered_set<int32_t>* empty_rule_id_set) {
+  void FindExplicitEmptyRules(
+      std::unordered_set<int32_t>* empty_rule_id_set,
+      std::unordered_map<std::string, FSMWithStartEnd>& regex_fsm_cache
+  ) {
     for (int i = 0; i < static_cast<int>(base_grammar_->NumRules()); ++i) {
       auto rule = base_grammar_->GetRule(i);
       auto grammar_expr = base_grammar_->GetGrammarExpr(rule.body_expr_id);
@@ -1212,7 +1213,7 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
         // state of its automaton. Build errors are reported by GrammarFSMBuilder later.
         const auto& regex = base_grammar_->GetRegexString(grammar_expr);
         const bool json_string = base_grammar_->GetRegexIsJSONString(grammar_expr);
-        auto regex_fsm_result = GetOrBuildRegexFSM(regex, json_string, regex_fsm_cache_);
+        auto regex_fsm_result = GetOrBuildRegexFSM(regex, json_string, regex_fsm_cache);
         if (regex_fsm_result.IsOk()) {
           const auto* regex_fsm = std::move(regex_fsm_result).Unwrap();
           std::unordered_set<int> start_closure{regex_fsm->GetStart()};
@@ -1299,8 +1300,6 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
       }
     }
   }
-
-  std::unordered_map<std::string, FSMWithStartEnd>* regex_fsm_cache_{nullptr};
 };
 
 // Convert a Unicode codepoint to the packed UTF-8 format used by AddCharacterRange.
@@ -2092,7 +2091,7 @@ void GrammarFSMBuilderImpl::BuildRegex(
     const std::string& regex, bool json_string, int start_state, std::vector<int32_t>* end_states
 ) {
   if (regex_fsm_cache_ != nullptr) {
-    auto regex_fsm_result = GetOrBuildRegexFSM(regex, json_string, regex_fsm_cache_);
+    auto regex_fsm_result = GetOrBuildRegexFSM(regex, json_string, *regex_fsm_cache_);
     if (regex_fsm_result.IsErr()) {
       auto error = std::move(regex_fsm_result).UnwrapErr();
       if (rule_name_ != nullptr) {
@@ -3077,7 +3076,7 @@ class GrammarOptimizerImpl {
     result = DeadCodeEliminator::Apply(result);
     result = LookaheadAssertionAnalyzer::Apply(result);
     GrammarFSMBuilderImpl::RegexFSMCache regex_fsm_cache;
-    result->allow_empty_rule_ids = AllowEmptyRuleAnalyzerImpl().Apply(result, &regex_fsm_cache);
+    result->allow_empty_rule_ids = AllowEmptyRuleAnalyzerImpl().Apply(result, regex_fsm_cache);
     ValidateLazyRules(result);
     RepetitionNormalizer::Apply(&result);
     GrammarFSMBuilderImpl::Apply(&result, &regex_fsm_cache);
