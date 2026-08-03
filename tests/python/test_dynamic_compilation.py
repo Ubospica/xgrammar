@@ -245,3 +245,24 @@ def test_preserved_repetition_ranges_match_eager_masks(repeat_range: str, value:
         expected_tokens = bitmask_to_bool_mask(expected_mask, tokenizer_info.vocab_size)
         actual_tokens = bitmask_to_bool_mask(actual_mask, tokenizer_info.vocab_size)
         torch.testing.assert_close(actual_tokens, expected_tokens, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "character_class,value", [("[a-z]", "a"), ("[^b]", "é"), ("[a-zа-я一-龥]", "中")]
+)
+def test_dynamic_single_character_class_masks_match_eager(character_class, value):
+    vocabulary = [">", "<", "a", "ab", "a<", "b", "é", "中", b"\xe4", b"\xe4\xb8", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    grammar = f'root ::= ">" value "<"\nvalue ::= {character_class}'
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_grammar(grammar)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar(grammar)
+
+    expected = _mask_trace(eager, ">" + value + "<")
+    actual = _mask_trace(dynamic, ">" + value + "<")
+    for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
+        assert actual_apply == expected_apply
+        torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
