@@ -1138,6 +1138,33 @@ class RuleRefGraphFinder : public GrammarVisitor<std::vector<std::vector<int32_t
   int32_t cur_rule_id_;
 };
 
+static Result<const FSMWithStartEnd*> GetOrBuildRegexFSM(
+    const std::string& regex,
+    bool json_string,
+    std::unordered_map<std::string, FSMWithStartEnd>* regex_fsm_cache
+) {
+  XGRAMMAR_DCHECK(regex_fsm_cache != nullptr) << "regex_fsm_cache cannot be nullptr";
+  std::string cache_key;
+  cache_key.reserve(regex.size() + 1);
+  cache_key.push_back(static_cast<char>(json_string));
+  cache_key.append(regex);
+
+  auto cached = regex_fsm_cache->find(cache_key);
+  if (cached != regex_fsm_cache->end()) {
+    return ResultOk<const FSMWithStartEnd*>(&cached->second);
+  }
+
+  auto build_result = json_string ? RegexFSMBuilder::BuildWithForbiddenChars(
+                                        regex, GrammarFSMBuilder::JSONStringForbiddenChars()
+                                    )
+                                  : RegexFSMBuilder::Build(regex);
+  if (build_result.IsErr()) {
+    return ResultErr(std::move(build_result).UnwrapErr());
+  }
+  cached = regex_fsm_cache->emplace(std::move(cache_key), std::move(build_result).Unwrap()).first;
+  return ResultOk<const FSMWithStartEnd*>(&cached->second);
+}
+
 /*!
  * \brief Analyzes which rules in a grammar can match the empty string.
  */
@@ -1146,7 +1173,8 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
   AllowEmptyRuleAnalyzerImpl() = default;
 
   std::vector<int32_t> Apply(const Grammar& grammar) final {
-    return Apply(grammar, &local_regex_fsm_cache_);
+    std::unordered_map<std::string, FSMWithStartEnd> regex_fsm_cache;
+    return Apply(grammar, &regex_fsm_cache);
   }
 
   std::vector<int32_t> Apply(
@@ -1184,34 +1212,16 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
         // state of its automaton. Build errors are reported by GrammarFSMBuilder later.
         const auto& regex = base_grammar_->GetRegexString(grammar_expr);
         const bool json_string = base_grammar_->GetRegexIsJSONString(grammar_expr);
-        std::string cache_key;
-        cache_key.reserve(regex.size() + 1);
-        cache_key.push_back(static_cast<char>(json_string));
-        cache_key.append(regex);
-        auto cached = regex_fsm_cache_->find(cache_key);
-        bool allows_empty = false;
-        if (cached == regex_fsm_cache_->end()) {
-          auto regex_fsm_result = json_string
-                                      ? RegexFSMBuilder::BuildWithForbiddenChars(
-                                            regex, GrammarFSMBuilder::JSONStringForbiddenChars()
-                                        )
-                                      : RegexFSMBuilder::Build(regex);
-          if (regex_fsm_result.IsOk()) {
-            cached = regex_fsm_cache_
-                         ->emplace(std::move(cache_key), std::move(regex_fsm_result).Unwrap())
-                         .first;
+        auto regex_fsm_result = GetOrBuildRegexFSM(regex, json_string, regex_fsm_cache_);
+        if (regex_fsm_result.IsOk()) {
+          const auto* regex_fsm = std::move(regex_fsm_result).Unwrap();
+          std::unordered_set<int> start_closure{regex_fsm->GetStart()};
+          regex_fsm->GetFsm().GetEpsilonClosure(&start_closure);
+          if (std::any_of(start_closure.begin(), start_closure.end(), [&](int state) {
+                return regex_fsm->IsEndState(state);
+              })) {
+            empty_rule_id_set->insert(i);
           }
-        }
-        if (cached != regex_fsm_cache_->end()) {
-          const auto& regex_fsm = cached->second;
-          std::unordered_set<int> start_closure{regex_fsm.GetStart()};
-          regex_fsm.GetFsm().GetEpsilonClosure(&start_closure);
-          allows_empty = std::any_of(start_closure.begin(), start_closure.end(), [&](int state) {
-            return regex_fsm.IsEndState(state);
-          });
-        }
-        if (allows_empty) {
-          empty_rule_id_set->insert(i);
         }
         continue;
       }
@@ -1290,7 +1300,6 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
     }
   }
 
-  std::unordered_map<std::string, FSMWithStartEnd> local_regex_fsm_cache_;
   std::unordered_map<std::string, FSMWithStartEnd>* regex_fsm_cache_{nullptr};
 };
 
@@ -1459,10 +1468,8 @@ class GrammarFSMBuilderImpl {
   );
   void AddCharacterClassTransitions(const GrammarExpr& expr, int start_state, int end_state);
   void BuildNegativeCharacterClass(const GrammarExpr& expr, int start_state, int end_state);
-  void AppendFSM(FSMWithStartEnd fsm, int start_state, std::vector<int32_t>* end_states);
-  void AppendCachedFSM(
-      const FSMWithStartEnd& fsm, int start_state, std::vector<int32_t>* end_states
-  );
+  void AppendFSM(FSMWithStartEnd&& fsm, int start_state, std::vector<int32_t>* end_states);
+  void AppendFSM(const FSMWithStartEnd& fsm, int start_state, std::vector<int32_t>* end_states);
   void AddCharacterRange(int from, int to, uint32_t min, uint32_t max);
 
   FSM& target_fsm_;
@@ -2054,7 +2061,7 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::Choices(
 }
 
 void GrammarFSMBuilderImpl::AppendFSM(
-    FSMWithStartEnd fsm, int start_state, std::vector<int32_t>* end_states
+    FSMWithStartEnd&& fsm, int start_state, std::vector<int32_t>* end_states
 ) {
   const bool target_is_empty = target_fsm_.NumStates() == 1 && start_state == 0 &&
                                target_fsm_.GetEdges(0).empty() &&
@@ -2065,17 +2072,10 @@ void GrammarFSMBuilderImpl::AppendFSM(
     return;
   }
 
-  std::vector<int> state_mapping;
-  target_fsm_.AddFSM(fsm.GetFsm(), &state_mapping);
-  target_fsm_.AddEpsilonEdge(start_state, state_mapping[fsm.GetStart()]);
-  end_states->clear();
-  end_states->reserve(fsm.GetEnds().size());
-  for (int end_state : fsm.GetEnds()) {
-    end_states->push_back(state_mapping[end_state]);
-  }
+  AppendFSM(static_cast<const FSMWithStartEnd&>(fsm), start_state, end_states);
 }
 
-void GrammarFSMBuilderImpl::AppendCachedFSM(
+void GrammarFSMBuilderImpl::AppendFSM(
     const FSMWithStartEnd& fsm, int start_state, std::vector<int32_t>* end_states
 ) {
   std::vector<int> state_mapping;
@@ -2091,17 +2091,21 @@ void GrammarFSMBuilderImpl::AppendCachedFSM(
 void GrammarFSMBuilderImpl::BuildRegex(
     const std::string& regex, bool json_string, int start_state, std::vector<int32_t>* end_states
 ) {
-  std::string cache_key;
   if (regex_fsm_cache_ != nullptr) {
-    cache_key.reserve(regex.size() + 1);
-    cache_key.push_back(static_cast<char>(json_string));
-    cache_key.append(regex);
-    const auto cached = regex_fsm_cache_->find(cache_key);
-    if (cached != regex_fsm_cache_->end()) {
-      AppendCachedFSM(cached->second, start_state, end_states);
-      return;
+    auto regex_fsm_result = GetOrBuildRegexFSM(regex, json_string, regex_fsm_cache_);
+    if (regex_fsm_result.IsErr()) {
+      auto error = std::move(regex_fsm_result).UnwrapErr();
+      if (rule_name_ != nullptr) {
+        XGRAMMAR_LOG(FATAL) << "Failed to build the automaton for rule " << *rule_name_
+                            << " with regex " << regex << ": " << error.what();
+      }
+      XGRAMMAR_LOG(FATAL) << "Failed to build the automaton for regex " << regex << ": "
+                          << error.what();
     }
+    AppendFSM(*std::move(regex_fsm_result).Unwrap(), start_state, end_states);
+    return;
   }
+
   auto build_result = json_string ? RegexFSMBuilder::BuildWithForbiddenChars(
                                         regex, GrammarFSMBuilder::JSONStringForbiddenChars()
                                     )
@@ -2115,13 +2119,7 @@ void GrammarFSMBuilderImpl::BuildRegex(
     XGRAMMAR_LOG(FATAL) << "Failed to build the automaton for regex " << regex << ": "
                         << error.what();
   }
-  auto built_fsm = std::move(build_result).Unwrap();
-  if (regex_fsm_cache_ != nullptr) {
-    const auto inserted = regex_fsm_cache_->emplace(std::move(cache_key), std::move(built_fsm));
-    AppendCachedFSM(inserted.first->second, start_state, end_states);
-  } else {
-    AppendFSM(std::move(built_fsm), start_state, end_states);
-  }
+  AppendFSM(std::move(build_result).Unwrap(), start_state, end_states);
 }
 
 void GrammarFSMBuilderImpl::BuildTagDispatch(
