@@ -139,7 +139,8 @@ class TokenMaskCache {
   explicit TokenMaskCache(
       bool dynamic, std::shared_ptr<TagDispatchSlicingCache> tag_dispatch_slicing_cache
   )
-      : dynamic_(dynamic), tag_dispatch_slicing_cache_(std::move(tag_dispatch_slicing_cache)) {}
+      : dynamic_(dynamic),
+        tag_dispatch_slicing_cache_(dynamic ? std::move(tag_dispatch_slicing_cache) : nullptr) {}
 
   /*! \brief Configure cross-grammar rule mask sharing for dynamic generation. */
   void SetRuleLevelCache(
@@ -247,9 +248,7 @@ class CompiledGrammar::Impl {
       bool enable_dynamic_compilation,
       std::shared_ptr<TagDispatchSlicingCache> tag_dispatch_slicing_cache
   )
-      : token_mask_cache(
-            enable_dynamic_compilation, std::move(tag_dispatch_slicing_cache)
-        ) {}
+      : token_mask_cache(enable_dynamic_compilation, std::move(tag_dispatch_slicing_cache)) {}
 
   /*! \brief The adaptive token masks, precomputed or generated on first use. */
   TokenMaskCache token_mask_cache;

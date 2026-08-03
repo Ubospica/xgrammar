@@ -1301,9 +1301,7 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask() {
 
 class TagDispatchSlicingCache {
  public:
-  DynamicBitset Get(
-      std::vector<std::string> patterns, const TokenizerInfo& tokenizer_info
-  );
+  DynamicBitset Get(std::vector<std::string> patterns, const TokenizerInfo& tokenizer_info);
 
   void Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1328,8 +1326,7 @@ DynamicBitset TagDispatchSlicingCache::Get(
 
   const auto& sorted_decoded_vocab = tokenizer_info.GetSortedDecodedVocab();
   DynamicBitset computed(sorted_decoded_vocab.size());
-  for (int32_t token_index = 0;
-       token_index < static_cast<int32_t>(sorted_decoded_vocab.size());
+  for (int32_t token_index = 0; token_index < static_cast<int32_t>(sorted_decoded_vocab.size());
        ++token_index) {
     const auto& token = sorted_decoded_vocab[token_index].second;
     const bool definitely_accepted =
@@ -1523,10 +1520,9 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
     return CompiledGrammar(compiled_grammar_impl);
   }
 
-  auto tag_dispatch_rule_id_to_second_slicing_bitset =
-      ComputeTagDispatchSecondSlicingBitsets(
-          compiled_grammar_impl->grammar, tokenizer_info_, *tag_dispatch_slicing_cache_
-      );
+  auto tag_dispatch_rule_id_to_second_slicing_bitset = ComputeTagDispatchSecondSlicingBitsets(
+      compiled_grammar_impl->grammar, tokenizer_info_, *tag_dispatch_slicing_cache_
+  );
 
   // Step 3. Compute the adaptive token mask cache
   // The token mask cache is computed for these positions in the grammar:
