@@ -229,7 +229,7 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
       }
       // If the repeat count is less than the max repeat count, we can continue to
       // visit the repeat state for another round.
-      if (new_state.repeat_count < max_repeat_count) {
+      if (max_repeat_count == -1 || new_state.repeat_count < max_repeat_count) {
         Enqueue(new_state);
       }
       continue;
@@ -239,14 +239,14 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
 
     // Check if the parent_state sits on a kRepeatRef edge
     bool handled_as_repeat = false;
+    // State merging can place repeat edges from several alternatives on the same source state.
     for (const auto& edge : grammar_->complete_fsm.GetEdges(parent_state.element_id)) {
-      // Because of invariance, a state with a kRepeatRef edge has exactly one outgoing edge.
       if (!edge.IsRepeatRef()) continue;
       auto info = grammar_->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
       if (info.RuleId() != ref_id) continue;
       handled_as_repeat = true;
       int32_t new_count = parent_state.repeat_count + 1;
-      if (new_count >= info.Lower()) {
+      if (new_count >= info.Lower() && (info.Upper() == -1 || new_count <= info.Upper())) {
         Enqueue(ParserState{
             parent_state.rule_id,
             parent_state.sequence_id,
@@ -260,7 +260,7 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
             parent_state.char_budget_deadline
         });
       }
-      if (new_count < info.Upper()) {
+      if (info.Upper() == -1 || new_count < info.Upper()) {
         Enqueue(ParserState{
             parent_state.rule_id,
             parent_state.sequence_id,
@@ -274,7 +274,6 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
             parent_state.char_budget_deadline
         });
       }
-      break;
     }
     if (!handled_as_repeat) {
       Enqueue(parent_state);
@@ -333,8 +332,10 @@ std::pair</* scanable */ bool, /* completable */ bool> EarleyParser::Predict(
       const int32_t& max_repeat_count = element_expr[2];
       // If the current repeat count is less than the max repeat count,
       // we can expand the next rule reference element.
-      XGRAMMAR_DCHECK(state.repeat_count <= max_repeat_count);
-      ExpandNextRuleRefElement(state, grammar_expr, &element_expr, debug_print);
+      XGRAMMAR_DCHECK(max_repeat_count == -1 || state.repeat_count <= max_repeat_count);
+      if (max_repeat_count == -1 || state.repeat_count < max_repeat_count) {
+        ExpandNextRuleRefElement(state, grammar_expr, &element_expr, debug_print);
+      }
       if (state.repeat_count >= min_repeat_count) {
         Enqueue(ParserState{
             state.rule_id,
@@ -724,7 +725,8 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
       target = edge.target;
       ref_rule_id = repeat_info.RuleId();
 
-      if (state.repeat_count >= repeat_info.Lower()) {
+      if (state.repeat_count >= repeat_info.Lower() &&
+          (repeat_info.Upper() == -1 || state.repeat_count <= repeat_info.Upper())) {
         Enqueue(ParserState{
             state.rule_id,
             state.sequence_id,
@@ -738,7 +740,7 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
             state.char_budget_deadline
         });
       }
-      if (state.repeat_count >= repeat_info.Upper()) {
+      if (repeat_info.Upper() != -1 && state.repeat_count >= repeat_info.Upper()) {
         continue;
       }
     } else {
