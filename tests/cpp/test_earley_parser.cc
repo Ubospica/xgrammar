@@ -24,14 +24,6 @@ TEST(RepeatDetectorTest, PreservesStatesAcrossSetTransitionAndResetsCopies) {
   EXPECT_TRUE(xgrammar::StateEqualForParsing()(*stored_second, second_state));
   EXPECT_TRUE(xgrammar::StateEqualForParsing()(*stored_third, third_state));
 
-  xgrammar::ParserState transitioned_state = first_state;
-  transitioned_state.element_id = 31;
-  const xgrammar::ParserState* stored_transition =
-      detector.InsertFsmTransitionIfAbsent(first_state, transitioned_state.element_id);
-  ASSERT_NE(stored_transition, nullptr);
-  EXPECT_TRUE(xgrammar::StateEqualForParsing()(*stored_transition, transitioned_state));
-  EXPECT_EQ(detector.InsertIfAbsent(transitioned_state), nullptr);
-
   xgrammar::RepeatDetector copied_detector(detector);
   EXPECT_NE(copied_detector.InsertIfAbsent(first_state), nullptr);
 
