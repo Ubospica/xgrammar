@@ -14,7 +14,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 
 #include "grammar_builder.h"
@@ -94,12 +93,11 @@ picojson::value ConstStringFormat::ToJSON() const {
 picojson::value JSONSchemaFormat::ToJSON() const {
   picojson::object obj;
   obj["type"] = picojson::value(type);
-  picojson::value schema_val;
-  if (picojson::parse(schema_val, json_schema).empty()) {
-    obj["json_schema"] = schema_val;
-  } else {
-    obj["json_schema"] = picojson::value(json_schema);
-  }
+  // Embed the schema text as a string. ToJSON is only consumed by the converter's
+  // deduplication fingerprint, so reparsing the schema into a JSON value is unnecessary
+  // and would cost a full JSON parse of potentially large schemas at every fingerprinted
+  // ancestor format.
+  obj["json_schema"] = picojson::value(json_schema);
   obj["style"] = picojson::value(style);
   obj["any_order"] = picojson::value(any_order);
   if (max_whitespace_cnt.has_value()) {
@@ -1760,6 +1758,11 @@ class StructuralTagGrammarConverter {
    * \note This method uses serialization to deduplicate identical formats.
    */
   Result<int, ISTError> Visit(const Format& format);
+
+  /*!
+   * \brief Dispatch a Format to the matching VisitSub overload, without fingerprinting.
+   */
+  Result<int, ISTError> VisitDispatch(const Format& format);
   Result<int, ISTError> VisitSub(const ConstStringFormat& format);
   Result<int, ISTError> VisitSub(const JSONSchemaFormat& format);
   Result<int, ISTError> VisitSub(const AnyTextFormat& format);
@@ -1806,11 +1809,9 @@ Result<Grammar, ISTError> StructuralTagGrammarConverter::Convert(const Structura
 ) {
   StructuralTagGrammarConverter converter;
   // The root format is visited exactly once, so fingerprinting the entire format tree cannot
-  // produce a cache hit. Nested formats still go through Visit() and retain deduplication.
-  auto result = std::visit(
-      [&](const auto& format) -> Result<int, ISTError> { return converter.VisitSub(format); },
-      structural_tag.format
-  );
+  // produce a cache hit. Dispatch directly; nested formats still go through Visit() and retain
+  // deduplication.
+  auto result = converter.VisitDispatch(structural_tag.format);
   if (result.IsErr()) {
     return ResultErr(std::move(result).UnwrapErr());
   }
@@ -1827,29 +1828,14 @@ Grammar StructuralTagGrammarConverter::AddRootRuleAndGetGrammar(int ref_rule_id)
   return grammar_builder_.Get(root_rule_id);
 }
 
-Result<int, ISTError> StructuralTagGrammarConverter::Visit(const Format& format) {
-  std::string fingerprint = std::visit(
-      [](const auto& value) {
-        using T = std::decay_t<decltype(value)>;
-        if constexpr (std::is_same_v<T, JSONSchemaFormat>) {
-          // ParseStructuralTag already canonicalizes json_schema. Reusing that representation
-          // avoids reparsing it solely to build the converter's deduplication key.
-          std::string result = "json_schema\n" + value.style + "\n";
-          result.push_back(value.any_order ? '1' : '0');
-          result.push_back('\n');
-          result.append(
-              value.max_whitespace_cnt.has_value() ? std::to_string(*value.max_whitespace_cnt)
-                                                   : std::string("null")
-          );
-          result.push_back('\n');
-          result.append(value.json_schema);
-          return result;
-        } else {
-          return value.ToJSON().serialize();
-        }
-      },
-      format
+Result<int, ISTError> StructuralTagGrammarConverter::VisitDispatch(const Format& format) {
+  return std::visit(
+      [&](const auto& arg) -> Result<int, ISTError> { return VisitSub(arg); }, format
   );
+}
+
+Result<int, ISTError> StructuralTagGrammarConverter::Visit(const Format& format) {
+  std::string fingerprint = FormatToJSONValue(format).serialize();
 
   // Check if we've already processed an identical format
   auto it = serialization_to_rule_id_.find(fingerprint);
@@ -1858,8 +1844,7 @@ Result<int, ISTError> StructuralTagGrammarConverter::Visit(const Format& format)
   }
 
   // Process the format and cache the result
-  auto result =
-      std::visit([&](auto&& arg) -> Result<int, ISTError> { return VisitSub(arg); }, format);
+  auto result = VisitDispatch(format);
   if (result.IsOk()) {
     int rule_id = std::move(result).Unwrap();
     serialization_to_rule_id_[fingerprint] = rule_id;
