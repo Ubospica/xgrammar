@@ -319,7 +319,8 @@ bool RuleLevelCache::Impl::AddTagDispatchSlicingBitset(
     const TagDispatchKey& patterns, const DynamicBitset& bitset
 ) {
   const size_t max_size = ShardMaxSize();
-  const size_t new_item_size = MemorySize(patterns) + MemorySize(bitset);
+  // The patterns are stored in both cache_list and cache.
+  const size_t new_item_size = 2 * MemorySize(patterns) + MemorySize(bitset);
   std::lock_guard<std::mutex> lock(tag_dispatch_cache_.mutex);
   if (max_size != kUnlimitedSize && new_item_size > max_size) {
     return false;
@@ -338,7 +339,7 @@ bool RuleLevelCache::Impl::AddTagDispatchSlicingBitset(
         break;
       }
       tag_dispatch_cache_.current_cache_memory_size -=
-          MemorySize(oldest_it->first) + MemorySize(oldest_it->second);
+          2 * MemorySize(oldest_it->first) + MemorySize(oldest_it->second);
       tag_dispatch_cache_.cache.erase(oldest_it->first);
       tag_dispatch_cache_.cache_list.Erase(oldest_it);
     }
@@ -346,7 +347,7 @@ bool RuleLevelCache::Impl::AddTagDispatchSlicingBitset(
 
   auto new_it = tag_dispatch_cache_.cache_list.PushBack(TagDispatchNodeType(patterns, bitset));
   tag_dispatch_cache_.current_cache_memory_size +=
-      MemorySize(new_it->first) + MemorySize(new_it->second);
+      2 * MemorySize(new_it->first) + MemorySize(new_it->second);
   tag_dispatch_cache_.cache[new_it->first] = new_it.Index();
   return true;
 }
