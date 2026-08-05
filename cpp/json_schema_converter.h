@@ -220,21 +220,17 @@ std::optional<JSONFormat> JSONFormatFromString(const std::string& format);
 class GenerateCacheManager {
  public:
   /*! \brief Add a key-value pair to the cache. */
-  void AddCache(
-      const std::string& key, int format_context, int64_t indentation_context, int32_t rule_id
-  ) {
-    cache_[key][{format_context, indentation_context}] = rule_id;
+  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id) {
+    cache_[key][indentation_context] = rule_id;
   }
 
   /*! \brief Get cached rule id by key. Returns std::nullopt if not found. */
-  std::optional<int32_t> GetCache(
-      const std::string& key, int format_context, int64_t indentation_context
-  ) const {
+  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context) const {
     auto key_it = cache_.find(key);
     if (key_it == cache_.end()) {
       return std::nullopt;
     }
-    auto context_it = key_it->second.find({format_context, indentation_context});
+    auto context_it = key_it->second.find(indentation_context);
     if (context_it != key_it->second.end()) {
       return context_it->second;
     }
@@ -242,23 +238,7 @@ class GenerateCacheManager {
   }
 
  private:
-  struct Context {
-    int format;
-    int64_t indentation;
-
-    bool operator==(const Context& other) const {
-      return format == other.format && indentation == other.indentation;
-    }
-  };
-
-  struct ContextHash {
-    size_t operator()(const Context& context) const {
-      return HashCombine(context.format, context.indentation);
-    }
-  };
-
-  using ContextCache = std::unordered_map<Context, int32_t, ContextHash>;
-  std::unordered_map<std::string, ContextCache> cache_;
+  std::unordered_map<std::string, std::unordered_map<int64_t, int32_t>> cache_;
 };
 
 /*!
@@ -379,14 +359,13 @@ class JSONSchemaConverter {
   virtual void AddBasicRules();
   void AddBasicRules(const std::vector<std::string>& additional_rule_names);
 
-  /*! \brief Get the current output-format context for rule caching. */
-  virtual int GetFormatContext() const;
-
-  /*! \brief Add a key-value pair to the generation cache. */
-  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id);
+  /*! \brief Add a key-value pair to the generation cache. Subclasses can override to adjust the
+   * cache key (e.g. XML formats add their output layer to the key). */
+  virtual void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id);
 
   /*! \brief Get cached value by key. Returns std::nullopt if not found. */
-  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context) const;
+  virtual std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context)
+      const;
 
   /*! \brief Get the indentation context for a schema. */
   int64_t GetCacheContext(const SchemaSpecPtr& spec) const;

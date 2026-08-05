@@ -143,7 +143,27 @@ std::string XMLToolCallingConverter::NextSeparator(bool is_end) {
   return JSONSchemaConverter::NextSeparator(is_end);
 }
 
-int XMLToolCallingConverter::GetFormatContext() const { return std::min(nested_object_level_, 2); }
+std::string XMLToolCallingConverter::LayeredCacheKey(const std::string& key) const {
+  // Levels deeper than 2 are all plain JSON, so they share the same layer.
+  return std::to_string(std::min(nested_object_level_, 2)) + "|" + key;
+}
+
+void XMLToolCallingConverter::AddCache(
+    const std::string& key, int64_t indentation_context, int32_t rule_id
+) {
+  if (!key.empty()) {
+    JSONSchemaConverter::AddCache(LayeredCacheKey(key), indentation_context, rule_id);
+  }
+}
+
+std::optional<int32_t> XMLToolCallingConverter::GetCache(
+    const std::string& key, int64_t indentation_context
+) const {
+  if (key.empty()) {
+    return std::nullopt;
+  }
+  return JSONSchemaConverter::GetCache(LayeredCacheKey(key), indentation_context);
+}
 
 int32_t XMLToolCallingConverter::GenerateString(
     const StringSpec& spec, const std::string& rule_name

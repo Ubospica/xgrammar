@@ -2089,8 +2089,6 @@ int32_t JSONSchemaConverter::GetKeyPatternExcluding(
   return RuleRef(key_rule_id);
 }
 
-int JSONSchemaConverter::GetFormatContext() const { return 0; }
-
 int64_t JSONSchemaConverter::GetCacheContext(const SchemaSpecPtr& spec) const {
   if (!indentation_enabled_) {
     return 0;
@@ -2124,7 +2122,7 @@ void JSONSchemaConverter::AddCache(
     const std::string& key, int64_t indentation_context, int32_t rule_id
 ) {
   if (!key.empty()) {
-    rule_cache_manager_.AddCache(key, GetFormatContext(), indentation_context, rule_id);
+    rule_cache_manager_.AddCache(key, indentation_context, rule_id);
   }
 }
 
@@ -2134,7 +2132,7 @@ std::optional<int32_t> JSONSchemaConverter::GetCache(
   if (key.empty()) {
     return std::nullopt;
   }
-  return rule_cache_manager_.GetCache(key, GetFormatContext(), indentation_context);
+  return rule_cache_manager_.GetCache(key, indentation_context);
 }
 
 int32_t JSONSchemaConverter::GenerateRuleBody(

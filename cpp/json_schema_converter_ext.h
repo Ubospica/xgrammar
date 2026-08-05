@@ -66,7 +66,12 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
   ) override;
 
   std::string NextSeparator(bool is_end = false) override;
-  int GetFormatContext() const override;
+
+  // Cache rules per XML output layer, so that the same schema generates separate rules for the
+  // XML layers and the nested JSON layer.
+  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id) override;
+  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context)
+      const override;
 
   void AddBasicRules() override;
 
@@ -87,6 +92,10 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
 
   std::string XMLValue(const std::string& json_value) const;
   int32_t XMLKeySuffix();
+
+  /*! \brief Prefix the cache key with the current output layer: 0 = root object with XML tags,
+   * 1 = parameter values, 2 = nested JSON. */
+  std::string LayeredCacheKey(const std::string& key) const;
 
   JSONFormat json_format_;
   // Track if we're at the root object level
