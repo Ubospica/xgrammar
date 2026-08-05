@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <queue>
@@ -367,9 +368,6 @@ class EarleyParser {
   /*! \brief The grammar to be parsed. */
   Grammar grammar_;
 
-  /*! \brief Direct view of the shared complete-FSM edges. */
-  const Compact2DArray<FSMEdge>* complete_fsm_edges_;
-
   /*! \brief In this round of advancing, check if the stop token can be accepted. */
   bool tmp_accept_stop_token_ = false;
 
@@ -403,7 +401,10 @@ class EarleyParser {
   /*! \brief Check if the stop token is accepted. */
   bool stop_token_is_accepted_ = false;
 
-  /*! \brief Grammar-wide parser features owned by the compiled grammar. */
+  /*! \brief Parser features built only when the caller does not provide them. */
+  std::shared_ptr<const EarleyParserFeatures> owned_features_;
+
+  /*! \brief Grammar-wide features used by this parser. */
   const EarleyParserFeatures& features_;
 
   /*! \brief The index of the LLM token currently being accepted, set by the matcher; -1
@@ -682,11 +683,12 @@ class EarleyParser {
    * \param grammar The grammar to be parsed. It must be optimized.
    * \param initial_state The state to start parsing from. If not provided, parsing starts
    * from the root rule of the grammar.
+   * \param features Shared parser features. If not provided, they are built from the grammar.
    */
   explicit EarleyParser(
       const Grammar& grammar,
-      std::optional<ParserState> initial_state,
-      const EarleyParserFeatures& features
+      std::optional<ParserState> initial_state = std::nullopt,
+      const EarleyParserFeatures* features = nullptr
   );
 
   /*!

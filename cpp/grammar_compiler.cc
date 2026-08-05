@@ -339,7 +339,7 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
       bool is_root_rule,
       const EarleyParserFeatures& features
   )
-      : EarleyParser(grammar, init_state, features),
+      : EarleyParser(grammar, init_state, &features),
         init_rule_id_(init_state.rule_id),
         initial_state_(init_state),
         is_root_rule_(is_root_rule),

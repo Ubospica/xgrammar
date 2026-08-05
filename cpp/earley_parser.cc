@@ -31,7 +31,7 @@ bool EarleyParser::CompletionConsumedMarker(const ParserState& state) const {
     return true;
   }
   XGRAMMAR_DCHECK(grammar_->per_rule_fsms[state.rule_id].has_value());
-  return (*complete_fsm_edges_)[state.element_id].size() == 0;
+  return grammar_->complete_fsm.GetEdges(state.element_id).size() == 0;
 }
 
 std::vector<CaptureOccurrence> EarleyParser::CollectStopCaptureTargets(const ParserState& state
@@ -214,7 +214,7 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
 
     // Check if the parent_state sits on a kRepeatRef edge
     bool handled_as_repeat = false;
-    for (const auto& edge : (*complete_fsm_edges_)[parent_state.element_id]) {
+    for (const auto& edge : grammar_->complete_fsm.GetEdges(parent_state.element_id)) {
       // Because of invariance, a state with a kRepeatRef edge has exactly one outgoing edge.
       if (!edge.IsRepeatRef()) continue;
       auto info = grammar_->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
@@ -504,11 +504,13 @@ EarleyParserFeatures::EarleyParserFeatures(const Grammar& grammar)
 EarleyParser::EarleyParser(
     const Grammar& grammar,
     std::optional<ParserState> initial_state,
-    const EarleyParserFeatures& features
+    const EarleyParserFeatures* features
 )
     : grammar_(grammar),
-      complete_fsm_edges_(&grammar_->complete_fsm.GetEdges()),
-      features_(features) {
+      owned_features_(
+          features == nullptr ? std::make_shared<const EarleyParserFeatures>(grammar) : nullptr
+      ),
+      features_(features == nullptr ? *owned_features_ : *features) {
   if (!grammar->optimized) {
     XGRAMMAR_LOG(FATAL) << "The grammar is not optimized. Please optimize the grammar before using "
                            "the Earley parser.";
@@ -687,7 +689,7 @@ void EarleyParser::ExpandNextRuleRefElement(
 void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool debug_print) {
   XGRAMMAR_DCHECK(state.rule_id != -1 && grammar_->per_rule_fsms[state.rule_id].has_value());
   // Add the rule reference pairs, and enqueue the epsilon edges.
-  for (const auto& edge : (*complete_fsm_edges_)[state.element_id]) {
+  for (const auto& edge : grammar_->complete_fsm.GetEdges(state.element_id)) {
     if (edge.IsEpsilon()) {
       Enqueue(ParserState{
           state.rule_id,
@@ -1144,7 +1146,7 @@ void EarleyParser::AdvanceCharacterClassStar(
 
 void EarleyParser::AdvanceFsm(const ParserState& state, const uint8_t ch) {
   XGRAMMAR_DCHECK(state.rule_id != -1 && grammar_->per_rule_fsms[state.rule_id].has_value());
-  for (const auto& edge : (*complete_fsm_edges_)[state.element_id]) {
+  for (const auto& edge : grammar_->complete_fsm.GetEdges(state.element_id)) {
     if ((!edge.IsCharRange()) || ch < edge.min || ch > edge.max) {
       continue;
     }
@@ -1165,7 +1167,7 @@ void EarleyParser::ScanAtomicToken(const ParserState& state, int32_t token_id) {
   if (state.rule_id == -1) return;
   XGRAMMAR_DCHECK(grammar_->per_rule_fsms[state.rule_id].has_value());
   const auto& current_fsm = grammar_->per_rule_fsms[state.rule_id].value();
-  for (const auto& edge : (*complete_fsm_edges_)[state.element_id]) {
+  for (const auto& edge : grammar_->complete_fsm.GetEdges(state.element_id)) {
     bool matched = false;
     if (edge.IsToken()) {
       auto info = current_fsm.GetFsm().GetFsm().GetTokenEdgeInfo(edge.GetAuxIndex());

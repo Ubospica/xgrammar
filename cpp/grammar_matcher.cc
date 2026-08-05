@@ -467,7 +467,7 @@ class GrammarMatcher::Impl : public EarleyParser {
       std::optional<float> default_temperature = std::nullopt
   )
       : EarleyParser(
-            compiled_grammar->grammar, std::nullopt, compiled_grammar->earley_parser_features
+            compiled_grammar->grammar, std::nullopt, &compiled_grammar->earley_parser_features
         ),
         compiled_grammar_(compiled_grammar),
         tokenizer_info_(compiled_grammar->tokenizer_info),
