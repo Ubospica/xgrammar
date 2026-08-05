@@ -271,6 +271,59 @@ class RepeatDetector {
   void Clear();
 };
 
+/*! \brief The identity and budget context of a completed rule occurrence. */
+struct RuleCompletionContext {
+  int32_t rule_id;
+  int32_t rule_start_pos;
+  int32_t budget_deadline;
+  int32_t char_budget_deadline;
+
+  bool operator==(const RuleCompletionContext& other) const {
+    return rule_id == other.rule_id && rule_start_pos == other.rule_start_pos &&
+           budget_deadline == other.budget_deadline &&
+           char_budget_deadline == other.char_budget_deadline;
+  }
+};
+
+struct RuleCompletionContextHash {
+  size_t operator()(const RuleCompletionContext& context) const {
+    return HashCombine(
+        context.rule_id,
+        context.rule_start_pos,
+        context.budget_deadline,
+        context.char_budget_deadline
+    );
+  }
+};
+
+/*! \brief A parent state waiting for a referenced rule to complete in a specific budget context. */
+struct CompletionParentState {
+  int32_t completed_rule_id;
+  int32_t completed_rule_budget_deadline;
+  int32_t completed_rule_char_budget_deadline;
+  ParserState parent_state;
+
+  bool Matches(int32_t rule_id, int32_t budget_deadline, int32_t char_budget_deadline) const {
+    return completed_rule_id == rule_id && completed_rule_budget_deadline == budget_deadline &&
+           completed_rule_char_budget_deadline == char_budget_deadline;
+  }
+
+  bool Matches(const ParserState& completed_state) const {
+    return Matches(
+        completed_state.rule_id,
+        completed_state.budget_deadline,
+        completed_state.char_budget_deadline
+    );
+  }
+
+  bool operator==(const CompletionParentState& other) const {
+    return completed_rule_id == other.completed_rule_id &&
+           completed_rule_budget_deadline == other.completed_rule_budget_deadline &&
+           completed_rule_char_budget_deadline == other.completed_rule_char_budget_deadline &&
+           StateEqualForParsing()(parent_state, other.parent_state);
+  }
+};
+
 /*! \brief A concrete occurrence of a captured rule in an Earley parent chain. */
 struct CaptureOccurrence {
   /*! \brief The id of the captured rule. */
@@ -333,10 +386,9 @@ class EarleyParser {
   std::vector<bool> is_completed_;
 
   /*!
-   * \brief rule_id_to_completable_states[i][j] is the i pos j rule_id states. Earley
-   * parser needs it to complete.
+   * \brief Parent states waiting for referenced rules at each input position.
    */
-  Compact2DArray<std::pair<int32_t, ParserState>> rule_id_to_completable_states_;
+  Compact2DArray<CompletionParentState> rule_id_to_completable_states_;
 
   /*!
    * \brief The states history. state_stack[i] is a vector storing the states after accepting the
@@ -730,7 +782,7 @@ class EarleyParser {
 
   /*! \brief Push a temporary parser row for token-mask checking. */
   void PushStatesToCheck(const std::vector<ParserState>& states, bool completed) {
-    rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
+    rule_id_to_completable_states_.PushBack(std::vector<CompletionParentState>());
     is_completed_.push_back(completed);
     scanable_state_history_.PushBack(states);
     if (capture_tracking_) {
