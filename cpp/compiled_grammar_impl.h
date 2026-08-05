@@ -46,8 +46,6 @@ XGRAMMAR_MEMBER_TABLE(
     &EarleyParserFeatures::has_hidden_capture_rules
 );
 
-class TagDispatchSlicingCache;
-
 /*!
  * \brief Preprocessed information, for a given specific ParserState, divides the token set
  * into three categories: accepted, rejected, and uncertain.
@@ -136,11 +134,7 @@ class TokenMaskCache {
    * \brief Construct the cache with the mask generation mode.
    * \param dynamic Whether missing token masks should be generated on first use.
    */
-  explicit TokenMaskCache(
-      bool dynamic, std::shared_ptr<TagDispatchSlicingCache> tag_dispatch_slicing_cache
-  )
-      : dynamic_(dynamic),
-        tag_dispatch_slicing_cache_(dynamic ? std::move(tag_dispatch_slicing_cache) : nullptr) {}
+  explicit TokenMaskCache(bool dynamic) : dynamic_(dynamic) {}
 
   /*! \brief Configure cross-grammar rule mask sharing for dynamic generation. */
   void SetRuleLevelCache(
@@ -187,9 +181,6 @@ class TokenMaskCache {
   /*! \brief Tag-dispatch data computed on first use in dynamic mode. */
   std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset_;
 
-  /*! \brief Compiler-wide cache for equivalent tag-dispatch slicing bitsets. */
-  std::shared_ptr<TagDispatchSlicingCache> tag_dispatch_slicing_cache_;
-
   /*! \brief Protects on-demand token mask lookup and insertion. */
   mutable std::mutex mutex_;
 
@@ -210,24 +201,6 @@ class TokenMaskCache {
 };
 
 /*!
- * \brief Compute the bitset of tokens that are definitely accepted since the second character
- * for a tag-dispatch rule.
- */
-DynamicBitset ComputeTagDispatchSecondSlicingBitset(
-    const Grammar& grammar,
-    const TokenizerInfo& tokenizer_info,
-    int32_t rule_id,
-    TagDispatchSlicingCache& tag_dispatch_slicing_cache
-);
-
-/*! \brief Compute the second-slicing bitsets for all tag-dispatch rules. */
-std::unordered_map<int32_t, DynamicBitset> ComputeTagDispatchSecondSlicingBitsets(
-    const Grammar& grammar,
-    const TokenizerInfo& tokenizer_info,
-    TagDispatchSlicingCache& tag_dispatch_slicing_cache
-);
-
-/*!
  * \brief All information that we need to match tokens in the tokenizer to the specified grammar.
  * It is the result of preprocessing.
  * \sa xgrammar::GrammarMatcher
@@ -244,11 +217,7 @@ class CompiledGrammar::Impl {
   Impl() = default;
 
   /*! \brief Construct with the token mask generation mode. \sa TokenMaskCache */
-  explicit Impl(
-      bool enable_dynamic_compilation,
-      std::shared_ptr<TagDispatchSlicingCache> tag_dispatch_slicing_cache
-  )
-      : token_mask_cache(enable_dynamic_compilation, std::move(tag_dispatch_slicing_cache)) {}
+  explicit Impl(bool enable_dynamic_compilation) : token_mask_cache(enable_dynamic_compilation) {}
 
   /*! \brief The adaptive token masks, precomputed or generated on first use. */
   TokenMaskCache token_mask_cache;
