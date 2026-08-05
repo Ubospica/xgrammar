@@ -11,7 +11,6 @@
 #include <limits>
 #include <optional>
 #include <ostream>
-#include <queue>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -22,38 +21,6 @@
 #include "xgrammar/grammar.h"
 
 namespace xgrammar {
-
-struct ParserState;
-
-class ReusableStatePointerQueue {
- public:
-  bool empty() const { return head_ == entries_.size(); }
-
-  const ParserState* front() const { return entries_[head_]; }
-
-  void pop() {
-    ++head_;
-    if (empty()) {
-      clear();
-    }
-  }
-
-  void push(const ParserState* state) {
-    if (empty()) {
-      clear();
-    }
-    entries_.push_back(state);
-  }
-
-  void clear() {
-    entries_.clear();
-    head_ = 0;
-  }
-
- private:
-  std::vector<const ParserState*> entries_;
-  size_t head_ = 0;
-};
 
 /*!
  * \brief The state of the Earley parser.
@@ -313,15 +280,6 @@ class RepeatDetector {
     return InsertInSet(state);
   }
 
-  /*! \brief Insert a copy of an FSM state with a new element id. */
-  const ParserState* InsertFsmTransitionIfAbsent(
-      const ParserState& state, int32_t target_element_id
-  ) {
-    ParserState transitioned = state;
-    transitioned.element_id = target_element_id;
-    return InsertIfAbsent(transitioned);
-  }
-
   /*! \brief Reset the detector. */
   void Clear() {
     if (using_set_) {
@@ -439,7 +397,7 @@ class EarleyParser {
   std::vector<const ParserState*> tmp_states_to_be_added_;
 
   /*! \brief Stable pointers to visited states awaiting prediction/completion. */
-  ReusableStatePointerQueue tmp_process_state_queue_;
+  std::vector<const ParserState*> tmp_pending_states_;
 
   /*! \brief The class is used to check if a state has been added into the queue. */
   RepeatDetector tmp_states_visited_in_queue_;
@@ -625,6 +583,9 @@ class EarleyParser {
    */
   std::pair<bool, bool> Predict(const ParserState& state, bool debug_print = false);
 
+  /*! \brief Expand pending states through prediction and completion. */
+  void ExpandPendingStates(bool debug_print = false);
+
   /*! \brief The initial state expanded from the root rule of the grammar. */
   ParserState RootInitialState() const;
 
@@ -718,7 +679,7 @@ class EarleyParser {
    */
   void Enqueue(const ParserState& state) {
     if (const ParserState* inserted = tmp_states_visited_in_queue_.InsertIfAbsent(state)) {
-      tmp_process_state_queue_.push(inserted);
+      tmp_pending_states_.push_back(inserted);
     }
   }
 
@@ -728,20 +689,6 @@ class EarleyParser {
    */
   void EnqueueWithoutProcessing(const ParserState& state) {
     if (const ParserState* inserted = tmp_states_visited_in_queue_.InsertIfAbsent(state)) {
-      tmp_states_to_be_added_.push_back(inserted);
-    }
-  }
-
-  void EnqueueFsmTransition(const ParserState& state, int32_t target_element_id) {
-    if (const ParserState* inserted =
-            tmp_states_visited_in_queue_.InsertFsmTransitionIfAbsent(state, target_element_id)) {
-      tmp_process_state_queue_.push(inserted);
-    }
-  }
-
-  void EnqueueFsmTransitionWithoutProcessing(const ParserState& state, int32_t target_element_id) {
-    if (const ParserState* inserted =
-            tmp_states_visited_in_queue_.InsertFsmTransitionIfAbsent(state, target_element_id)) {
       tmp_states_to_be_added_.push_back(inserted);
     }
   }

@@ -26,10 +26,28 @@ using GrammarExpr = Grammar::Impl::GrammarExpr;
 bool EarleyParser::IsCompleted() const { return is_completed_.back(); }
 
 void EarleyParser::ClearTemporaryContainers() {
-  tmp_process_state_queue_.clear();
+  tmp_pending_states_.clear();
   tmp_states_to_be_added_.clear();
   tmp_states_visited_in_queue_.Clear();
   tmp_completed_lazy_occurrences_.clear();
+}
+
+void EarleyParser::ExpandPendingStates(bool debug_print) {
+  size_t process_index = 0;
+  while (process_index < tmp_pending_states_.size()) {
+    const ParserState& state = *tmp_pending_states_[process_index++];
+    if (process_index == tmp_pending_states_.size()) {
+      tmp_pending_states_.clear();
+      process_index = 0;
+    }
+    auto [scanable, completable] = Predict(state, debug_print);
+    if (completable) {
+      Complete(state, debug_print);
+    }
+    if (scanable) {
+      tmp_states_to_be_added_.push_back(&state);
+    }
+  }
 }
 
 bool EarleyParser::CompletionConsumedMarker(const ParserState& state) const {
@@ -388,8 +406,8 @@ void EarleyParser::Scan(const ParserState& state, const uint8_t ch) {
 */
 bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   // Initialize the containers.
-  XGRAMMAR_DCHECK(tmp_process_state_queue_.empty())
-      << "The tmp_process_state_queue_ should be empty before the scan.";
+  XGRAMMAR_DCHECK(tmp_pending_states_.empty())
+      << "The tmp_pending_states_ should be empty before the scan.";
   ClearTemporaryContainers();
   tmp_accept_stop_token_ = false;
   if (has_char_budget_rules_) {
@@ -406,7 +424,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   }
 
   // Check if the character is accepted.
-  if (tmp_process_state_queue_.empty() && tmp_states_to_be_added_.empty()) {
+  if (tmp_pending_states_.empty() && tmp_states_to_be_added_.empty()) {
     if (has_char_budget_rules_) {
       char_count_history_.pop_back();
     }
@@ -419,17 +437,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
-  while (!tmp_process_state_queue_.empty()) {
-    const ParserState& state = *tmp_process_state_queue_.front();
-    tmp_process_state_queue_.pop();
-    auto [scanable, completable] = Predict(state, debug_print);
-    if (completable) {
-      Complete(state, debug_print);
-    }
-    if (scanable) {
-      tmp_states_to_be_added_.push_back(&state);
-    }
-  }
+  ExpandPendingStates(debug_print);
 
   // Check if the grammar is completed, and add the scannable states to the history.
   if (!tmp_completed_lazy_occurrences_.empty()) {
@@ -551,17 +559,7 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
-  while (!tmp_process_state_queue_.empty()) {
-    const ParserState& state = *tmp_process_state_queue_.front();
-    tmp_process_state_queue_.pop();
-    auto [scanable, completable] = Predict(state);
-    if (completable) {
-      Complete(state);
-    }
-    if (scanable) {
-      tmp_states_to_be_added_.push_back(&state);
-    }
-  }
+  ExpandPendingStates();
   if (!tmp_completed_lazy_occurrences_.empty()) {
     RemoveCommittedLazyStates();
   }
@@ -586,7 +584,7 @@ void EarleyParser::Reset() {
   char_budget_entry_history_.clear();
   tmp_char_budget_entered_ = false;
   capture_recording_ = false;
-  XGRAMMAR_DCHECK(tmp_process_state_queue_.empty());
+  XGRAMMAR_DCHECK(tmp_pending_states_.empty());
   PushStateAndExpand(RootInitialState());
 }
 
@@ -1150,11 +1148,13 @@ void EarleyParser::AdvanceFsm(const ParserState& state, const uint8_t ch) {
     if ((!edge.IsCharRange()) || ch < edge.min || ch > edge.max) {
       continue;
     }
+    ParserState transitioned_state = state;
+    transitioned_state.element_id = edge.target;
     const uint8_t flags = GetFsmStateFlags(state.rule_id, edge.target);
     if (!(flags & kFsmStateNonTerminal) && !(flags & kFsmStateEnd) && (flags & kFsmStateScanable)) {
-      EnqueueFsmTransitionWithoutProcessing(state, edge.target);
+      EnqueueWithoutProcessing(transitioned_state);
     } else {
-      EnqueueFsmTransition(state, edge.target);
+      Enqueue(transitioned_state);
     }
   }
 }
@@ -1187,8 +1187,8 @@ void EarleyParser::ScanAtomicToken(const ParserState& state, int32_t token_id) {
 bool EarleyParser::AdvanceAtomicToken(
     int32_t token_id, bool debug_print, int32_t token_char_count
 ) {
-  XGRAMMAR_DCHECK(tmp_process_state_queue_.empty())
-      << "The tmp_process_state_queue_ should be empty before AdvanceAtomicToken.";
+  XGRAMMAR_DCHECK(tmp_pending_states_.empty())
+      << "The tmp_pending_states_ should be empty before AdvanceAtomicToken.";
   ClearTemporaryContainers();
   tmp_accept_stop_token_ = false;
   if (has_char_budget_rules_) {
@@ -1202,7 +1202,7 @@ bool EarleyParser::AdvanceAtomicToken(
     }
     ScanAtomicToken(state, token_id);
   }
-  if (tmp_process_state_queue_.empty() && tmp_states_to_be_added_.empty()) {
+  if (tmp_pending_states_.empty() && tmp_states_to_be_added_.empty()) {
     if (has_char_budget_rules_) {
       char_count_history_.pop_back();
     }
@@ -1213,17 +1213,7 @@ bool EarleyParser::AdvanceAtomicToken(
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
-  while (!tmp_process_state_queue_.empty()) {
-    const ParserState& state = *tmp_process_state_queue_.front();
-    tmp_process_state_queue_.pop();
-    auto [scanable, completable] = Predict(state, debug_print);
-    if (completable) {
-      Complete(state, debug_print);
-    }
-    if (scanable) {
-      tmp_states_to_be_added_.push_back(&state);
-    }
-  }
+  ExpandPendingStates(debug_print);
   if (!tmp_completed_lazy_occurrences_.empty()) {
     RemoveCommittedLazyStates();
   }
