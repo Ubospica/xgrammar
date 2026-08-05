@@ -361,7 +361,6 @@ inline int32_t Compact2DArray<DataType>::PushBackIndirect(
     const std::vector<const DataType*>& new_data
 ) {
   CheckCanAppendData(new_data.size());
-  data_.reserve(data_.size() + new_data.size());
   for (const DataType* element : new_data) {
     data_.push_back(*element);
   }
