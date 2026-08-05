@@ -84,8 +84,9 @@ struct AdaptiveTokenMask {
   std::string Print(const TokenizerInfo& tokenizer_info) const;
 
   friend std::size_t MemorySize(const AdaptiveTokenMask& mask) {
-    return MemorySize(mask.uncertain_indices) + MemorySize(mask.accepted_indices) +
-           MemorySize(mask.rejected_indices) + MemorySize(mask.accepted_bitset);
+    return sizeof(int32_t) * (mask.uncertain_indices.capacity() + mask.accepted_indices.capacity() +
+                              mask.rejected_indices.capacity()) +
+           MemorySize(mask.accepted_bitset);
   }
 };
 
