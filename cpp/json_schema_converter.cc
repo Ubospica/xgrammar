@@ -773,6 +773,10 @@ Result<SchemaSpecPtr, SchemaError> SchemaParser::Parse(
     std::optional<std::string> default_type
 ) {
   std::string cache_key = ComputeCacheKey(schema);
+  if (default_type.has_value() && schema.is<picojson::object>() &&
+      schema.get<picojson::object>().count("type") == 0) {
+    cache_key += "|default_type=" + *default_type;
+  }
   if (schema_cache_.count(cache_key)) {
     return ResultOk(schema_cache_[cache_key]);
   }

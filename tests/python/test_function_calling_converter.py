@@ -57,20 +57,53 @@ def _check_glm_grammar(schema: dict, instance: str, accepted: bool):
     check_grammar_with_instance(ebnf_grammar, instance, accepted)
 
 
-def test_qwen_xml_object_cache_keeps_nested_context():
+def _make_xml_parameter(json_format: str, name: str, value: str) -> str:
+    if json_format == "qwen_xml":
+        return f"<parameter={name}>{value}</parameter>"
+    if json_format == "minimax_xml":
+        return f'<parameter name="{name}">{value}</parameter>'
+    if json_format == "deepseek_xml":
+        return f'<｜DSML｜parameter name="{name}" string="true">' f"{value}</｜DSML｜parameter>"
+    if json_format == "glm_xml":
+        return f"<arg_key>{name}</arg_key><arg_value>{value}</arg_value>"
+    raise ValueError(f"Unsupported XML format: {json_format}")
+
+
+@pytest.mark.parametrize("json_format", ["qwen_xml", "minimax_xml", "deepseek_xml", "glm_xml"])
+@pytest.mark.parametrize(
+    "payload_schema, payload_value, invalid_payload_value",
+    [
+        ({"type": "object"}, '{"value":[1,true]}', "[]"),
+        ({"type": "array"}, '[1,{"value":2}]', "{}"),
+    ],
+    ids=["object", "array"],
+)
+def test_xml_container_cache_keeps_nested_json_context(
+    json_format: str, payload_schema: dict, payload_value: str, invalid_payload_value: str
+):
     schema = {
         "type": "object",
-        "properties": {"payload": {"type": "object"}},
+        "properties": {"payload": payload_schema},
         "required": ["payload"],
         "additionalProperties": False,
     }
-    grammar = _json_schema_to_ebnf(schema, json_format="qwen_xml")
-    assert _is_grammar_accept_string(grammar, "<parameter=payload>{}</parameter>")
-    assert _is_grammar_accept_string(grammar, '<parameter=payload>{"value":[1,true]}</parameter>')
-    assert not _is_grammar_accept_string(grammar, "<parameter=payload></parameter>")
+    grammar = _json_schema_to_ebnf(schema, json_format=json_format)
+    assert _is_grammar_accept_string(
+        grammar, _make_xml_parameter(json_format, "payload", payload_value)
+    )
+    assert not _is_grammar_accept_string(
+        grammar, _make_xml_parameter(json_format, "payload", invalid_payload_value)
+    )
+    assert not _is_grammar_accept_string(
+        grammar,
+        _make_xml_parameter(
+            json_format, "payload", _make_xml_parameter(json_format, "nested", "1")
+        ),
+    )
 
 
-def test_qwen_xml_rule_cache_separates_outer_xml_from_nested_json():
+@pytest.mark.parametrize("json_format", ["qwen_xml", "minimax_xml", "deepseek_xml", "glm_xml"])
+def test_xml_rule_cache_separates_outer_xml_from_nested_json(json_format: str):
     repeated_schema = {"type": "string", "minLength": 2, "maxLength": 4}
     schema = {
         "type": "object",
@@ -86,12 +119,16 @@ def test_qwen_xml_rule_cache_separates_outer_xml_from_nested_json():
         "required": ["outer", "payload"],
         "additionalProperties": False,
     }
-    grammar = _json_schema_to_ebnf(schema, json_format="qwen_xml")
+    grammar = _json_schema_to_ebnf(schema, json_format=json_format)
     assert _is_grammar_accept_string(
-        grammar, '<parameter=outer>ab</parameter><parameter=payload>{"inner":"cd"}</parameter>'
+        grammar,
+        _make_xml_parameter(json_format, "outer", "ab")
+        + _make_xml_parameter(json_format, "payload", '{"inner":"cd"}'),
     )
     assert not _is_grammar_accept_string(
-        grammar, '<parameter=outer>ab</parameter><parameter=payload>{"inner":cd}</parameter>'
+        grammar,
+        _make_xml_parameter(json_format, "outer", "ab")
+        + _make_xml_parameter(json_format, "payload", '{"inner":cd}'),
     )
 
 
