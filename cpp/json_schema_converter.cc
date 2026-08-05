@@ -1767,22 +1767,30 @@ Grammar JSONSchemaConverter::Convert(const SchemaSpecPtr& spec) {
 void JSONSchemaConverter::AddBasicRules() { AddBasicRules({}); }
 
 void JSONSchemaConverter::AddBasicRules(const std::vector<std::string>& additional_rule_names) {
-  std::vector<std::string> basic_rule_names = {
-      kBasicEscape,
-      kBasicStringSub,
-      kBasicAny,
-      kBasicInteger,
-      kBasicNumber,
-      kBasicString,
-      kBasicBoolean,
-      kBasicNull,
-      kBasicArray,
-      kBasicObject,
+  auto any_spec = SchemaSpec::Make(AnySpec{}, "", kBasicAny);
+  ArraySpec array;
+  array.allow_additional_items = true;
+  array.additional_items = any_spec;
+  ObjectSpec object;
+  object.allow_additional_properties = true;
+  object.additional_properties_schema = any_spec;
+  std::vector<SchemaSpecPtr> basic_specs = {
+      any_spec,
+      SchemaSpec::Make(IntegerSpec{}, "{\"type\":\"integer\"}", kBasicInteger),
+      SchemaSpec::Make(NumberSpec{}, "{\"type\":\"number\"}", kBasicNumber),
+      SchemaSpec::Make(StringSpec{}, "{\"type\":\"string\"}", kBasicString),
+      SchemaSpec::Make(BooleanSpec{}, "{\"type\":\"boolean\"}", kBasicBoolean),
+      SchemaSpec::Make(NullSpec{}, "{\"type\":\"null\"}", kBasicNull),
+      SchemaSpec::Make(std::move(array), "{\"type\":\"array\"}", kBasicArray),
+      SchemaSpec::Make(std::move(object), "{\"type\":\"object\"}", kBasicObject),
   };
-  basic_rule_names.insert(
-      basic_rule_names.end(), additional_rule_names.begin(), additional_rule_names.end()
-  );
-  for (const auto& name : basic_rule_names) {
+
+  builder_.AddEmptyRule(kBasicEscape);
+  builder_.AddEmptyRule(kBasicStringSub);
+  for (const auto& spec : basic_specs) {
+    builder_.AddEmptyRule(spec->rule_name_hint);
+  }
+  for (const auto& name : additional_rule_names) {
     builder_.AddEmptyRule(name);
   }
   AddHelperRules();
@@ -1807,51 +1815,12 @@ void JSONSchemaConverter::AddBasicRules(const std::vector<std::string>& addition
     colon_expr_id_ = Sequence({whitespace, ByteString(":"), whitespace});
   }
 
-  // basic_any - use "{}" as the cache key for empty schema
-  auto any_spec = SchemaSpec::Make(AnySpec{}, "{}", kBasicAny);
-  int64_t recursive_context = GetCacheContext(any_spec);
-  AddCache("{}", recursive_context, builder_.GetRuleId(kBasicAny));
-  builder_.UpdateRuleBody(kBasicAny, GenerateAny(std::get<AnySpec>(any_spec->spec), kBasicAny));
-
-  // basic_integer - cache_key matches SchemaParser::ComputeCacheKey for {"type": "integer"}
-  constexpr const char* kIntegerCacheKey = "{\"type\":\"integer\"}";
-  AddCache(kIntegerCacheKey, 0, builder_.GetRuleId(kBasicInteger));
-  builder_.UpdateRuleBody(kBasicInteger, GenerateInteger(IntegerSpec{}, kBasicInteger));
-
-  // basic_number - cache_key matches SchemaParser::ComputeCacheKey for {"type": "number"}
-  constexpr const char* kNumberCacheKey = "{\"type\":\"number\"}";
-  AddCache(kNumberCacheKey, 0, builder_.GetRuleId(kBasicNumber));
-  builder_.UpdateRuleBody(kBasicNumber, GenerateNumber(NumberSpec{}, kBasicNumber));
-
-  constexpr const char* kStringCacheKey = "{\"type\":\"string\"}";
-  AddCache(kStringCacheKey, 0, builder_.GetRuleId(kBasicString));
-  builder_.UpdateRuleBody(kBasicString, Sequence({ByteString("\""), RuleRef(kBasicStringSub)}));
-
-  // basic_boolean - cache_key matches SchemaParser::ComputeCacheKey for {"type": "boolean"}
-  constexpr const char* kBooleanCacheKey = "{\"type\":\"boolean\"}";
-  AddCache(kBooleanCacheKey, 0, builder_.GetRuleId(kBasicBoolean));
-  builder_.UpdateRuleBody(kBasicBoolean, GenerateBoolean(BooleanSpec{}, kBasicBoolean));
-
-  // basic_null - cache_key matches SchemaParser::ComputeCacheKey for {"type": "null"}
-  constexpr const char* kNullCacheKey = "{\"type\":\"null\"}";
-  AddCache(kNullCacheKey, 0, builder_.GetRuleId(kBasicNull));
-  builder_.UpdateRuleBody(kBasicNull, GenerateNull(NullSpec{}, kBasicNull));
-
-  // basic_array - cache_key matches SchemaParser::ComputeCacheKey for {"type": "array"}
-  constexpr const char* kArrayCacheKey = "{\"type\":\"array\"}";
-  ArraySpec array_spec;
-  array_spec.allow_additional_items = true;
-  array_spec.additional_items = any_spec;
-  AddCache(kArrayCacheKey, recursive_context, builder_.GetRuleId(kBasicArray));
-  builder_.UpdateRuleBody(kBasicArray, GenerateArray(array_spec, kBasicArray));
-
-  // basic_object - cache_key matches SchemaParser::ComputeCacheKey for {"type": "object"}
-  constexpr const char* kObjectCacheKey = "{\"type\":\"object\"}";
-  ObjectSpec object_spec;
-  object_spec.allow_additional_properties = true;
-  object_spec.additional_properties_schema = any_spec;
-  AddCache(kObjectCacheKey, recursive_context, builder_.GetRuleId(kBasicObject));
-  builder_.UpdateRuleBody(kBasicObject, GenerateObject(object_spec, kBasicObject));
+  for (const auto& spec : basic_specs) {
+    AddCache(spec->cache_key, GetCacheContext(spec), builder_.GetRuleId(spec->rule_name_hint));
+  }
+  for (const auto& spec : basic_specs) {
+    builder_.UpdateRuleBody(spec->rule_name_hint, GenerateFromSpec(spec, spec->rule_name_hint));
+  }
 
   indent_manager_ = saved_indent_manager;
   colon_expr_id_ = saved_colon_expr_id;
@@ -2116,7 +2085,7 @@ int32_t JSONSchemaConverter::GetKeyPatternExcluding(
   return RuleRef(key_rule_id);
 }
 
-std::string JSONSchemaConverter::GetBasicAnyRuleName() const { return kBasicAny; }
+int JSONSchemaConverter::GetFormatContext() const { return 0; }
 
 int64_t JSONSchemaConverter::GetCacheContext(const SchemaSpecPtr& spec) const {
   if (!indentation_enabled_) {
@@ -2151,7 +2120,7 @@ void JSONSchemaConverter::AddCache(
     const std::string& key, int64_t indentation_context, int32_t rule_id
 ) {
   if (!key.empty()) {
-    rule_cache_manager_.AddCache(key, 0, indentation_context, rule_id);
+    rule_cache_manager_.AddCache(key, GetFormatContext(), indentation_context, rule_id);
   }
 }
 
@@ -2161,7 +2130,7 @@ std::optional<int32_t> JSONSchemaConverter::GetCache(
   if (key.empty()) {
     return std::nullopt;
   }
-  return rule_cache_manager_.GetCache(key, 0, indentation_context);
+  return rule_cache_manager_.GetCache(key, GetFormatContext(), indentation_context);
 }
 
 int32_t JSONSchemaConverter::GenerateRuleBody(
@@ -3021,11 +2990,10 @@ int32_t JSONSchemaConverter::GenerateObject(
         }
       } else {
         int32_t key_rule_id = CreateRule(spec.property_names, rule_name + "_name");
+        auto value_spec = SchemaSpec::Make(AnySpec{}, "", rule_name + "_value");
+        int32_t value_rule_id = CreateRule(value_spec, value_spec->rule_name_hint);
         property_choices.push_back(Sequence(
-            {beginning_separator,
-             RuleRef(key_rule_id),
-             colon_expr_id_,
-             RuleRef(GetBasicAnyRuleName())}
+            {beginning_separator, RuleRef(key_rule_id), colon_expr_id_, RuleRef(value_rule_id)}
         ));
       }
 

@@ -61,18 +61,14 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
   ) override;
 
   std::string GetKeyPattern() const override;
-  std::string GetBasicAnyRuleName() const override;
   int32_t GetKeyPatternExcluding(
       const std::vector<ObjectSpec::Property>& properties, const std::string& rule_name
   ) override;
 
   std::string NextSeparator(bool is_end = false) override;
+  int GetFormatContext() const override;
 
   void AddBasicRules() override;
-
-  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id) override;
-  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context)
-      const override;
 
  private:
   // Wrapper strings for XML parameter tags (key prefix/suffix, value prefix, closing suffix)

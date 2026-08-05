@@ -95,7 +95,7 @@ void XMLToolCallingConverter::AddBasicRules() {
 
   // Add XML any rule
   int64_t recursive_context = GetCacheContext(any_spec);
-  AddCache("{}", recursive_context, builder_.GetRuleId(kXMLAny));
+  AddCache(any_spec->cache_key, recursive_context, builder_.GetRuleId(kXMLAny));
   builder_.UpdateRuleBody(kXMLAny, GenerateAny(AnySpec{}, kXMLAny));
   AddCache(kArrayCacheKey, recursive_context, builder_.GetRuleId(kBasicArray));
   AddCache(kObjectCacheKey, recursive_context, builder_.GetRuleId(kBasicObject));
@@ -127,13 +127,6 @@ std::string XMLToolCallingConverter::GetKeyPattern() const {
   return kBasicString;
 }
 
-std::string XMLToolCallingConverter::GetBasicAnyRuleName() const {
-  if (nested_object_level_ <= 1) {
-    return kXMLAny;
-  }
-  return kBasicAny;
-}
-
 int32_t XMLToolCallingConverter::GetKeyPatternExcluding(
     const std::vector<ObjectSpec::Property>& properties, const std::string& rule_name
 ) {
@@ -149,6 +142,8 @@ std::string XMLToolCallingConverter::NextSeparator(bool is_end) {
   }
   return JSONSchemaConverter::NextSeparator(is_end);
 }
+
+int XMLToolCallingConverter::GetFormatContext() const { return std::min(nested_object_level_, 2); }
 
 int32_t XMLToolCallingConverter::GenerateString(
     const StringSpec& spec, const std::string& rule_name
@@ -287,26 +282,6 @@ int32_t XMLToolCallingConverter::GenerateObject(
   auto result = JSONSchemaConverter::GenerateObject(spec, rule_name, need_brace);
   nested_object_level_--;
   return result;
-}
-
-void XMLToolCallingConverter::AddCache(
-    const std::string& key, int64_t indentation_context, int32_t rule_id
-) {
-  if (key.empty()) {
-    return;
-  }
-  int format_context = std::min(nested_object_level_, 2);
-  rule_cache_manager_.AddCache(key, format_context, indentation_context, rule_id);
-}
-
-std::optional<int32_t> XMLToolCallingConverter::GetCache(
-    const std::string& key, int64_t indentation_context
-) const {
-  if (key.empty()) {
-    return std::nullopt;
-  }
-  int format_context = std::min(nested_object_level_, 2);
-  return rule_cache_manager_.GetCache(key, format_context, indentation_context);
 }
 
 }  // namespace xgrammar

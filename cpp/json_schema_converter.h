@@ -375,19 +375,18 @@ class JSONSchemaConverter {
       const std::vector<ObjectSpec::Property>& properties, const std::string& rule_name
   );
 
-  /*! \brief Get the basic any rule name. Override for different formats. */
-  virtual std::string GetBasicAnyRuleName() const;
-
   /*! \brief Add basic rules for the format. Override for different formats. */
   virtual void AddBasicRules();
   void AddBasicRules(const std::vector<std::string>& additional_rule_names);
 
-  /*! \brief Add a key-value pair to the generation cache. Override for custom cache behavior. */
-  virtual void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id);
+  /*! \brief Get the current output-format context for rule caching. */
+  virtual int GetFormatContext() const;
+
+  /*! \brief Add a key-value pair to the generation cache. */
+  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id);
 
   /*! \brief Get cached value by key. Returns std::nullopt if not found. */
-  virtual std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context)
-      const;
+  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context) const;
 
   /*! \brief Get the indentation context for a schema. */
   int64_t GetCacheContext(const SchemaSpecPtr& spec) const;
