@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -140,7 +141,7 @@ class TokenMaskCache {
       bool is_root_rule,
       const Grammar& grammar,
       const TokenizerInfo& tokenizer_info,
-      const std::shared_ptr<const EarleyParserGrammarFeatures>& grammar_features
+      const EarleyParserGrammarFeatures& grammar_features
   );
 
  private:
@@ -219,7 +220,7 @@ class CompiledGrammar::Impl {
   TokenMaskCache token_mask_cache;
 
   /*! \brief Grammar-wide flags and nullable rules shared by Earley parsers. */
-  std::shared_ptr<const EarleyParserGrammarFeatures> earley_parser_grammar_features;
+  std::optional<EarleyParserGrammarFeatures> earley_parser_grammar_features;
 
   Grammar GetGrammar() const { return grammar; }
 

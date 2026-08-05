@@ -113,10 +113,10 @@ void EarleyParser::PopLastStates(int32_t cnt) {
   rule_id_to_completable_states_.PopBack(cnt);
   is_completed_.erase(is_completed_.end() - cnt, is_completed_.end());
   scanable_state_history_.PopBack(cnt);
-  if (capture_tracking_) {
+  if (IsCaptureTrackingEnabled()) {
     capture_event_history_.PopBack(cnt);
   }
-  if (has_char_budget_rules_) {
+  if (HasCharacterBudgetRules()) {
     char_count_history_.erase(char_count_history_.end() - cnt, char_count_history_.end());
     char_budget_entry_history_.erase(
         char_budget_entry_history_.end() - cnt, char_budget_entry_history_.end()
@@ -389,7 +389,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   tmp_states_to_be_added_.clear();
   tmp_accept_stop_token_ = false;
   tmp_completed_lazy_occurrences_.clear();
-  if (has_char_budget_rules_) {
+  if (HasCharacterBudgetRules()) {
     tmp_char_budget_entered_ = char_budget_entry_history_.back();
     char_count_history_.push_back(GetCurrentCharIndex() + StartsUTF8Codepoint(ch));
   }
@@ -404,7 +404,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
 
   // Check if the character is accepted.
   if (tmp_process_state_queue_.empty() && tmp_states_to_be_added_.empty()) {
-    if (has_char_budget_rules_) {
+    if (HasCharacterBudgetRules()) {
       char_count_history_.pop_back();
     }
     return false;
@@ -412,7 +412,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
 
   // execute Predict and Complete for all states in the queue until empty.
   rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
-  if (capture_tracking_) {
+  if (IsCaptureTrackingEnabled()) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
   while (!tmp_process_state_queue_.empty()) {
@@ -433,7 +433,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   }
   is_completed_.push_back(tmp_accept_stop_token_);
   scanable_state_history_.PushBack(tmp_states_to_be_added_);
-  if (has_char_budget_rules_) {
+  if (HasCharacterBudgetRules()) {
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
   return true;
@@ -502,22 +502,15 @@ EarleyParserGrammarFeatures::EarleyParserGrammarFeatures(const Grammar& grammar)
 EarleyParser::EarleyParser(
     const Grammar& grammar,
     std::optional<ParserState> initial_state,
-    std::shared_ptr<const EarleyParserGrammarFeatures> grammar_features
+    const EarleyParserGrammarFeatures& grammar_features
 )
     : grammar_(grammar),
       complete_fsm_edges_(&grammar_->complete_fsm.GetEdges()),
-      grammar_features_(
-          grammar_features != nullptr ? std::move(grammar_features)
-                                      : std::make_shared<const EarleyParserGrammarFeatures>(grammar)
-      ) {
+      grammar_features_(&grammar_features) {
   if (!grammar->optimized) {
     XGRAMMAR_LOG(FATAL) << "The grammar is not optimized. Please optimize the grammar before using "
                            "the Earley parser.";
   }
-  has_budget_rules_ = grammar_features_->has_budget_rules;
-  has_char_budget_rules_ = grammar_features_->has_char_budget_rules;
-  capture_tracking_ = grammar_features_->capture_tracking;
-  has_hidden_capture_rules_ = grammar_features_->has_hidden_capture_rules;
   PushStateAndExpand(initial_state.has_value() ? *initial_state : RootInitialState());
 }
 
@@ -545,7 +538,7 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
   tmp_completed_lazy_occurrences_.clear();
   Enqueue(state);
   rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
-  if (capture_tracking_) {
+  if (IsCaptureTrackingEnabled()) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
   while (!tmp_process_state_queue_.empty()) {
@@ -564,7 +557,7 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
   }
   is_completed_.push_back(tmp_accept_stop_token_);
   scanable_state_history_.PushBack(tmp_states_to_be_added_);
-  if (has_char_budget_rules_) {
+  if (HasCharacterBudgetRules()) {
     char_count_history_.push_back(GetCurrentCharIndex());
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
@@ -575,7 +568,7 @@ void EarleyParser::Reset() {
   scanable_state_history_.PopBack(scanable_state_history_.size());
   is_completed_.clear();
   stop_token_is_accepted_ = false;
-  if (capture_tracking_) {
+  if (IsCaptureTrackingEnabled()) {
     capture_event_history_.PopBack(capture_event_history_.size());
   }
   char_count_history_.clear();
@@ -1197,7 +1190,7 @@ bool EarleyParser::AdvanceAtomicToken(
   tmp_states_to_be_added_.clear();
   tmp_accept_stop_token_ = false;
   tmp_completed_lazy_occurrences_.clear();
-  if (has_char_budget_rules_) {
+  if (HasCharacterBudgetRules()) {
     tmp_char_budget_entered_ = char_budget_entry_history_.back();
     char_count_history_.push_back(GetCurrentCharIndex() + token_char_count);
   }
@@ -1209,13 +1202,13 @@ bool EarleyParser::AdvanceAtomicToken(
     ScanAtomicToken(state, token_id);
   }
   if (tmp_process_state_queue_.empty() && tmp_states_to_be_added_.empty()) {
-    if (has_char_budget_rules_) {
+    if (HasCharacterBudgetRules()) {
       char_count_history_.pop_back();
     }
     return false;
   }
   rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
-  if (capture_tracking_) {
+  if (IsCaptureTrackingEnabled()) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
   while (!tmp_process_state_queue_.empty()) {
@@ -1234,7 +1227,7 @@ bool EarleyParser::AdvanceAtomicToken(
   }
   is_completed_.push_back(tmp_accept_stop_token_);
   scanable_state_history_.PushBack(tmp_states_to_be_added_);
-  if (has_char_budget_rules_) {
+  if (HasCharacterBudgetRules()) {
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
   return true;

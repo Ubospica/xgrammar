@@ -213,6 +213,7 @@ std::optional<SerializationError> DeserializeJSONValue(
   if (dynamic_it != object.end() && dynamic_it->second.get<bool>()) {
     impl->token_mask_cache.dynamic_ = true;
   }
+  impl->earley_parser_grammar_features.emplace(impl->grammar);
   return std::nullopt;
 }
 
@@ -220,7 +221,7 @@ std::optional<SerializationError> DeserializeJSONValue(
 
 std::size_t MemorySize(const CompiledGrammar::Impl& impl) {
   return MemorySize(impl.grammar) + MemorySize(impl.token_mask_cache) +
-         (impl.earley_parser_grammar_features == nullptr
+         (!impl.earley_parser_grammar_features.has_value()
               ? 0
               : MemorySize(*impl.earley_parser_grammar_features));
 }

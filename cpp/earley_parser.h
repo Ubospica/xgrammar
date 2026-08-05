@@ -409,8 +409,8 @@ class EarleyParser {
   static constexpr uint8_t kFsmStateEnd = EarleyParserGrammarFeatures::kFsmStateEnd;
   static constexpr uint8_t kFsmStateHasEdges = EarleyParserGrammarFeatures::kFsmStateHasEdges;
 
-  /*! \brief Grammar-wide parser features shared by every parser for this grammar. */
-  std::shared_ptr<const EarleyParserGrammarFeatures> grammar_features_;
+  /*! \brief Grammar-wide parser features owned by the compiled grammar. */
+  const EarleyParserGrammarFeatures* grammar_features_;
 
   /*! \brief Return shared properties for a state in the complete FSM. */
   uint8_t GetFsmStateFlags(int32_t rule_id, int32_t state_id) const {
@@ -425,6 +425,10 @@ class EarleyParser {
     return grammar_features_->rule_is_nullable[rule_id] != 0;
   }
 
+  bool HasBudgetRules() const { return grammar_features_->has_budget_rules; }
+
+  bool HasCharacterBudgetRules() const { return grammar_features_->has_char_budget_rules; }
+
   /*! \brief The index of the LLM token currently being accepted, set by the matcher; -1
    * before any token. budget_deadline values are compared against it. */
   int32_t current_token_index_ = -1;
@@ -433,14 +437,8 @@ class EarleyParser {
    * the matcher for accepts that follow an enforcing mask computation. */
   bool skip_expired_states_ = false;
 
-  /*! \brief Whether any rule of the grammar has a token budget. */
-  bool has_budget_rules_ = false;
-
   /*! \brief The number of Unicode codepoints accepted at every parser history row. */
   std::vector<int32_t> char_count_history_;
-
-  /*! \brief Whether any rule of the grammar has a character budget. */
-  bool has_char_budget_rules_ = false;
 
   /*! \brief Whether a character-budgeted occurrence was entered since the initial parser row. */
   std::vector<bool> char_budget_entry_history_;
@@ -496,13 +494,6 @@ class EarleyParser {
 
   static bool StartsUTF8Codepoint(uint8_t byte) { return (byte & 0xC0) != 0x80; }
 
-  /*! \brief Whether any rule of the grammar has a capture or stop_capture name. Fixed at
-   * construction. When false, the capture machinery is fully disabled and has no overhead. */
-  bool capture_tracking_ = false;
-
-  /*! \brief Whether the grammar contains suffix/stop spans that may affect captures. */
-  bool has_hidden_capture_rules_ = false;
-
   /*!
    * \brief Whether capture events are currently recorded in Complete(). Only enabled during
    * definitive advances (accepting a token or string), not during speculative exploration
@@ -514,18 +505,20 @@ class EarleyParser {
   /*!
    * \brief The history of capture events. capture_event_history_[i] stores the events recorded
    * when input position i was created. Kept aligned with scanable_state_history_ row-by-row
-   * whenever capture_tracking_ is true, so PopLastStates rolls back events automatically.
+   * whenever capture tracking is enabled, so PopLastStates rolls back events automatically.
    */
   Compact2DArray<CaptureEvent> capture_event_history_;
 
   /*! \brief Returns true if the rule exists and has a capture name. */
   bool RuleHasCapture(int32_t rule_id) const {
-    return capture_tracking_ && rule_id >= 0 && !grammar_->GetRule(rule_id).capture_name.empty();
+    return IsCaptureTrackingEnabled() && rule_id >= 0 &&
+           !grammar_->GetRule(rule_id).capture_name.empty();
   }
 
   /*! \brief Returns true if completing this rule can hide bytes from a capture. */
   bool RuleHasHiddenBytes(int32_t rule_id) const {
-    if (!capture_tracking_ || !has_hidden_capture_rules_ || rule_id < 0) {
+    if (!IsCaptureTrackingEnabled() || !grammar_features_->has_hidden_capture_rules ||
+        rule_id < 0) {
       return false;
     }
     const auto* suffix_stop_info = grammar_->GetSuffixStopInfo(rule_id);
@@ -716,8 +709,8 @@ class EarleyParser {
    */
   explicit EarleyParser(
       const Grammar& grammar,
-      std::optional<ParserState> initial_state = std::nullopt,
-      std::shared_ptr<const EarleyParserGrammarFeatures> grammar_features = nullptr
+      std::optional<ParserState> initial_state,
+      const EarleyParserGrammarFeatures& grammar_features
   );
 
   /*!
@@ -781,10 +774,10 @@ class EarleyParser {
     rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
     is_completed_.push_back(completed);
     scanable_state_history_.PushBack(states);
-    if (capture_tracking_) {
+    if (IsCaptureTrackingEnabled()) {
       capture_event_history_.PushBack(std::vector<CaptureEvent>());
     }
-    if (has_char_budget_rules_) {
+    if (HasCharacterBudgetRules()) {
       char_count_history_.push_back(GetCurrentCharIndex());
       char_budget_entry_history_.push_back(char_budget_entry_history_.back());
     }
@@ -792,7 +785,7 @@ class EarleyParser {
 
   /*! \brief Push a character-count row for a parser row created by the matcher. */
   void PushCharCountRow(int32_t char_count, bool char_budget_entered) {
-    if (!has_char_budget_rules_) {
+    if (!HasCharacterBudgetRules()) {
       return;
     }
     char_count_history_.push_back(char_count);
@@ -804,15 +797,15 @@ class EarleyParser {
   }
 
   bool HasEnteredCharBudget() const {
-    return has_char_budget_rules_ && char_budget_entry_history_.back();
+    return HasCharacterBudgetRules() && char_budget_entry_history_.back();
   }
 
   /*! \brief Whether the grammar has any captured rule. */
-  bool IsCaptureTrackingEnabled() const { return capture_tracking_; }
+  bool IsCaptureTrackingEnabled() const { return grammar_features_->capture_tracking; }
 
   /*! \brief Copy the capture events of the latest input position. */
   std::vector<CaptureEvent> CopyLastCaptureRow() const {
-    if (!capture_tracking_) {
+    if (!IsCaptureTrackingEnabled()) {
       return {};
     }
     auto row = capture_event_history_[capture_event_history_.size() - 1];
@@ -825,7 +818,7 @@ class EarleyParser {
    * capture history aligned with the state history.
    */
   void PushCaptureRow(const std::vector<CaptureEvent>& events) {
-    if (capture_tracking_) {
+    if (IsCaptureTrackingEnabled()) {
       capture_event_history_.PushBack(events);
     }
   }
