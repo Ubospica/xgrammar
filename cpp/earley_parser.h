@@ -11,6 +11,7 @@
 #include <limits>
 #include <optional>
 #include <ostream>
+#include <queue>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -247,11 +248,6 @@ class RepeatDetector {
   std::unordered_set<ParserState, StateHashForParsing, StateEqualForParsing> visited_set_;
 
   int size_ = 0;
-  bool using_set_ = false;
-
-  const ParserState* InsertInSet(const ParserState& state);
-
-  void ClearSet();
 
  public:
   RepeatDetector(const int transition_threshold = 50)
@@ -259,35 +255,20 @@ class RepeatDetector {
     visited_vector_.resize(transition_threshold_);
   }
 
-  /*! \brief Copy the detector configuration without copying temporary visited states. */
-  RepeatDetector(const RepeatDetector& other)
-      : transition_threshold_(other.transition_threshold_) {}
+  /*!
+   * \brief Check if the element is visited.
+   * \return True if visited, false otherwise.
+   */
+  bool IsVisited(const ParserState& state) const;
 
-  /*! \brief Insert a state only if absent and return its stable address, or nullptr. */
-  const ParserState* InsertIfAbsent(const ParserState& state) {
-    if (!using_set_ && size_ < transition_threshold_) {
-      if (visited_vector_.empty()) {
-        visited_vector_.resize(transition_threshold_);
-      }
-      for (int i = 0; i < size_; ++i) {
-        if (StateEqualForParsing()(state, visited_vector_[i])) {
-          return nullptr;
-        }
-      }
-      visited_vector_[size_] = state;
-      return &visited_vector_[size_++];
-    }
-    return InsertInSet(state);
-  }
+  /*!
+   * \brief Add the state into the visited states.
+   * \param state The state to be added.
+   */
+  void Insert(const ParserState& state);
 
   /*! \brief Reset the detector. */
-  void Clear() {
-    if (using_set_) {
-      ClearSet();
-    }
-    size_ = 0;
-    using_set_ = false;
-  }
+  void Clear();
 };
 
 /*! \brief A concrete occurrence of a captured rule in an Earley parent chain. */
@@ -394,16 +375,13 @@ class EarleyParser {
    * \brief A temporary vector only used in Advance, used to add states in the
    * scanable_state_history.
    */
-  std::vector<const ParserState*> tmp_states_to_be_added_;
+  std::vector<ParserState> tmp_states_to_be_added_;
 
-  /*! \brief Stable pointers to visited states awaiting prediction/completion. */
-  std::vector<const ParserState*> tmp_pending_states_;
+  /*! \brief It's the processing queue of the earley parser. */
+  std::queue<ParserState> tmp_process_state_queue_;
 
   /*! \brief The class is used to check if a state has been added into the queue. */
   RepeatDetector tmp_states_visited_in_queue_;
-
-  /*! \brief Clear temporary containers after their state pointers have been consumed. */
-  void ClearTemporaryContainers();
 
   /*! \brief Check if the stop token is accepted. */
   bool stop_token_is_accepted_ = false;
@@ -558,6 +536,15 @@ class EarleyParser {
   void RemoveCommittedLazyStates();
 
   /*!
+   * \brief Check if the state has been added into the queue.
+   * \param state The state to check.
+   * \return True if in the vector, false otherwise.
+   */
+  bool IsStateVisitedInQueue(const ParserState& state) const {
+    return tmp_states_visited_in_queue_.IsVisited(state);
+  }
+
+  /*!
    * \brief The scanning operation of the Earley parser. Put the new states in the queue.
    */
   void Scan(const ParserState& state, const uint8_t ch);
@@ -582,9 +569,6 @@ class EarleyParser {
    * \return Second: If the state is completable, then return true, otherwise return false.
    */
   std::pair<bool, bool> Predict(const ParserState& state, bool debug_print = false);
-
-  /*! \brief Expand pending states through prediction and completion. */
-  void ExpandPendingStates(bool debug_print = false);
 
   /*! \brief The initial state expanded from the root rule of the grammar. */
   ParserState RootInitialState() const;
@@ -678,8 +662,9 @@ class EarleyParser {
    * \details The state is enqueued if it is not visited in the queue.
    */
   void Enqueue(const ParserState& state) {
-    if (const ParserState* inserted = tmp_states_visited_in_queue_.InsertIfAbsent(state)) {
-      tmp_pending_states_.push_back(inserted);
+    if (!IsStateVisitedInQueue(state)) {
+      tmp_process_state_queue_.push(state);
+      tmp_states_visited_in_queue_.Insert(state);
     }
   }
 
@@ -688,8 +673,9 @@ class EarleyParser {
    * \param state The state to be enqueued.
    */
   void EnqueueWithoutProcessing(const ParserState& state) {
-    if (const ParserState* inserted = tmp_states_visited_in_queue_.InsertIfAbsent(state)) {
-      tmp_states_to_be_added_.push_back(inserted);
+    if (!IsStateVisitedInQueue(state)) {
+      tmp_states_visited_in_queue_.Insert(state);
+      tmp_states_to_be_added_.push_back(state);
     }
   }
 

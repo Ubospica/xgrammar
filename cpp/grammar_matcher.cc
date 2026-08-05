@@ -889,13 +889,15 @@ bool GrammarMatcher::Impl::CanForceCompleteWithoutMarker(
 }
 
 bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
-  XGRAMMAR_DCHECK(tmp_pending_states_.empty());
+  XGRAMMAR_DCHECK(tmp_process_state_queue_.empty());
   const auto latest_row = scanable_state_history_[scanable_state_history_.size() - 1];
   std::vector<ParserState> latest_states(latest_row.begin(), latest_row.end());
   std::vector<ParserState> force_completed_states;
   std::unordered_set<int64_t> force_completed_occurrences;
 
-  ClearTemporaryContainers();
+  tmp_states_visited_in_queue_.Clear();
+  tmp_states_to_be_added_.clear();
+  tmp_completed_lazy_occurrences_.clear();
   tmp_accept_stop_token_ = IsCompleted();
 
   for (const auto& state : latest_states) {
@@ -916,7 +918,17 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
   for (const auto& state : force_completed_states) {
     Complete(state, debug_print, /*marker_present=*/false);
   }
-  ExpandPendingStates(debug_print);
+  while (!tmp_process_state_queue_.empty()) {
+    const auto state = std::move(tmp_process_state_queue_.front());
+    tmp_process_state_queue_.pop();
+    auto [scanable, completable] = Predict(state, debug_print);
+    if (completable) {
+      Complete(state, debug_print);
+    }
+    if (scanable) {
+      tmp_states_to_be_added_.push_back(state);
+    }
+  }
   if (!tmp_completed_lazy_occurrences_.empty()) {
     RemoveCommittedLazyStates();
   }
@@ -924,7 +936,7 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
   bool any_expired = false;
   bool any_alive = false;
   for (const auto& state : tmp_states_to_be_added_) {
-    if (IsExpiredState(*state)) {
+    if (IsExpiredState(state)) {
       any_expired = true;
     } else {
       any_alive = true;
@@ -938,7 +950,7 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
         std::remove_if(
             tmp_states_to_be_added_.begin(),
             tmp_states_to_be_added_.end(),
-            [&](const ParserState* state) { return IsExpiredState(*state); }
+            [&](const ParserState& state) { return IsExpiredState(state); }
         ),
         tmp_states_to_be_added_.end()
     );
@@ -946,18 +958,16 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
 
   bool viable = tmp_accept_stop_token_ || !tmp_states_to_be_added_.empty();
   if (!viable) {
-    ClearTemporaryContainers();
     return false;
   }
   scanable_state_history_.PopBack(1);
-  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+  scanable_state_history_.PushBack(tmp_states_to_be_added_);
   is_completed_.back() = tmp_accept_stop_token_;
-  ClearTemporaryContainers();
   return true;
 }
 
 bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
-  XGRAMMAR_DCHECK(tmp_pending_states_.empty());
+  XGRAMMAR_DCHECK(tmp_process_state_queue_.empty());
   const auto latest_row = scanable_state_history_[scanable_state_history_.size() - 1];
   std::vector<ParserState> latest_states(latest_row.begin(), latest_row.end());
   auto previous_completable_row = rule_id_to_completable_states_.Back();
@@ -972,7 +982,9 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
   std::vector<ParserState> force_completed_states;
   std::unordered_set<int64_t> force_completed_occurrences;
 
-  ClearTemporaryContainers();
+  tmp_states_visited_in_queue_.Clear();
+  tmp_states_to_be_added_.clear();
+  tmp_completed_lazy_occurrences_.clear();
   tmp_accept_stop_token_ = IsCompleted();
 
   for (const auto& state : latest_states) {
@@ -993,7 +1005,17 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
   for (const auto& state : force_completed_states) {
     Complete(state, debug_print, /*marker_present=*/false);
   }
-  ExpandPendingStates(debug_print);
+  while (!tmp_process_state_queue_.empty()) {
+    const auto state = std::move(tmp_process_state_queue_.front());
+    tmp_process_state_queue_.pop();
+    auto [scanable, completable] = Predict(state, debug_print);
+    if (completable) {
+      Complete(state, debug_print);
+    }
+    if (scanable) {
+      tmp_states_to_be_added_.push_back(state);
+    }
+  }
   if (!tmp_completed_lazy_occurrences_.empty()) {
     RemoveCommittedLazyStates();
   }
@@ -1001,7 +1023,7 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
   bool any_expired = false;
   bool any_alive = false;
   for (const auto& state : tmp_states_to_be_added_) {
-    if (IsCharExpiredState(*state)) {
+    if (IsCharExpiredState(state)) {
       any_expired = true;
     } else {
       any_alive = true;
@@ -1012,7 +1034,7 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
         std::remove_if(
             tmp_states_to_be_added_.begin(),
             tmp_states_to_be_added_.end(),
-            [&](const ParserState* state) { return IsCharExpiredState(*state); }
+            [&](const ParserState& state) { return IsCharExpiredState(state); }
         ),
         tmp_states_to_be_added_.end()
     );
@@ -1026,13 +1048,11 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
       capture_event_history_.PopBack(1);
       capture_event_history_.PushBack(previous_capture_events);
     }
-    ClearTemporaryContainers();
     return false;
   }
   scanable_state_history_.PopBack(1);
-  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+  scanable_state_history_.PushBack(tmp_states_to_be_added_);
   is_completed_.back() = tmp_accept_stop_token_;
-  ClearTemporaryContainers();
   return true;
 }
 
