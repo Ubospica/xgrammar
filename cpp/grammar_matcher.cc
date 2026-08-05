@@ -2244,8 +2244,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     std::unique_ptr<ContinuationTransitionCache> continuation_cache;
     constexpr size_t kMinUncertainTokensForContinuationCache = 128;
     if (!features_->has_budget_rules && !features_->has_char_budget_rules &&
-        !features_->capture_tracking &&
-        adaptive_token_mask.store_type != StoreType::kRejected &&
+        !features_->capture_tracking && adaptive_token_mask.store_type != StoreType::kRejected &&
         adaptive_token_mask.uncertain_indices.size() >= kMinUncertainTokensForContinuationCache) {
       continuation_cache = std::make_unique<ContinuationTransitionCache>(this);
     }
