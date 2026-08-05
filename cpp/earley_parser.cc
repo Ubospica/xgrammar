@@ -413,7 +413,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   }
 
   // execute Predict and Complete for all states in the queue until empty.
-  rule_id_to_completable_states_.PushBackEmpty();
+  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
   if (features_->capture_tracking) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
@@ -541,7 +541,7 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
   tmp_states_to_be_added_.clear();
   tmp_completed_lazy_occurrences_.clear();
   Enqueue(state);
-  rule_id_to_completable_states_.PushBackEmpty();
+  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
   if (features_->capture_tracking) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
@@ -1214,7 +1214,7 @@ bool EarleyParser::AdvanceAtomicToken(
     }
     return false;
   }
-  rule_id_to_completable_states_.PushBackEmpty();
+  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
   if (features_->capture_tracking) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
