@@ -324,7 +324,7 @@ struct CaptureEvent {
 };
 
 /*! \brief Immutable grammar-wide features shared by short-lived Earley parsers. */
-struct EarleyParserGrammarFeatures {
+struct EarleyParserFeatures {
   enum FsmStateFlag : uint8_t {
     kFsmStateInitialized = 1 << 0,
     kFsmStateScanable = 1 << 1,
@@ -340,9 +340,10 @@ struct EarleyParserGrammarFeatures {
   bool capture_tracking = false;
   bool has_hidden_capture_rules = false;
 
-  explicit EarleyParserGrammarFeatures(const Grammar& grammar);
+  EarleyParserFeatures() = default;
+  explicit EarleyParserFeatures(const Grammar& grammar);
 
-  friend std::size_t MemorySize(const EarleyParserGrammarFeatures& features) {
+  friend std::size_t MemorySize(const EarleyParserFeatures& features) {
     return MemorySize(features.fsm_state_flags) + MemorySize(features.rule_is_nullable);
   }
 };
@@ -402,32 +403,8 @@ class EarleyParser {
   /*! \brief Check if the stop token is accepted. */
   bool stop_token_is_accepted_ = false;
 
-  using FsmStateFlag = EarleyParserGrammarFeatures::FsmStateFlag;
-  static constexpr uint8_t kFsmStateInitialized = EarleyParserGrammarFeatures::kFsmStateInitialized;
-  static constexpr uint8_t kFsmStateScanable = EarleyParserGrammarFeatures::kFsmStateScanable;
-  static constexpr uint8_t kFsmStateNonTerminal = EarleyParserGrammarFeatures::kFsmStateNonTerminal;
-  static constexpr uint8_t kFsmStateEnd = EarleyParserGrammarFeatures::kFsmStateEnd;
-  static constexpr uint8_t kFsmStateHasEdges = EarleyParserGrammarFeatures::kFsmStateHasEdges;
-
   /*! \brief Grammar-wide parser features owned by the compiled grammar. */
-  const EarleyParserGrammarFeatures* grammar_features_;
-
-  /*! \brief Return shared properties for a state in the complete FSM. */
-  uint8_t GetFsmStateFlags(int32_t rule_id, int32_t state_id) const {
-    XGRAMMAR_DCHECK(rule_id >= 0 && rule_id < grammar_->NumRules());
-    XGRAMMAR_DCHECK(
-        state_id >= 0 && state_id < static_cast<int32_t>(grammar_features_->fsm_state_flags.size())
-    );
-    return grammar_features_->fsm_state_flags[state_id];
-  }
-
-  bool IsRuleNullable(int32_t rule_id) const {
-    return grammar_features_->rule_is_nullable[rule_id] != 0;
-  }
-
-  bool HasBudgetRules() const { return grammar_features_->has_budget_rules; }
-
-  bool HasCharacterBudgetRules() const { return grammar_features_->has_char_budget_rules; }
+  const EarleyParserFeatures& features_;
 
   /*! \brief The index of the LLM token currently being accepted, set by the matcher; -1
    * before any token. budget_deadline values are compared against it. */
@@ -511,14 +488,13 @@ class EarleyParser {
 
   /*! \brief Returns true if the rule exists and has a capture name. */
   bool RuleHasCapture(int32_t rule_id) const {
-    return IsCaptureTrackingEnabled() && rule_id >= 0 &&
+    return features_.capture_tracking && rule_id >= 0 &&
            !grammar_->GetRule(rule_id).capture_name.empty();
   }
 
   /*! \brief Returns true if completing this rule can hide bytes from a capture. */
   bool RuleHasHiddenBytes(int32_t rule_id) const {
-    if (!IsCaptureTrackingEnabled() || !grammar_features_->has_hidden_capture_rules ||
-        rule_id < 0) {
+    if (!features_.capture_tracking || !features_.has_hidden_capture_rules || rule_id < 0) {
       return false;
     }
     const auto* suffix_stop_info = grammar_->GetSuffixStopInfo(rule_id);
@@ -710,7 +686,7 @@ class EarleyParser {
   explicit EarleyParser(
       const Grammar& grammar,
       std::optional<ParserState> initial_state,
-      const EarleyParserGrammarFeatures& grammar_features
+      const EarleyParserFeatures& features
   );
 
   /*!
@@ -774,10 +750,10 @@ class EarleyParser {
     rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
     is_completed_.push_back(completed);
     scanable_state_history_.PushBack(states);
-    if (IsCaptureTrackingEnabled()) {
+    if (features_.capture_tracking) {
       capture_event_history_.PushBack(std::vector<CaptureEvent>());
     }
-    if (HasCharacterBudgetRules()) {
+    if (features_.has_char_budget_rules) {
       char_count_history_.push_back(GetCurrentCharIndex());
       char_budget_entry_history_.push_back(char_budget_entry_history_.back());
     }
@@ -785,7 +761,7 @@ class EarleyParser {
 
   /*! \brief Push a character-count row for a parser row created by the matcher. */
   void PushCharCountRow(int32_t char_count, bool char_budget_entered) {
-    if (!HasCharacterBudgetRules()) {
+    if (!features_.has_char_budget_rules) {
       return;
     }
     char_count_history_.push_back(char_count);
@@ -797,15 +773,12 @@ class EarleyParser {
   }
 
   bool HasEnteredCharBudget() const {
-    return HasCharacterBudgetRules() && char_budget_entry_history_.back();
+    return features_.has_char_budget_rules && char_budget_entry_history_.back();
   }
-
-  /*! \brief Whether the grammar has any captured rule. */
-  bool IsCaptureTrackingEnabled() const { return grammar_features_->capture_tracking; }
 
   /*! \brief Copy the capture events of the latest input position. */
   std::vector<CaptureEvent> CopyLastCaptureRow() const {
-    if (!IsCaptureTrackingEnabled()) {
+    if (!features_.capture_tracking) {
       return {};
     }
     auto row = capture_event_history_[capture_event_history_.size() - 1];
@@ -818,7 +791,7 @@ class EarleyParser {
    * capture history aligned with the state history.
    */
   void PushCaptureRow(const std::vector<CaptureEvent>& events) {
-    if (IsCaptureTrackingEnabled()) {
+    if (features_.capture_tracking) {
       capture_event_history_.PushBack(events);
     }
   }

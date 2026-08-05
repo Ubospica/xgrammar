@@ -337,9 +337,9 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
       const TokenizerInfo& tokenizer_info,
       std::optional<RuleLevelCache>& rule_level_cache,
       bool is_root_rule,
-      const EarleyParserGrammarFeatures& grammar_features
+      const EarleyParserFeatures& features
   )
-      : EarleyParser(grammar, init_state, grammar_features),
+      : EarleyParser(grammar, init_state, features),
         init_rule_id_(init_state.rule_id),
         initial_state_(init_state),
         is_root_rule_(is_root_rule),
@@ -817,7 +817,7 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
 
   XGRAMMAR_DCHECK(init_rule_id_ != -1 && grammar_->per_rule_fsms[init_rule_id_].has_value());
   auto [speculative_calculation, speculative_mask] = GetSpeculativeCalculation();
-  if (HasCharacterBudgetRules()) {
+  if (features_.has_char_budget_rules) {
     speculative_calculation = false;
   }
 
@@ -1099,7 +1099,7 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask() {
   tmp_can_reach_end_prefix_or_stack_.push_back(false);
 
   // Try to get the crossing cache.
-  bool rule_level_cache_is_available = !HasCharacterBudgetRules() &&
+  bool rule_level_cache_is_available = !features_.has_char_budget_rules &&
                                        rule_level_cache_.has_value() &&
                                        grammar_->per_rule_fsm_hashes[init_rule_id_].has_value();
   std::optional<uint64_t> fsm_hash = std::nullopt;
@@ -1161,7 +1161,7 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask() {
   // Token edges are rechecked at runtime when a character budget is present because accepting
   // one can enter a budgeted rule within the same token.
   if (!token_edge_accepted.empty()) {
-    if (HasCharacterBudgetRules()) {
+    if (features_.has_char_budget_rules) {
       IntsetUnion(&tmp_uncertain_indices_, token_edge_accepted);
     } else {
       IntsetUnion(&tmp_accepted_indices_, token_edge_accepted);
@@ -1322,7 +1322,7 @@ const AdaptiveTokenMask& TokenMaskCache::Get(
     bool is_root_rule,
     const Grammar& grammar,
     const TokenizerInfo& tokenizer_info,
-    const EarleyParserGrammarFeatures& grammar_features
+    const EarleyParserFeatures& features
 ) {
   if (!dynamic_) {
     const auto it = masks_.find(state);
@@ -1370,7 +1370,7 @@ const AdaptiveTokenMask& TokenMaskCache::Get(
                                tokenizer_info,
                                retained_rule_level_cache,
                                is_root_rule,
-                               grammar_features
+                               features
   )
                                .GetAdaptiveTokenMask();
 
@@ -1437,7 +1437,8 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   auto compiled_grammar_impl = std::make_shared<CompiledGrammar::Impl>(enable_dynamic_compilation_);
   compiled_grammar_impl->grammar = std::move(grammar);
   compiled_grammar_impl->tokenizer_info = tokenizer_info_;
-  compiled_grammar_impl->earley_parser_grammar_features.emplace(compiled_grammar_impl->grammar);
+  compiled_grammar_impl->earley_parser_features =
+      EarleyParserFeatures(compiled_grammar_impl->grammar);
   if (tokenizer_info_.GetVocabSize() == 0) {
     return CompiledGrammar(compiled_grammar_impl);
   }
@@ -1489,7 +1490,7 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
         tokenizer_info_,
         rule_level_cache_,
         is_root_rule,
-        *compiled_grammar_impl->earley_parser_grammar_features
+        compiled_grammar_impl->earley_parser_features
     );
     auto cur_adaptive_token_mask_cache = grammar_matcher.GetAdaptiveTokenMask();
     if (max_threads_ > 1) {
