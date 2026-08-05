@@ -889,7 +889,8 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
   const auto latest_row = scanable_state_history_[scanable_state_history_.size() - 1];
   std::vector<ParserState> latest_states(latest_row.begin(), latest_row.end());
   std::vector<ParserState> force_completed_states;
-  std::unordered_set<RuleCompletionContext, RuleCompletionContextHash> force_completed_occurrences;
+  std::unordered_set<ParserState, StateHashForCompletionContext, StateEqualForCompletionContext>
+      force_completed_occurrences;
 
   tmp_states_visited_in_queue_.Clear();
   tmp_states_to_be_added_.clear();
@@ -904,13 +905,7 @@ bool GrammarMatcher::Impl::ApplyBudgetEnforcement(bool debug_print) {
     if (!CanForceCompleteWithoutMarker(state, false)) {
       continue;
     }
-    RuleCompletionContext completion_context{
-        state.rule_id,
-        state.rule_start_pos,
-        state.budget_deadline,
-        state.char_budget_deadline,
-    };
-    if (force_completed_occurrences.insert(completion_context).second) {
+    if (force_completed_occurrences.insert(state).second) {
       force_completed_states.push_back(state);
     }
   }
@@ -971,7 +966,7 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
   const auto latest_row = scanable_state_history_[scanable_state_history_.size() - 1];
   std::vector<ParserState> latest_states(latest_row.begin(), latest_row.end());
   auto previous_completable_row = rule_id_to_completable_states_.Back();
-  std::vector<CompletionParentState> previous_completable_states(
+  std::vector<std::pair<int32_t, ParserState>> previous_completable_states(
       previous_completable_row.data,
       previous_completable_row.data + previous_completable_row.data_len
   );
@@ -980,7 +975,8 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
     previous_capture_events = CopyLastCaptureRow();
   }
   std::vector<ParserState> force_completed_states;
-  std::unordered_set<RuleCompletionContext, RuleCompletionContextHash> force_completed_occurrences;
+  std::unordered_set<ParserState, StateHashForCompletionContext, StateEqualForCompletionContext>
+      force_completed_occurrences;
 
   tmp_states_visited_in_queue_.Clear();
   tmp_states_to_be_added_.clear();
@@ -995,13 +991,7 @@ bool GrammarMatcher::Impl::ApplyCharacterBudgetEnforcement(bool debug_print) {
     if (!CanForceCompleteWithoutMarker(state, true)) {
       continue;
     }
-    RuleCompletionContext completion_context{
-        state.rule_id,
-        state.rule_start_pos,
-        state.budget_deadline,
-        state.char_budget_deadline,
-    };
-    if (force_completed_occurrences.insert(completion_context).second) {
+    if (force_completed_occurrences.insert(state).second) {
       force_completed_states.push_back(state);
     }
   }
@@ -1100,7 +1090,7 @@ bool GrammarMatcher::Impl::AdvanceWithCharacterBudget(uint8_t byte, bool debug_p
   std::vector<ParserState> previous_states = GetLatestScanableStates();
   bool previous_completed = IsCompleted();
   auto previous_completable_row = rule_id_to_completable_states_.Back();
-  std::vector<CompletionParentState> previous_completable_states(
+  std::vector<std::pair<int32_t, ParserState>> previous_completable_states(
       previous_completable_row.data,
       previous_completable_row.data + previous_completable_row.data_len
   );
@@ -1143,7 +1133,7 @@ bool GrammarMatcher::Impl::AdvanceAtomicTokenWithCharacterBudget(
   }
 
   std::vector<ParserState> previous_states;
-  std::vector<CompletionParentState> previous_completable_states;
+  std::vector<std::pair<int32_t, ParserState>> previous_completable_states;
   bool previous_completed = false;
   std::vector<CaptureEvent> previous_capture_events;
   bool enforced = false;
@@ -1308,7 +1298,7 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
 
   const int32_t size_before_token = rule_id_to_completable_states_.size();
   std::vector<ParserState> states_before_token;
-  std::vector<CompletionParentState> completable_before_token;
+  std::vector<std::pair<int32_t, ParserState>> completable_before_token;
   std::vector<CaptureEvent> capture_row_before_token;
   bool completed_before_token = false;
   if (has_char_budget_rules_) {
@@ -1338,7 +1328,7 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
 
   // Phase 1: Try atomic token path (from current state, before byte path)
   std::vector<ParserState> atomic_states;
-  std::vector<CompletionParentState> atomic_completable;
+  std::vector<std::pair<int32_t, ParserState>> atomic_completable;
   std::vector<CaptureEvent> atomic_capture_row;
   bool atomic_completed = false;
   bool atomic_success =
@@ -1439,7 +1429,7 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
       }
 
       auto byte_row = rule_id_to_completable_states_.Back();
-      std::vector<CompletionParentState> merged_completable(
+      std::vector<std::pair<int32_t, ParserState>> merged_completable(
           byte_row.data, byte_row.data + byte_row.data_len
       );
       std::vector<CaptureEvent> merged_capture_row = CopyLastCaptureRow();
@@ -1448,11 +1438,11 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
       bool final_char_budget_entered = HasEnteredCharBudget();
       PopLastStates(1);
 
-      for (const auto& completion_parent_state : atomic_completable) {
-        if (std::find(
-                merged_completable.begin(), merged_completable.end(), completion_parent_state
-            ) == merged_completable.end()) {
-          merged_completable.push_back(completion_parent_state);
+      for (const auto& cs : atomic_completable) {
+        if (std::find_if(merged_completable.begin(), merged_completable.end(), [&](const auto& m) {
+              return m.first == cs.first && state_eq(m.second, cs.second);
+            }) == merged_completable.end()) {
+          merged_completable.push_back(cs);
         }
       }
 
@@ -1542,7 +1532,7 @@ bool GrammarMatcher::Impl::AcceptString(const std::string& input_str, bool debug
   CaptureRecordingGuard capture_guard(this);
 
   std::vector<ParserState> states_before_input;
-  std::vector<CompletionParentState> completable_before_input;
+  std::vector<std::pair<int32_t, ParserState>> completable_before_input;
   std::vector<CaptureEvent> capture_row_before_input;
   bool completed_before_input = false;
   if (has_char_budget_rules_) {

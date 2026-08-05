@@ -41,15 +41,11 @@ std::vector<CaptureOccurrence> EarleyParser::CollectStopCaptureTargets(const Par
   // materialization time cannot distinguish an actual captured ancestor from an unrelated
   // Earley branch that happens to cover the same input.
   std::vector<CaptureOccurrence> targets;
-  std::vector<RuleCompletionContext> pending{{
-      state.rule_id,
-      state.rule_start_pos,
-      state.budget_deadline,
-      state.char_budget_deadline,
-  }};
-  std::unordered_set<RuleCompletionContext, RuleCompletionContextHash> visited;
+  std::vector<ParserState> pending{state};
+  std::unordered_set<ParserState, StateHashForCompletionContext, StateEqualForCompletionContext>
+      visited;
   while (!pending.empty()) {
-    RuleCompletionContext completion = pending.back();
+    ParserState completion = pending.back();
     pending.pop_back();
     if (!visited.insert(completion).second) {
       continue;
@@ -63,20 +59,12 @@ std::vector<CaptureOccurrence> EarleyParser::CollectStopCaptureTargets(const Par
       continue;
     }
     const auto& parent_states = rule_id_to_completable_states_[completion.rule_start_pos];
-    for (const auto& completion_parent_state : parent_states) {
-      if (!completion_parent_state.Matches(
-              completion.rule_id, completion.budget_deadline, completion.char_budget_deadline
-          ) ||
-          completion_parent_state.parent_state.rule_id < 0) {
+    for (const auto& [ref_rule_id, parent_state] : parent_states) {
+      if (ref_rule_id != completion.rule_id || parent_state.rule_id < 0 ||
+          !IsCompletionCompatibleWithParent(completion, parent_state)) {
         continue;
       }
-      const auto& parent_state = completion_parent_state.parent_state;
-      pending.push_back(
-          {parent_state.rule_id,
-           parent_state.rule_start_pos,
-           parent_state.budget_deadline,
-           parent_state.char_budget_deadline}
-      );
+      pending.push_back(parent_state);
     }
   }
   return targets;
@@ -163,11 +151,10 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
 
   // Check all the possible parent states.
   const auto& parent_states_map = rule_id_to_completable_states_[state.rule_start_pos];
-  for (const auto& completion_parent_state : parent_states_map) {
-    if (!completion_parent_state.Matches(state)) {
+  for (const auto& [ref_id, parent_state] : parent_states_map) {
+    if (ref_id != state.rule_id || !IsCompletionCompatibleWithParent(state, parent_state)) {
       continue;
     }
-    const auto& parent_state = completion_parent_state.parent_state;
     XGRAMMAR_DCHECK(
         parent_state.rule_id == -1 || grammar_->per_rule_fsms[parent_state.rule_id].has_value()
     );
@@ -233,7 +220,7 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
       // Because of invariance, a state with a kRepeatRef edge has exactly one outgoing edge.
       if (!edge.IsRepeatRef()) continue;
       auto info = grammar_->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
-      if (info.RuleId() != state.rule_id) continue;
+      if (info.RuleId() != ref_id) continue;
       handled_as_repeat = true;
       int32_t new_count = parent_state.repeat_count + 1;
       if (new_count >= info.Lower()) {
@@ -426,7 +413,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   }
 
   // execute Predict and Complete for all states in the queue until empty.
-  rule_id_to_completable_states_.PushBack(std::vector<CompletionParentState>());
+  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
@@ -558,7 +545,7 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
   tmp_states_to_be_added_.clear();
   tmp_completed_lazy_occurrences_.clear();
   Enqueue(state);
-  rule_id_to_completable_states_.PushBack(std::vector<CompletionParentState>());
+  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
@@ -614,11 +601,6 @@ void EarleyParser::ExpandNextRuleRefElement(
       sub_grammar_expr->type == GrammarExprType::kRepeat
   );
   auto ref_rule_id = (*sub_grammar_expr)[0];
-  const auto& ref_rule = grammar_->GetRule(ref_rule_id);
-  const int32_t referenced_rule_budget_deadline =
-      DeadlineForRule(ref_rule_id, state.budget_deadline);
-  const int32_t referenced_rule_char_budget_deadline =
-      CharDeadlineForRule(ref_rule_id, state.char_budget_deadline);
 
   if (debug_print) {
     XGRAMMAR_LOG(INFO) << "The rule " << state.rule_id << ": "
@@ -635,39 +617,35 @@ void EarleyParser::ExpandNextRuleRefElement(
       (state.rule_start_pos == rule_id_to_completable_states_.size() - 1) ||
       RuleNeedsCaptureEvent(state.rule_id) || RuleNeedsCaptureEvent(ref_rule_id)) {
     // It's not the right recursion, or it's the root rule.
-    rule_id_to_completable_states_.PushBackInLatestRow(
-        {ref_rule_id, referenced_rule_budget_deadline, referenced_rule_char_budget_deadline, state}
-    );
+    rule_id_to_completable_states_.PushBackInLatestRow(std::make_pair(ref_rule_id, state));
   } else {
     if (state.rule_start_pos == ParserState::kNoPrevInputPos) {
       right_recursion_to_root = true;
     } else {
       // If it's the right recursion, we need to add the ancestors of the parent state.
-      const auto already_added = [&](const CompletionParentState& completion_parent_state) {
-        return std::find(
+      const auto in_vec = [&](const ParserState& state_) {
+        return std::find_if(
                    rule_id_to_completable_states_.Back().begin(),
                    rule_id_to_completable_states_.Back().end(),
-                   completion_parent_state
+                   [&](const auto& s) {
+                     return StateEqualForParsing()(s.second, state_) && s.first == ref_rule_id;
+                   }
                ) != rule_id_to_completable_states_.Back().end();
       };
       const auto& parent_states_map = rule_id_to_completable_states_[state.rule_start_pos];
-      std::vector<CompletionParentState> states_to_add;
-      for (const auto& parent_completion : parent_states_map) {
-        if (!parent_completion.Matches(state)) {
+      std::vector<std::pair<int32_t, ParserState>> to_added_states;
+      for (const auto& parent_state_iter : parent_states_map) {
+        if (parent_state_iter.first != state.rule_id ||
+            !IsCompletionCompatibleWithParent(state, parent_state_iter.second)) {
           continue;
         }
-        CompletionParentState propagated_completion{
-            ref_rule_id,
-            referenced_rule_budget_deadline,
-            referenced_rule_char_budget_deadline,
-            parent_completion.parent_state,
-        };
-        if (!already_added(propagated_completion)) {
-          states_to_add.push_back(propagated_completion);
+        const auto& parent_state = parent_state_iter.second;
+        if (!in_vec(parent_state)) {
+          to_added_states.push_back({ref_rule_id, parent_state});
         }
       }
-      for (const auto& completion_parent_state : states_to_add) {
-        rule_id_to_completable_states_.PushBackInLatestRow(completion_parent_state);
+      for (const auto& to_add_state : to_added_states) {
+        rule_id_to_completable_states_.PushBackInLatestRow(to_add_state);
       }
     }
   }
@@ -689,6 +667,7 @@ void EarleyParser::ExpandNextRuleRefElement(
   }
 
   // If the reference rule is not visited, we need to add it to the queue.
+  const auto& ref_rule = grammar_->GetRule(ref_rule_id);
   if (ref_rule.max_chars >= 0) {
     tmp_char_budget_entered_ = true;
   }
@@ -702,12 +681,12 @@ void EarleyParser::ExpandNextRuleRefElement(
       ref_fsm.GetFsm().GetStart(),
       right_recursion_to_root ? ParserState::kNoPrevInputPos
                               : int32_t(rule_id_to_completable_states_.size() - 1),
-      referenced_rule_budget_deadline,
+      DeadlineForRule(ref_rule_id, state.budget_deadline),
       0,
       0,
       0,
       ResolveActiveTemperatureRule(ref_rule_id, state.active_temperature_rule_id),
-      referenced_rule_char_budget_deadline
+      CharDeadlineForRule(ref_rule_id, state.char_budget_deadline)
   });
 }
 
@@ -767,11 +746,6 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
     } else {
       continue;
     }
-    const auto& ref_rule = grammar_->GetRule(ref_rule_id);
-    const int32_t referenced_rule_budget_deadline =
-        DeadlineForRule(ref_rule_id, state.budget_deadline);
-    const int32_t referenced_rule_char_budget_deadline =
-        CharDeadlineForRule(ref_rule_id, state.char_budget_deadline);
     bool right_recursion_to_root = false;
     if (debug_print) {
       XGRAMMAR_LOG(INFO) << "The rule " << state.rule_id << ": "
@@ -789,31 +763,29 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
         // In this case, we can mark the new state as the root state to speed up.
         right_recursion_to_root = true;
       } else {
-        const auto already_added = [&](const CompletionParentState& completion_parent_state) {
-          return std::find(
+        const auto in_vec = [&](const ParserState& state_) {
+          return std::find_if(
                      rule_id_to_completable_states_.Back().begin(),
                      rule_id_to_completable_states_.Back().end(),
-                     completion_parent_state
+                     [&](const auto& s) {
+                       return StateEqualForParsing()(s.second, state_) && s.first == ref_rule_id;
+                     }
                  ) != rule_id_to_completable_states_.Back().end();
         };
         const auto& parent_states_map = rule_id_to_completable_states_[state.rule_start_pos];
-        std::vector<CompletionParentState> states_to_add;
-        for (const auto& parent_completion : parent_states_map) {
-          if (!parent_completion.Matches(state)) {
+        std::vector<std::pair<int32_t, ParserState>> to_added_states;
+        for (const auto& parent_state_iter : parent_states_map) {
+          if (parent_state_iter.first != state.rule_id ||
+              !IsCompletionCompatibleWithParent(state, parent_state_iter.second)) {
             continue;
           }
-          CompletionParentState propagated_completion{
-              ref_rule_id,
-              referenced_rule_budget_deadline,
-              referenced_rule_char_budget_deadline,
-              parent_completion.parent_state,
-          };
-          if (!already_added(propagated_completion)) {
-            states_to_add.push_back(propagated_completion);
+          const auto& parent_state = parent_state_iter.second;
+          if (!in_vec(parent_state)) {
+            to_added_states.push_back({ref_rule_id, parent_state});
           }
         }
-        for (const auto& completion_parent_state : states_to_add) {
-          rule_id_to_completable_states_.PushBackInLatestRow(completion_parent_state);
+        for (const auto& to_add_state : to_added_states) {
+          rule_id_to_completable_states_.PushBackInLatestRow(to_add_state);
         }
       }
     } else {
@@ -821,8 +793,6 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
         // For kRepeatRef: store element_id = source state, preserve repeat_count
         rule_id_to_completable_states_.PushBackInLatestRow(
             {ref_rule_id,
-             referenced_rule_budget_deadline,
-             referenced_rule_char_budget_deadline,
              ParserState{
                  state.rule_id,
                  state.sequence_id,
@@ -840,8 +810,6 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
         // For kRuleRef: store element_id = target (post-transition state)
         rule_id_to_completable_states_.PushBackInLatestRow(
             {ref_rule_id,
-             referenced_rule_budget_deadline,
-             referenced_rule_char_budget_deadline,
              ParserState{
                  state.rule_id,
                  state.sequence_id,
@@ -875,6 +843,7 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
     }
 
     // If the reference rule is not visited, we need to add it to the queue.
+    const auto& ref_rule = grammar_->GetRule(ref_rule_id);
     if (ref_rule.max_chars >= 0) {
       tmp_char_budget_entered_ = true;
     }
@@ -888,12 +857,12 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
         ref_fsm.GetFsm().GetStart(),
         right_recursion_to_root ? ParserState::kNoPrevInputPos
                                 : int32_t(rule_id_to_completable_states_.size() - 1),
-        referenced_rule_budget_deadline,
+        DeadlineForRule(ref_rule_id, state.budget_deadline),
         0,
         0,
         0,
         ResolveActiveTemperatureRule(ref_rule_id, state.active_temperature_rule_id),
-        referenced_rule_char_budget_deadline
+        CharDeadlineForRule(ref_rule_id, state.char_budget_deadline)
     });
   }
 }
@@ -1249,7 +1218,7 @@ bool EarleyParser::AdvanceAtomicToken(
     }
     return false;
   }
-  rule_id_to_completable_states_.PushBack(std::vector<CompletionParentState>());
+  rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
   if (capture_tracking_) {
     capture_event_history_.PushBack(std::vector<CaptureEvent>());
   }
