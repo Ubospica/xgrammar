@@ -195,10 +195,11 @@ std::optional<SerializationError> DeserializeJSONValue(
   AutoDeserializeJSONValue(&(impl->grammar), object["grammar"], type_name);
   const auto features_it = object.find("earley_parser_features");
   if (features_it == object.end()) {
-    impl->earley_parser_features = EarleyParserFeatures(impl->grammar);
-  } else if (auto error = AutoDeserializeJSONValue(
-                 &(impl->earley_parser_features), features_it->second, type_name
-             )) {
+    return ConstructDeserializeError("Expect an 'earley_parser_features' field", type_name);
+  }
+  if (auto error = AutoDeserializeJSONValue(
+          &(impl->earley_parser_features), features_it->second, type_name
+      )) {
     return error;
   }
   if (impl->earley_parser_features.fsm_state_flags.size() !=

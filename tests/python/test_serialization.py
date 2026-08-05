@@ -308,17 +308,14 @@ def test_serialize_compiled_grammar_roundtrip():
     assert serialized == serialized_new
 
 
-def test_deserialize_compiled_grammar_without_earley_parser_features():
-    """Test compatibility with v16 compiled grammars that do not contain parser features."""
+def test_deserialize_compiled_grammar_requires_earley_parser_features():
+    """Test that compiled grammar deserialization requires parser features."""
     original_compiled_grammar, tokenizer_info = construct_compiled_grammar()
     serialized_object = json.loads(original_compiled_grammar.serialize_json())
-    expected_features = serialized_object.pop("earley_parser_features")
+    serialized_object.pop("earley_parser_features")
 
-    recovered_compiled_grammar = xgr.CompiledGrammar.deserialize_json(
-        json.dumps(serialized_object), tokenizer_info
-    )
-    recovered_object = json.loads(recovered_compiled_grammar.serialize_json())
-    assert recovered_object["earley_parser_features"] == expected_features
+    with pytest.raises(xgr.DeserializeFormatError, match="earley_parser_features"):
+        xgr.CompiledGrammar.deserialize_json(json.dumps(serialized_object), tokenizer_info)
 
 
 def test_serialize_compiled_grammar_functional():
