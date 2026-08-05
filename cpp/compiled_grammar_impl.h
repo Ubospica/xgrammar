@@ -30,6 +30,22 @@ class RuleLevelCache;
 
 /******************* CompiledGrammar Datastructures *******************/
 
+XGRAMMAR_MEMBER_TABLE(
+    EarleyParserFeatures,
+    "fsm_state_flags",
+    &EarleyParserFeatures::fsm_state_flags,
+    "rule_is_nullable",
+    &EarleyParserFeatures::rule_is_nullable,
+    "has_budget_rules",
+    &EarleyParserFeatures::has_budget_rules,
+    "has_char_budget_rules",
+    &EarleyParserFeatures::has_char_budget_rules,
+    "capture_tracking",
+    &EarleyParserFeatures::capture_tracking,
+    "has_hidden_capture_rules",
+    &EarleyParserFeatures::has_hidden_capture_rules
+);
+
 /*!
  * \brief Preprocessed information, for a given specific ParserState, divides the token set
  * into three categories: accepted, rejected, and uncertain.

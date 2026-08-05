@@ -167,6 +167,7 @@ std::string AdaptiveTokenMask::Print(const TokenizerInfo& tokenizer_info) const 
 picojson::value SerializeJSONValue(const CompiledGrammar::Impl& impl) {
   auto result = picojson::object{};
   result["grammar"] = AutoSerializeJSONValue(impl.grammar);
+  result["earley_parser_features"] = AutoSerializeJSONValue(impl.earley_parser_features);
   result["tokenizer_metadata"] = impl.tokenizer_info->DumpMetadataValue();
   // In dynamic mode, serialize an empty mask cache; masks are generated on first use again
   // after deserialization.
@@ -192,6 +193,22 @@ std::optional<SerializationError> DeserializeJSONValue(
     return ConstructDeserializeError("Expect a 'grammar' field", type_name);
   }
   AutoDeserializeJSONValue(&(impl->grammar), object["grammar"], type_name);
+  const auto features_it = object.find("earley_parser_features");
+  if (features_it == object.end()) {
+    impl->earley_parser_features = EarleyParserFeatures(impl->grammar);
+  } else if (auto error = AutoDeserializeJSONValue(
+                 &(impl->earley_parser_features), features_it->second, type_name
+             )) {
+    return error;
+  }
+  if (impl->earley_parser_features.fsm_state_flags.size() !=
+          static_cast<std::size_t>(impl->grammar->complete_fsm.NumStates()) ||
+      impl->earley_parser_features.rule_is_nullable.size() !=
+          static_cast<std::size_t>(impl->grammar->NumRules())) {
+    return ConstructDeserializeError(
+        "Earley parser feature dimensions do not match the grammar", type_name
+    );
+  }
   if (object.find("tokenizer_metadata") == object.end()) {
     return ConstructDeserializeError("Expect a 'tokenizer_metadata' field", type_name);
   }
@@ -213,7 +230,6 @@ std::optional<SerializationError> DeserializeJSONValue(
   if (dynamic_it != object.end() && dynamic_it->second.get<bool>()) {
     impl->token_mask_cache.dynamic_ = true;
   }
-  impl->earley_parser_features = EarleyParserFeatures(impl->grammar);
   return std::nullopt;
 }
 
