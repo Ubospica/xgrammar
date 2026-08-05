@@ -31,14 +31,23 @@ class ReusableStatePointerQueue {
 
   const ParserState* front() const { return entries_[head_]; }
 
-  void pop() { ++head_; }
+  void pop() {
+    ++head_;
+    if (empty()) {
+      clear();
+    }
+  }
 
   void push(const ParserState* state) {
     if (empty()) {
-      entries_.clear();
-      head_ = 0;
+      clear();
     }
     entries_.push_back(state);
+  }
+
+  void clear() {
+    entries_.clear();
+    head_ = 0;
   }
 
  private:
@@ -283,9 +292,16 @@ class RepeatDetector {
     visited_vector_.resize(transition_threshold_);
   }
 
+  /*! \brief Copy the detector configuration without copying temporary visited states. */
+  RepeatDetector(const RepeatDetector& other)
+      : transition_threshold_(other.transition_threshold_) {}
+
   /*! \brief Insert a state only if absent and return its stable address, or nullptr. */
   const ParserState* InsertIfAbsent(const ParserState& state) {
     if (!using_set_ && size_ < transition_threshold_) {
+      if (visited_vector_.empty()) {
+        visited_vector_.resize(transition_threshold_);
+      }
       for (int i = 0; i < size_; ++i) {
         if (StateEqualForParsing()(state, visited_vector_[i])) {
           return nullptr;
@@ -301,29 +317,9 @@ class RepeatDetector {
   const ParserState* InsertFsmTransitionIfAbsent(
       const ParserState& state, int32_t target_element_id
   ) {
-    if (!using_set_ && size_ < transition_threshold_) {
-      for (int i = 0; i < size_; ++i) {
-        const ParserState& existing = visited_vector_[i];
-        if (existing.rule_id == state.rule_id && existing.sequence_id == state.sequence_id &&
-            existing.element_id == target_element_id &&
-            existing.rule_start_pos == state.rule_start_pos &&
-            existing.budget_deadline == state.budget_deadline &&
-            existing.sub_element_id == state.sub_element_id &&
-            existing.repeat_count == state.repeat_count &&
-            existing.partial_codepoint == state.partial_codepoint &&
-            existing.active_temperature_rule_id == state.active_temperature_rule_id &&
-            existing.char_budget_deadline == state.char_budget_deadline) {
-          return nullptr;
-        }
-      }
-      ParserState* inserted = &visited_vector_[size_++];
-      *inserted = state;
-      inserted->element_id = target_element_id;
-      return inserted;
-    }
     ParserState transitioned = state;
     transitioned.element_id = target_element_id;
-    return InsertInSet(transitioned);
+    return InsertIfAbsent(transitioned);
   }
 
   /*! \brief Reset the detector. */
@@ -461,6 +457,9 @@ class EarleyParser {
 
   /*! \brief The class is used to check if a state has been added into the queue. */
   RepeatDetector tmp_states_visited_in_queue_;
+
+  /*! \brief Clear temporary containers after their state pointers have been consumed. */
+  void ClearTemporaryContainers();
 
   /*! \brief Check if the stop token is accepted. */
   bool stop_token_is_accepted_ = false;
