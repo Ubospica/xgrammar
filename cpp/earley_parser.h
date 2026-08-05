@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <optional>
 #include <ostream>
 #include <queue>
@@ -402,10 +401,10 @@ class EarleyParser {
   bool stop_token_is_accepted_ = false;
 
   /*! \brief Parser features built only when the caller does not provide them. */
-  std::shared_ptr<const EarleyParserFeatures> owned_features_;
+  EarleyParserFeatures owned_features_;
 
   /*! \brief Grammar-wide features used by this parser. */
-  const EarleyParserFeatures& features_;
+  const EarleyParserFeatures* features_;
 
   /*! \brief The index of the LLM token currently being accepted, set by the matcher; -1
    * before any token. budget_deadline values are compared against it. */
@@ -489,13 +488,13 @@ class EarleyParser {
 
   /*! \brief Returns true if the rule exists and has a capture name. */
   bool RuleHasCapture(int32_t rule_id) const {
-    return features_.capture_tracking && rule_id >= 0 &&
+    return features_->capture_tracking && rule_id >= 0 &&
            !grammar_->GetRule(rule_id).capture_name.empty();
   }
 
   /*! \brief Returns true if completing this rule can hide bytes from a capture. */
   bool RuleHasHiddenBytes(int32_t rule_id) const {
-    if (!features_.capture_tracking || !features_.has_hidden_capture_rules || rule_id < 0) {
+    if (!features_->capture_tracking || !features_->has_hidden_capture_rules || rule_id < 0) {
       return false;
     }
     const auto* suffix_stop_info = grammar_->GetSuffixStopInfo(rule_id);
@@ -752,10 +751,10 @@ class EarleyParser {
     rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
     is_completed_.push_back(completed);
     scanable_state_history_.PushBack(states);
-    if (features_.capture_tracking) {
+    if (features_->capture_tracking) {
       capture_event_history_.PushBack(std::vector<CaptureEvent>());
     }
-    if (features_.has_char_budget_rules) {
+    if (features_->has_char_budget_rules) {
       char_count_history_.push_back(GetCurrentCharIndex());
       char_budget_entry_history_.push_back(char_budget_entry_history_.back());
     }
@@ -763,7 +762,7 @@ class EarleyParser {
 
   /*! \brief Push a character-count row for a parser row created by the matcher. */
   void PushCharCountRow(int32_t char_count, bool char_budget_entered) {
-    if (!features_.has_char_budget_rules) {
+    if (!features_->has_char_budget_rules) {
       return;
     }
     char_count_history_.push_back(char_count);
@@ -775,12 +774,12 @@ class EarleyParser {
   }
 
   bool HasEnteredCharBudget() const {
-    return features_.has_char_budget_rules && char_budget_entry_history_.back();
+    return features_->has_char_budget_rules && char_budget_entry_history_.back();
   }
 
   /*! \brief Copy the capture events of the latest input position. */
   std::vector<CaptureEvent> CopyLastCaptureRow() const {
-    if (!features_.capture_tracking) {
+    if (!features_->capture_tracking) {
       return {};
     }
     auto row = capture_event_history_[capture_event_history_.size() - 1];
@@ -793,7 +792,7 @@ class EarleyParser {
    * capture history aligned with the state history.
    */
   void PushCaptureRow(const std::vector<CaptureEvent>& events) {
-    if (features_.capture_tracking) {
+    if (features_->capture_tracking) {
       capture_event_history_.PushBack(events);
     }
   }
