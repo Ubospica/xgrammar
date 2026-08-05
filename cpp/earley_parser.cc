@@ -25,6 +25,13 @@ using GrammarExpr = Grammar::Impl::GrammarExpr;
 
 bool EarleyParser::IsCompleted() const { return is_completed_.back(); }
 
+void EarleyParser::ClearTemporaryContainers() {
+  tmp_process_state_queue_.clear();
+  tmp_states_to_be_added_.clear();
+  tmp_states_visited_in_queue_.Clear();
+  tmp_completed_lazy_occurrences_.clear();
+}
+
 bool EarleyParser::CompletionConsumedMarker(const ParserState& state) const {
   const auto& body = grammar_->GetGrammarExpr(grammar_->GetRule(state.rule_id).body_expr_id);
   if (body.type != GrammarExprType::kTagDispatch) {
@@ -383,10 +390,8 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   // Initialize the containers.
   XGRAMMAR_DCHECK(tmp_process_state_queue_.empty())
       << "The tmp_process_state_queue_ should be empty before the scan.";
-  tmp_states_visited_in_queue_.Clear();
-  tmp_states_to_be_added_.clear();
+  ClearTemporaryContainers();
   tmp_accept_stop_token_ = false;
-  tmp_completed_lazy_occurrences_.clear();
   if (has_char_budget_rules_) {
     tmp_char_budget_entered_ = char_budget_entry_history_.back();
     char_count_history_.push_back(GetCurrentCharIndex() + StartsUTF8Codepoint(ch));
@@ -405,6 +410,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
     if (has_char_budget_rules_) {
       char_count_history_.pop_back();
     }
+    ClearTemporaryContainers();
     return false;
   }
 
@@ -434,6 +440,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
   if (has_char_budget_rules_) {
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
+  ClearTemporaryContainers();
   return true;
 }
 
@@ -537,10 +544,8 @@ ParserState EarleyParser::RootInitialState() const {
 }
 
 void EarleyParser::PushStateAndExpand(const ParserState& state) {
-  tmp_states_visited_in_queue_.Clear();
+  ClearTemporaryContainers();
   tmp_accept_stop_token_ = false;
-  tmp_states_to_be_added_.clear();
-  tmp_completed_lazy_occurrences_.clear();
   Enqueue(state);
   rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
   if (capture_tracking_) {
@@ -566,6 +571,7 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
     char_count_history_.push_back(GetCurrentCharIndex());
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
+  ClearTemporaryContainers();
 }
 
 void EarleyParser::Reset() {
@@ -1183,10 +1189,8 @@ bool EarleyParser::AdvanceAtomicToken(
 ) {
   XGRAMMAR_DCHECK(tmp_process_state_queue_.empty())
       << "The tmp_process_state_queue_ should be empty before AdvanceAtomicToken.";
-  tmp_states_visited_in_queue_.Clear();
-  tmp_states_to_be_added_.clear();
+  ClearTemporaryContainers();
   tmp_accept_stop_token_ = false;
-  tmp_completed_lazy_occurrences_.clear();
   if (has_char_budget_rules_) {
     tmp_char_budget_entered_ = char_budget_entry_history_.back();
     char_count_history_.push_back(GetCurrentCharIndex() + token_char_count);
@@ -1202,6 +1206,7 @@ bool EarleyParser::AdvanceAtomicToken(
     if (has_char_budget_rules_) {
       char_count_history_.pop_back();
     }
+    ClearTemporaryContainers();
     return false;
   }
   rule_id_to_completable_states_.PushBack(std::vector<std::pair<int32_t, ParserState>>());
@@ -1227,6 +1232,7 @@ bool EarleyParser::AdvanceAtomicToken(
   if (has_char_budget_rules_) {
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
+  ClearTemporaryContainers();
   return true;
 }
 
