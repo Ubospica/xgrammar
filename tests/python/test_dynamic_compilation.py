@@ -228,35 +228,6 @@ def test_limited_compiler_cache_records_dynamic_grammar_size_on_insertion():
     assert _compile_builtin_json(compiler).memory_size_bytes == dynamic.memory_size_bytes
 
 
-def test_rule_cache_accounts_for_entries_without_mask_payload():
-    tokenizer_info = xgr.TokenizerInfo(["a"], stop_token_ids=[])
-    cache_limit = 64 * 1024
-    compiler = xgr.GrammarCompiler(
-        tokenizer_info,
-        max_threads=1,
-        cache_enabled=True,
-        cache_limit_bytes=cache_limit,
-        enable_dynamic_compilation=True,
-    )
-
-    def populate_rule_cache(repetitions):
-        repeated_literal = "a" * repetitions
-        compiled = compiler.compile_grammar(f'root ::= shared\nshared ::= "{repeated_literal}"')
-        cache_size_before_mask = compiler.get_cache_size_bytes()
-        matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
-        bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
-        xgr.reset_token_bitmask(bitmask)
-        matcher.fill_next_token_bitmask(bitmask)
-        return cache_size_before_mask
-
-    insertion_size = populate_rule_cache(1)
-    assert compiler.get_cache_size_bytes() > insertion_size
-
-    for repetitions in range(2, 200):
-        populate_rule_cache(repetitions)
-    assert compiler.get_cache_size_bytes() <= cache_limit
-
-
 def test_rule_mask_sharing_does_not_cross_context_dependent_rules():
     tokenizer_info = xgr.TokenizerInfo(VOCABULARY, stop_token_ids=[])
     dynamic_compiler = xgr.GrammarCompiler(

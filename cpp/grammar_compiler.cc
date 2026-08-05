@@ -88,7 +88,6 @@ class RuleLevelCache::Impl {
       int32_t /*The number of states*/,
       int32_t /* The number of edges*/>;
   using NodeType = std::pair<NodeKey, AdaptiveTokenMask>;
-  using CacheMap = std::unordered_map<NodeKey, int>;
 
   explicit Impl(size_t max_cache_memory_size) : max_cache_memory_size_(max_cache_memory_size) {}
 
@@ -141,14 +140,8 @@ class RuleLevelCache::Impl {
     int64_t current_cache_memory_size = 0;
     // The cache map: (fsm_hash, node_id, ...) -> index in cache_list
     List<NodeType> cache_list;
-    CacheMap cache;
+    std::unordered_map<NodeKey, int> cache;
   };
-
-  static size_t CacheEntryMemorySize(const AdaptiveTokenMask& token_mask) {
-    // Account for the list node, hash map node, and amortized hash bucket storage.
-    return sizeof(NodeType) + 2 * sizeof(int) + sizeof(CacheMap::value_type) + 2 * sizeof(void*) +
-           MemorySize(token_mask);
-  }
 
   Shard& GetShard(const NodeKey& key) {
     return shards_[HashCombine(std::get<0>(key), std::get<1>(key)) % kNumShards];
@@ -238,9 +231,8 @@ bool RuleLevelCache::Impl::AddCache(
   NodeKey key = std::make_tuple(fsm_hash, fsm_new_node_id, state_cnt, edge_cnt);
   Shard& shard = GetShard(key);
   const size_t shard_max_size = ShardMaxSize();
-  const size_t new_item_size = CacheEntryMemorySize(token_mask);
   std::lock_guard<std::mutex> lock(shard.mutex);
-  if (shard_max_size != kUnlimitedSize && new_item_size > shard_max_size) {
+  if (shard_max_size != kUnlimitedSize && MemorySize(token_mask) > shard_max_size) {
     // The token mask is too large to be cached.
     return false;
   }
@@ -251,6 +243,7 @@ bool RuleLevelCache::Impl::AddCache(
 
   // Evict old entries if needed.
   if (shard_max_size != kUnlimitedSize) {
+    size_t new_item_size = MemorySize(token_mask);
     while ((shard.current_cache_memory_size) > static_cast<int64_t>(shard_max_size - new_item_size)
     ) {
       auto oldest_it = shard.cache_list.begin();
@@ -259,7 +252,7 @@ bool RuleLevelCache::Impl::AddCache(
         // the shard budget, but this is a safeguard.
         break;
       }
-      shard.current_cache_memory_size -= CacheEntryMemorySize(oldest_it->second);
+      shard.current_cache_memory_size -= MemorySize(oldest_it->second);
       shard.cache.erase(oldest_it->first);
       shard.cache_list.Erase(oldest_it);
     }
@@ -267,7 +260,7 @@ bool RuleLevelCache::Impl::AddCache(
 
   // Add to the cache.
   auto new_it = shard.cache_list.PushBack(NodeType(key, std::move(token_mask)));
-  shard.current_cache_memory_size += new_item_size;
+  shard.current_cache_memory_size += MemorySize(new_it->second);
   shard.cache[key] = new_it.Index();
   return true;
 }
