@@ -189,13 +189,6 @@ class Compact2DArray {
    */
   int32_t PushBack(const std::vector<DataType>& new_data);
 
-  /*! \brief Append an empty row. */
-  int32_t PushBackEmpty() {
-    const int32_t end = indptr_.back();
-    indptr_.push_back(end);
-    return static_cast<int32_t>(indptr_.size()) - 2;
-  }
-
   /*!
    * \brief Insert a row by copying elements referenced by stable pointers.
    * \param new_data Pointers to the elements to be inserted.
