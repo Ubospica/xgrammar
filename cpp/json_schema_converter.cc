@@ -1735,6 +1735,7 @@ JSONSchemaConverter::JSONSchemaConverter(
           max_whitespace_cnt
       ),
       any_whitespace_(any_whitespace),
+      indentation_enabled_(!any_whitespace && indent.has_value()),
       max_whitespace_cnt_(max_whitespace_cnt),
       any_order_(any_order),
       ref_resolver_(std::move(ref_resolver)) {
@@ -1749,24 +1750,16 @@ JSONSchemaConverter::JSONSchemaConverter(
 Grammar JSONSchemaConverter::Convert(const SchemaSpecPtr& spec) {
   AddBasicRules();
 
-  // Register the root rule for circular reference handling
-  // This allows $ref: "#" to resolve to "root"
   int32_t root_rule_id = builder_.AddEmptyRuleWithHint("root");
   std::string root_rule_name = builder_.GetRule(root_rule_id).name;
-  uri_to_rule_id_["#"] = root_rule_id;
-
-  // Check if the spec can be directly mapped to an existing rule
-  bool indentation_sensitive = IsIndentationSensitive(spec);
-  auto cached_rule = GetCache(spec->cache_key, indentation_sensitive);
+  const std::string& cache_key = spec->cache_key;
+  int64_t indentation_context = GetCacheContext(spec);
+  auto cached_rule = GetCache(cache_key, indentation_context);
   if (cached_rule.has_value()) {
-    // Root schema matches a basic type, just reference it
     builder_.UpdateRuleBody(root_rule_id, RuleRef(*cached_rule));
   } else {
-    // Generate the rule body
-    if (!spec->cache_key.empty()) {
-      AddCache(spec->cache_key, root_rule_id, indentation_sensitive);
-    }
-    builder_.UpdateRuleBody(root_rule_id, GenerateFromSpec(spec, root_rule_name));
+    AddCache(cache_key, indentation_context, root_rule_id);
+    builder_.UpdateRuleBody(root_rule_id, GenerateRuleBody(spec, root_rule_name));
   }
   return builder_.Get(root_rule_id);
 }
@@ -1794,61 +1787,76 @@ void JSONSchemaConverter::AddBasicRules(const std::vector<std::string>& addition
   }
   AddHelperRules();
 
-  // Create basic rules with a temporary indent manager for compact format
+  // Unconstrained recursive JSON needs one depth-independent formatting context. Preserve compact
+  // formatting without indentation; use arbitrary whitespace when exact indentation is enabled.
   auto saved_indent_manager = indent_manager_;
+  int32_t saved_colon_expr_id = colon_expr_id_;
+  bool saved_any_whitespace = any_whitespace_;
+  bool saved_generating_any_whitespace = generating_any_whitespace_;
+  bool use_any_whitespace = any_whitespace_ || indentation_enabled_;
   indent_manager_ = IndentManager(
       std::nullopt,
-      any_whitespace_ ? "," : ", ",
-      any_whitespace_,
-      any_whitespace_ ? max_whitespace_cnt_ : std::nullopt
+      use_any_whitespace ? "," : ", ",
+      use_any_whitespace,
+      use_any_whitespace ? max_whitespace_cnt_ : std::nullopt
   );
+  if (indentation_enabled_) {
+    any_whitespace_ = true;
+    generating_any_whitespace_ = true;
+    int32_t whitespace = WhitespaceExpression();
+    colon_expr_id_ = Sequence({whitespace, ByteString(":"), whitespace});
+  }
 
   // basic_any - use "{}" as the cache key for empty schema
   auto any_spec = SchemaSpec::Make(AnySpec{}, "{}", kBasicAny);
+  int64_t recursive_context = GetCacheContext(any_spec);
+  AddCache("{}", recursive_context, builder_.GetRuleId(kBasicAny));
   builder_.UpdateRuleBody(kBasicAny, GenerateAny(std::get<AnySpec>(any_spec->spec), kBasicAny));
-  AddCache("{}", builder_.GetRuleId(kBasicAny));
 
   // basic_integer - cache_key matches SchemaParser::ComputeCacheKey for {"type": "integer"}
   constexpr const char* kIntegerCacheKey = "{\"type\":\"integer\"}";
+  AddCache(kIntegerCacheKey, 0, builder_.GetRuleId(kBasicInteger));
   builder_.UpdateRuleBody(kBasicInteger, GenerateInteger(IntegerSpec{}, kBasicInteger));
-  AddCache(kIntegerCacheKey, builder_.GetRuleId(kBasicInteger));
 
   // basic_number - cache_key matches SchemaParser::ComputeCacheKey for {"type": "number"}
   constexpr const char* kNumberCacheKey = "{\"type\":\"number\"}";
+  AddCache(kNumberCacheKey, 0, builder_.GetRuleId(kBasicNumber));
   builder_.UpdateRuleBody(kBasicNumber, GenerateNumber(NumberSpec{}, kBasicNumber));
-  AddCache(kNumberCacheKey, builder_.GetRuleId(kBasicNumber));
 
   constexpr const char* kStringCacheKey = "{\"type\":\"string\"}";
+  AddCache(kStringCacheKey, 0, builder_.GetRuleId(kBasicString));
   builder_.UpdateRuleBody(kBasicString, Sequence({ByteString("\""), RuleRef(kBasicStringSub)}));
-  AddCache(kStringCacheKey, builder_.GetRuleId(kBasicString));
 
   // basic_boolean - cache_key matches SchemaParser::ComputeCacheKey for {"type": "boolean"}
   constexpr const char* kBooleanCacheKey = "{\"type\":\"boolean\"}";
+  AddCache(kBooleanCacheKey, 0, builder_.GetRuleId(kBasicBoolean));
   builder_.UpdateRuleBody(kBasicBoolean, GenerateBoolean(BooleanSpec{}, kBasicBoolean));
-  AddCache(kBooleanCacheKey, builder_.GetRuleId(kBasicBoolean));
 
   // basic_null - cache_key matches SchemaParser::ComputeCacheKey for {"type": "null"}
   constexpr const char* kNullCacheKey = "{\"type\":\"null\"}";
+  AddCache(kNullCacheKey, 0, builder_.GetRuleId(kBasicNull));
   builder_.UpdateRuleBody(kBasicNull, GenerateNull(NullSpec{}, kBasicNull));
-  AddCache(kNullCacheKey, builder_.GetRuleId(kBasicNull));
 
   // basic_array - cache_key matches SchemaParser::ComputeCacheKey for {"type": "array"}
   constexpr const char* kArrayCacheKey = "{\"type\":\"array\"}";
-  ArraySpec array_spec_val;
-  array_spec_val.allow_additional_items = true;
-  array_spec_val.additional_items = any_spec;
-  builder_.UpdateRuleBody(kBasicArray, GenerateArray(array_spec_val, kBasicArray));
-  AddCache(kArrayCacheKey, builder_.GetRuleId(kBasicArray));
+  ArraySpec array_spec;
+  array_spec.allow_additional_items = true;
+  array_spec.additional_items = any_spec;
+  AddCache(kArrayCacheKey, recursive_context, builder_.GetRuleId(kBasicArray));
+  builder_.UpdateRuleBody(kBasicArray, GenerateArray(array_spec, kBasicArray));
 
   // basic_object - cache_key matches SchemaParser::ComputeCacheKey for {"type": "object"}
   constexpr const char* kObjectCacheKey = "{\"type\":\"object\"}";
-  ObjectSpec obj_spec_val;
-  obj_spec_val.allow_additional_properties = true;
-  obj_spec_val.additional_properties_schema = any_spec;
-  builder_.UpdateRuleBody(kBasicObject, GenerateObject(obj_spec_val, kBasicObject));
-  AddCache(kObjectCacheKey, builder_.GetRuleId(kBasicObject));
+  ObjectSpec object_spec;
+  object_spec.allow_additional_properties = true;
+  object_spec.additional_properties_schema = any_spec;
+  AddCache(kObjectCacheKey, recursive_context, builder_.GetRuleId(kBasicObject));
+  builder_.UpdateRuleBody(kBasicObject, GenerateObject(object_spec, kBasicObject));
 
   indent_manager_ = saved_indent_manager;
+  colon_expr_id_ = saved_colon_expr_id;
+  any_whitespace_ = saved_any_whitespace;
+  generating_any_whitespace_ = saved_generating_any_whitespace;
 }
 
 void JSONSchemaConverter::AddHelperRules() {
@@ -2110,78 +2118,116 @@ int32_t JSONSchemaConverter::GetKeyPatternExcluding(
 
 std::string JSONSchemaConverter::GetBasicAnyRuleName() const { return kBasicAny; }
 
+int64_t JSONSchemaConverter::GetCacheContext(const SchemaSpecPtr& spec) const {
+  if (!indentation_enabled_) {
+    return 0;
+  }
+
+  bool indentation_independent = std::visit(
+      [](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        return std::is_same_v<T, IntegerSpec> || std::is_same_v<T, NumberSpec> ||
+               std::is_same_v<T, StringSpec> || std::is_same_v<T, BooleanSpec> ||
+               std::is_same_v<T, NullSpec> || std::is_same_v<T, ConstSpec> ||
+               std::is_same_v<T, EnumSpec>;
+      },
+      spec->spec
+  );
+  if (indentation_independent) {
+    return 0;
+  }
+
+  const std::string& cache_key = spec->cache_key;
+  bool unconstrained_recursive = std::holds_alternative<AnySpec>(spec->spec) ||
+                                 cache_key == "{\"type\":\"array\"}" ||
+                                 cache_key == "{\"type\":\"object\"}";
+  if (generating_any_whitespace_ || unconstrained_recursive) {
+    return kAnyWhitespaceCacheContext;
+  }
+  return indent_manager_.GetCacheContext();
+}
+
 void JSONSchemaConverter::AddCache(
-    const std::string& key, int32_t rule_id, bool indentation_sensitive
+    const std::string& key, int64_t indentation_context, int32_t rule_id
 ) {
   if (!key.empty()) {
-    int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
     rule_cache_manager_.AddCache(key, 0, indentation_context, rule_id);
   }
 }
 
 std::optional<int32_t> JSONSchemaConverter::GetCache(
-    const std::string& key, bool indentation_sensitive
+    const std::string& key, int64_t indentation_context
 ) const {
   if (key.empty()) {
     return std::nullopt;
   }
-  int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
   return rule_cache_manager_.GetCache(key, 0, indentation_context);
 }
 
-bool JSONSchemaConverter::IsIndentationSensitive(const SchemaSpecPtr& spec) const {
-  auto cached = indentation_sensitivity_cache_.find(spec);
-  if (cached != indentation_sensitivity_cache_.end()) {
-    return cached->second;
+int32_t JSONSchemaConverter::GenerateRuleBody(
+    const SchemaSpecPtr& spec, const std::string& rule_name
+) {
+  const std::string& cache_key = spec->cache_key;
+  if (!indentation_enabled_ || cache_key.empty()) {
+    return GenerateFromSpec(spec, rule_name);
   }
-  bool result = std::visit(
-      [this](const auto& value) {
-        using T = std::decay_t<decltype(value)>;
-        if constexpr (std::is_same_v<T, ArraySpec> || std::is_same_v<T, ObjectSpec> ||
-                      std::is_same_v<T, RefSpec>) {
-          return true;
-        } else if constexpr (std::is_same_v<T, AnyOfSpec> || std::is_same_v<T, OneOfSpec>) {
-          return std::any_of(
-              value.options.begin(),
-              value.options.end(),
-              [this](const auto& option) { return IsIndentationSensitive(option); }
-          );
-        } else if constexpr (std::is_same_v<T, AllOfSpec>) {
-          return std::any_of(
-              value.schemas.begin(),
-              value.schemas.end(),
-              [this](const auto& schema) { return IsIndentationSensitive(schema); }
-          );
-        } else if constexpr (std::is_same_v<T, TypeArraySpec>) {
-          return std::any_of(
-              value.type_schemas.begin(),
-              value.type_schemas.end(),
-              [this](const auto& schema) { return IsIndentationSensitive(schema); }
-          );
-        } else {
-          return false;
-        }
-      },
-      spec->spec
-  );
-  indentation_sensitivity_cache_.emplace(spec, result);
-  return result;
+
+  ++active_schema_keys_[cache_key];
+  int32_t body = GenerateFromSpec(spec, rule_name);
+  if (--active_schema_keys_[cache_key] == 0) {
+    active_schema_keys_.erase(cache_key);
+  }
+  return body;
+}
+
+int32_t JSONSchemaConverter::CreateRuleWithAnyWhitespace(
+    const SchemaSpecPtr& spec, const std::string& rule_name_hint
+) {
+  if (generating_any_whitespace_) {
+    return CreateRule(spec, rule_name_hint);
+  }
+
+  auto saved_indent_manager = indent_manager_;
+  int32_t saved_colon_expr_id = colon_expr_id_;
+  bool saved_any_whitespace = any_whitespace_;
+  indent_manager_ = IndentManager(std::nullopt, ",", true, max_whitespace_cnt_);
+  any_whitespace_ = true;
+  generating_any_whitespace_ = true;
+  int32_t whitespace = WhitespaceExpression();
+  colon_expr_id_ = Sequence({whitespace, ByteString(":"), whitespace});
+
+  int32_t rule_id = CreateRule(spec, rule_name_hint);
+
+  indent_manager_ = saved_indent_manager;
+  colon_expr_id_ = saved_colon_expr_id;
+  any_whitespace_ = saved_any_whitespace;
+  generating_any_whitespace_ = false;
+  return rule_id;
 }
 
 int32_t JSONSchemaConverter::CreateRule(
     const SchemaSpecPtr& spec, const std::string& rule_name_hint
 ) {
-  bool indentation_sensitive = IsIndentationSensitive(spec);
-  auto cached = GetCache(spec->cache_key, indentation_sensitive);
+  const std::string& cache_key = spec->cache_key;
+  int64_t indentation_context = GetCacheContext(spec);
+  auto cached = GetCache(cache_key, indentation_context);
   if (cached.has_value()) {
     return cached.value();
   }
+  if (indentation_context == kAnyWhitespaceCacheContext && !generating_any_whitespace_) {
+    return CreateRuleWithAnyWhitespace(spec, rule_name_hint);
+  }
+  if (indentation_enabled_ && indentation_context != kAnyWhitespaceCacheContext &&
+      active_schema_keys_.count(cache_key)) {
+    return CreateRuleWithAnyWhitespace(spec, rule_name_hint);
+  }
+
   int32_t rule_id = builder_.AddEmptyRuleWithHint(rule_name_hint);
-  AddCache(spec->cache_key, rule_id, indentation_sensitive);
+  AddCache(cache_key, indentation_context, rule_id);
   // Copy the name before generating: GenerateFromSpec may add rules and reallocate the
   // builder's rule storage, invalidating references into it.
   std::string rule_name = builder_.GetRule(rule_id).name;
-  builder_.UpdateRuleBody(rule_id, GenerateFromSpec(spec, rule_name));
+  builder_.UpdateRuleBody(rule_id, GenerateRuleBody(spec, rule_name));
   return rule_id;
 }
 
@@ -3078,18 +3124,11 @@ int32_t JSONSchemaConverter::GenerateEnum(const EnumSpec& spec, const std::strin
 }
 
 int32_t JSONSchemaConverter::GenerateRef(const RefSpec& spec, const std::string& rule_name) {
-  // First check if we have a direct URI mapping (for circular references)
-  if (uri_to_rule_id_.count(spec.uri)) {
-    return RuleRef(uri_to_rule_id_[spec.uri]);
-  }
-
   if (!ref_resolver_) {
     XGRAMMAR_LOG(FATAL) << "Ref resolver not set; cannot resolve $ref: " << spec.uri;
   }
 
-  // Derive the rule name from the URI path, then resolve before allocating so an
-  // equivalent rule can be reused. Register the new rule before generating its body
-  // to prevent recursion when the resolved target refers back to this URI.
+  // Derive the rule name from the URI path, then resolve through the shared rule cache.
   std::string rule_name_hint = "ref";
   if (spec.uri.size() >= 2 && spec.uri[0] == '#' && spec.uri[1] == '/') {
     std::string new_rule_name_prefix;
@@ -3113,19 +3152,7 @@ int32_t JSONSchemaConverter::GenerateRef(const RefSpec& spec, const std::string&
   }
 
   SchemaSpecPtr resolved = ref_resolver_(spec.uri, rule_name_hint);
-  bool indentation_sensitive = IsIndentationSensitive(resolved);
-  auto cached = GetCache(resolved->cache_key, indentation_sensitive);
-  if (cached.has_value()) {
-    uri_to_rule_id_[spec.uri] = *cached;
-    return RuleRef(*cached);
-  }
-
-  int32_t allocated_rule_id = builder_.AddEmptyRuleWithHint(rule_name_hint);
-  std::string allocated_rule_name = builder_.GetRule(allocated_rule_id).name;
-  uri_to_rule_id_[spec.uri] = allocated_rule_id;
-  AddCache(resolved->cache_key, allocated_rule_id, indentation_sensitive);
-  builder_.UpdateRuleBody(allocated_rule_id, GenerateFromSpec(resolved, allocated_rule_name));
-  return RuleRef(allocated_rule_id);
+  return RuleRef(CreateRule(resolved, rule_name_hint));
 }
 
 int32_t JSONSchemaConverter::GenerateAnyOf(const AnyOfSpec& spec, const std::string& rule_name) {

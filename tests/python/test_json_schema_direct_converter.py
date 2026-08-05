@@ -295,3 +295,78 @@ def test_direct_converter_keeps_composite_cache_entries_at_their_indentation_dep
     valid_text = json.dumps(instance, indent=2)
     assert _is_grammar_accept_string(grammar, valid_text)
     assert not _is_grammar_accept_string(grammar, valid_text.replace("\n      ", "\n    "))
+
+
+def test_direct_converter_unconstrained_rules_allow_any_indentation():
+    schema = {
+        "type": "object",
+        "properties": {"object": {"type": "object"}, "array": {"type": "array"}},
+        "required": ["object", "array"],
+        "additionalProperties": False,
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), any_whitespace=False, indent=2)
+
+    pretty = json.dumps(
+        {"object": {"nested": [1, {"value": True}]}, "array": [1, {"value": 2}]}, indent=2
+    )
+    compact_values = """{
+  "object": {"nested":[1,{"value":true}]},
+  "array": [1,{"value":2}]
+}"""
+    assert _is_grammar_accept_string(grammar, pretty)
+    assert _is_grammar_accept_string(grammar, compact_values)
+    assert not _is_grammar_accept_string(grammar, '{\n  "object": [],\n  "array": {}\n}')
+
+
+def test_direct_converter_keeps_repeated_reference_targets_at_their_indentation_depth():
+    schema = {
+        "$defs": {
+            "shared": {
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            }
+        },
+        "type": "object",
+        "properties": {
+            "first": {"$ref": "#/$defs/shared"},
+            "wrapper": {
+                "type": "object",
+                "properties": {"second": {"$ref": "#/$defs/shared"}},
+                "required": ["second"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["first", "wrapper"],
+        "additionalProperties": False,
+    }
+    instance = {"first": {"value": 1}, "wrapper": {"second": {"value": 2}}}
+    valid_text = json.dumps(instance, indent=2)
+    invalid_text = valid_text.replace('\n      "value": 2', '\n    "value": 2')
+
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), any_whitespace=False, indent=2)
+    assert _is_grammar_accept_string(grammar, valid_text)
+    assert not _is_grammar_accept_string(grammar, invalid_text)
+
+
+def test_direct_converter_recursive_reference_uses_any_whitespace_after_first_depth():
+    schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "value": {"type": "integer"},
+            "next": {"anyOf": [{"$ref": "#"}, {"type": "null"}]},
+        },
+        "required": ["value", "next"],
+        "additionalProperties": False,
+    }
+    instance = {"value": 1, "next": {"value": 2, "next": {"value": 3, "next": None}}}
+
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), any_whitespace=False, indent=2)
+    assert _is_grammar_accept_string(grammar, json.dumps(instance, indent=2))
+    assert _is_grammar_accept_string(
+        grammar, '{\n  "value": 1,\n  "next": {"value":2,"next":{"value":3,"next":null}}\n}'
+    )
+    assert not _is_grammar_accept_string(
+        grammar, '{\n  "value": 1,\n  "next": {"value": "invalid", "next": null}\n}'
+    )

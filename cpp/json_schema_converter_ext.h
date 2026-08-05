@@ -70,9 +70,8 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
 
   void AddBasicRules() override;
 
-  void AddCache(const std::string& key, int32_t rule_id, bool indentation_sensitive = false)
-      override;
-  std::optional<int32_t> GetCache(const std::string& key, bool indentation_sensitive = false)
+  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id) override;
+  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context)
       const override;
 
  private:

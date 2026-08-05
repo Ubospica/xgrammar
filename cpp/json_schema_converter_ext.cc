@@ -84,17 +84,21 @@ void XMLToolCallingConverter::AddBasicRules() {
 
   auto any_spec = SchemaSpec::Make(AnySpec{}, "{}", kBasicAny);
   constexpr const char* kStringCacheKey = "{\"type\":\"string\"}";
+  constexpr const char* kArrayCacheKey = "{\"type\":\"array\"}";
   constexpr const char* kObjectCacheKey = "{\"type\":\"object\"}";
 
   // The outer part, xml format, is at level 1.
   nested_object_level_ = 1;
   // Add XML string rule
+  AddCache(kStringCacheKey, 0, builder_.GetRuleId(kXMLString));
   builder_.UpdateRuleBody(kXMLString, TagDispatch(false, {xml_wrapper_.parameter_suffix}));
-  AddCache(kStringCacheKey, builder_.GetRuleId(kXMLString));
 
   // Add XML any rule
+  int64_t recursive_context = GetCacheContext(any_spec);
+  AddCache("{}", recursive_context, builder_.GetRuleId(kXMLAny));
   builder_.UpdateRuleBody(kXMLAny, GenerateAny(AnySpec{}, kXMLAny));
-  AddCache("{}", builder_.GetRuleId(kXMLAny));
+  AddCache(kArrayCacheKey, recursive_context, builder_.GetRuleId(kBasicArray));
+  AddCache(kObjectCacheKey, recursive_context, builder_.GetRuleId(kBasicObject));
 
   // Reset the nested object level to 0, which is the root level.
   nested_object_level_ = 0;
@@ -103,8 +107,8 @@ void XMLToolCallingConverter::AddBasicRules() {
   ObjectSpec xml_object_spec;
   xml_object_spec.allow_additional_properties = true;
   xml_object_spec.additional_properties_schema = any_spec;
+  AddCache(kObjectCacheKey, recursive_context, builder_.GetRuleId(kXMLObject));
   builder_.UpdateRuleBody(kXMLObject, GenerateObject(xml_object_spec, kXMLObject));
-  AddCache(kObjectCacheKey, builder_.GetRuleId(kXMLObject));
 
   // Add XML variable name rule
   builder_.UpdateRuleBody(
@@ -286,24 +290,22 @@ int32_t XMLToolCallingConverter::GenerateObject(
 }
 
 void XMLToolCallingConverter::AddCache(
-    const std::string& key, int32_t rule_id, bool indentation_sensitive
+    const std::string& key, int64_t indentation_context, int32_t rule_id
 ) {
   if (key.empty()) {
     return;
   }
   int format_context = std::min(nested_object_level_, 2);
-  int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
   rule_cache_manager_.AddCache(key, format_context, indentation_context, rule_id);
 }
 
 std::optional<int32_t> XMLToolCallingConverter::GetCache(
-    const std::string& key, bool indentation_sensitive
+    const std::string& key, int64_t indentation_context
 ) const {
   if (key.empty()) {
     return std::nullopt;
   }
   int format_context = std::min(nested_object_level_, 2);
-  int64_t indentation_context = indentation_sensitive ? indent_manager_.GetCacheContext() : 0;
   return rule_cache_manager_.GetCache(key, format_context, indentation_context);
 }
 

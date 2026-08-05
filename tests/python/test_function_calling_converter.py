@@ -66,6 +66,7 @@ def test_qwen_xml_object_cache_keeps_nested_context():
     }
     grammar = _json_schema_to_ebnf(schema, json_format="qwen_xml")
     assert _is_grammar_accept_string(grammar, "<parameter=payload>{}</parameter>")
+    assert _is_grammar_accept_string(grammar, '<parameter=payload>{"value":[1,true]}</parameter>')
     assert not _is_grammar_accept_string(grammar, "<parameter=payload></parameter>")
 
 
