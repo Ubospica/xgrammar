@@ -229,6 +229,9 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
   std::vector<FSMEdge>& GetEdges(int state) { return edges_[state]; }
 
   void ValidateRepeatEdgeInvariant() const {
+#if !XGRAMMAR_ENABLE_INTERNAL_CHECK
+    return;
+#else
     for (int32_t state = 0; state < static_cast<int32_t>(edges_.size()); ++state) {
       const auto& edges = edges_[state];
       if (edges.size() <= 1) {
@@ -239,6 +242,7 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
       )) << "A state with a kRepeatRef edge must have exactly one outgoing edge, but state "
          << state << " has " << edges.size() << ".";
     }
+#endif
   }
 
   void Advance(
@@ -484,16 +488,12 @@ FSM::FSM(int num_states) : pimpl_(std::make_shared<Impl>(num_states)) {}
 
 FSM::FSM(const std::vector<std::vector<FSMEdge>>& edges, std::vector<int32_t> edge_aux_data)
     : pimpl_(std::make_shared<Impl>(edges, std::move(edge_aux_data))) {
-#if XGRAMMAR_ENABLE_INTERNAL_CHECK
   pimpl_->ValidateRepeatEdgeInvariant();
-#endif
 }
 
 FSM::FSM(std::vector<std::vector<FSMEdge>>&& edges, std::vector<int32_t> edge_aux_data)
     : pimpl_(std::make_shared<Impl>(std::move(edges), std::move(edge_aux_data))) {
-#if XGRAMMAR_ENABLE_INTERNAL_CHECK
   pimpl_->ValidateRepeatEdgeInvariant();
-#endif
 }
 
 int FSM::NumStates() const { return pimpl_->NumStates(); }
@@ -547,6 +547,8 @@ std::string FSM::EdgesToString(std::optional<std::vector<int>> states) const {
 }
 
 const std::vector<FSMEdge>& FSM::GetEdges(int state) const { return pimpl_->GetEdges(state); }
+
+void FSM::ValidateRepeatEdgeInvariant() const { pimpl_->ValidateRepeatEdgeInvariant(); }
 
 std::vector<std::vector<FSMEdge>>& FSM::GetEdges() { return pimpl_->GetEdges(); }
 
@@ -1268,6 +1270,7 @@ bool FSMWithStartEnd::IsDFA() {
 }
 
 FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon(int max_num_states) const {
+  fsm_->ValidateRepeatEdgeInvariant();
   if (is_dfa_) {
     return *this;
   }
@@ -1361,10 +1364,13 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon(int max_num_states) const {
       cnt++;
     }
   }
-  return RebuildWithMapping(new_to_old, cnt);
+  auto result = RebuildWithMapping(new_to_old, cnt);
+  result.GetFsm().ValidateRepeatEdgeInvariant();
+  return result;
 }
 
 FSMWithStartEnd FSMWithStartEnd::MergeEquivalentStates(int max_result_num_states) const {
+  fsm_->ValidateRepeatEdgeInvariant();
   if (max_result_num_states < NumStates()) {
     return *this;
   }
@@ -1630,6 +1636,7 @@ FSMWithStartEnd FSMWithStartEnd::MergeEquivalentStates(int max_result_num_states
       result.GetFsm()->SortEdges();
     }
   }
+  result.GetFsm().ValidateRepeatEdgeInvariant();
   return result;
 }
 
