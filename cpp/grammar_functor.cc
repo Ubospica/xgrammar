@@ -3999,10 +3999,6 @@ Grammar RepetitionRangeExpander::Apply(const Grammar& grammar) {
   return RepetitionRangeExpanderImpl().Apply(grammar);
 }
 
-Grammar GrammarOptimizer::Apply(const Grammar& grammar) {
-  return GrammarOptimizerImpl::Apply(grammar, true);
-}
-
 Grammar GrammarOptimizer::Apply(const Grammar& grammar, bool expand_repetition_ranges) {
   return GrammarOptimizerImpl::Apply(grammar, expand_repetition_ranges);
 }
