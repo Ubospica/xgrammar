@@ -2210,11 +2210,6 @@ int32_t RepetitionRangeExpanderImpl::ExpandRepetitionRange(
   const auto repeat_name = cur_rule_name + "_repeat_1";
   XGRAMMAR_DCHECK(lower >= kUnzipThreshold && upper >= lower);
 
-  // If we have infinite repetition part, add it to the sequence.
-  if (infinite_repetition_id.has_value()) {
-    repeated_sequence.push_back(infinite_repetition_id.value());
-  }
-
   // The repetition body.
   if (upper != kUnzipThreshold) {
     XGRAMMAR_DCHECK(upper > kUnzipThreshold);
@@ -2233,6 +2228,15 @@ int32_t RepetitionRangeExpanderImpl::ExpandRepetitionRange(
   // Add the last threshold grammar_expr_id to the sequence.
   for (int i = 0; i < kUnzipThreshold; ++i) {
     repeated_sequence.push_back(grammar_expr_id);
+  }
+
+  // If we have infinite repetition part, add it to the end of the sequence. It must come after
+  // the fixed-length part: everything before it then has a fixed total length, so the Earley
+  // parser tracks a single dot position. Placing it first would make every input position a
+  // possible boundary between the infinite part and the fixed part, creating one active state
+  // per split point and a per-step token mask latency that grows with the matched prefix.
+  if (infinite_repetition_id.has_value()) {
+    repeated_sequence.push_back(infinite_repetition_id.value());
   }
 
   // Add the sequence to choices.

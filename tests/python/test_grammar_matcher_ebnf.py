@@ -13,6 +13,7 @@ from transformers import AutoTokenizer
 import xgrammar as xgr
 from xgrammar.testing import (
     _get_masked_tokens_from_bitmask,
+    _get_matcher_from_grammar,
     _get_matcher_from_grammar_and_tokenizer_info,
     _is_grammar_accept_string,
     _print_grammar_fsms,
@@ -812,6 +813,23 @@ def test_repeat_ref_unbounded():
     assert _is_grammar_accept_string(grammar, "a" * 1000)
     assert not _is_grammar_accept_string(grammar, "a" * 199)
     assert not _is_grammar_accept_string(grammar, "")
+
+
+def test_repeat_ref_unbounded_bounded_states():
+    """Regression test for https://github.com/mlc-ai/xgrammar/issues/805.
+
+    An unbounded repetition {lower,} with lower > 128 must keep a bounded number of
+    active parser states while matching. If the unbounded tail is placed before the
+    fixed-length part, every input position becomes a possible boundary between the
+    two parts, so the parser accumulates one state per split point and the per-step
+    token mask latency grows with the matched prefix.
+    """
+    grammar = xgr.Grammar.from_ebnf("root ::= [a-z]{200,}")
+    matcher = _get_matcher_from_grammar(grammar)
+    for _ in range(400):
+        assert matcher.accept_string("a")
+        num_states = matcher._debug_print_internal_state().count("ParserState(")
+        assert num_states <= 8
 
 
 def test_repeat_ref_range():
