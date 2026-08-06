@@ -508,6 +508,14 @@ TEST(XGrammarFSMTest, InternalRepeatEdgeValidationCallSites) {
     GTEST_SKIP() << "Internal checks are disabled.";
   }
 
+  FSM add_normal_edge_fsm(3);
+  add_normal_edge_fsm.AddRepeatEdge(0, 1, 0, 1, 2);
+  EXPECT_THROW(add_normal_edge_fsm.AddEdge(0, 2, 'a', 'a'), LogFatalError);
+
+  FSM add_repeat_edge_fsm(3);
+  add_repeat_edge_fsm.AddEdge(0, 1, 'a', 'a');
+  EXPECT_THROW(add_repeat_edge_fsm.AddRepeatEdge(0, 2, 0, 1, 2), LogFatalError);
+
   std::vector<std::vector<FSMEdge>> edges(3);
   edges[0].emplace_back(FSMEdge::EdgeType::kRepeatRef, 0, 1);
   edges[0].emplace_back('a', 'a', 2);

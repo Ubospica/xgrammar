@@ -256,13 +256,15 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
 
   void AddEdge(int from, int to, int32_t min, int32_t max) {
     XGRAMMAR_DCHECK(from < static_cast<int>(edges_.size()));
-    const auto& outgoing_edges = edges_[from];
-    if (min == FSMEdge::EdgeType::kRepeatRef) {
-      XGRAMMAR_DCHECK(outgoing_edges.empty())
-          << "A state with a kRepeatRef edge must have no other outgoing edges.";
-    } else {
-      XGRAMMAR_DCHECK(outgoing_edges.empty() || !outgoing_edges.front().IsRepeatRef())
-          << "A state with a kRepeatRef edge must have no other outgoing edges.";
+    if constexpr (kInternalChecksEnabled) {
+      const auto& outgoing_edges = edges_[from];
+      if (min == FSMEdge::EdgeType::kRepeatRef) {
+        XGRAMMAR_DCHECK(outgoing_edges.empty())
+            << "A state with a kRepeatRef edge must have no other outgoing edges.";
+      } else {
+        XGRAMMAR_DCHECK(outgoing_edges.empty() || !outgoing_edges.front().IsRepeatRef())
+            << "A state with a kRepeatRef edge must have no other outgoing edges.";
+      }
     }
     edges_[from].push_back({min, max, to});
   }
