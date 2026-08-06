@@ -728,7 +728,7 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
       target = edge.target;
       ref_rule_id = edge.GetRefRuleId();
     } else if (edge.IsRepeatRef()) {
-      XGRAMMAR_CHECK(grammar_->complete_fsm.GetEdges(state.element_id).size() == 1)
+      XGRAMMAR_DCHECK(grammar_->complete_fsm.GetEdges(state.element_id).size() == 1)
           << "A state with a kRepeatRef edge must have exactly one outgoing edge.";
       is_repeat = true;
       repeat_info = grammar_->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
