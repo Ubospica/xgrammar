@@ -493,6 +493,46 @@ TEST(XGrammarFSMTest, MergingNodesTest) {
   EXPECT_EQ(fsm_wse.GetFsm().NumStates(), 5);
 }
 
+TEST(XGrammarFSMTest, RepeatEdgeInvariantValidation) {
+  FSM valid_fsm(2);
+  valid_fsm.AddRepeatEdge(0, 1, 0, 1, 2);
+  EXPECT_NO_THROW(valid_fsm.ValidateRepeatEdgeInvariant());
+
+  FSM invalid_fsm = valid_fsm.Copy();
+  invalid_fsm.GetEdges(0).emplace_back('a', 'a', 1);
+  EXPECT_THROW(invalid_fsm.ValidateRepeatEdgeInvariant(), LogFatalError);
+}
+
+TEST(XGrammarFSMTest, InternalRepeatEdgeValidationCallSites) {
+  if constexpr (!kInternalChecksEnabled) {
+    GTEST_SKIP() << "Internal checks are disabled.";
+  }
+
+  std::vector<std::vector<FSMEdge>> edges(3);
+  edges[0].emplace_back(FSMEdge::EdgeType::kRepeatRef, 0, 1);
+  edges[0].emplace_back('a', 'a', 2);
+  std::vector<int32_t> edge_aux_data{0, 1, 2};
+  EXPECT_THROW(FSM(edges, edge_aux_data), LogFatalError);
+
+  auto make_invalid_fsm = []() {
+    FSMWithStartEnd fsm;
+    for (int i = 0; i < 3; ++i) {
+      fsm.AddState();
+    }
+    fsm.SetStartState(0);
+    fsm.AddEndState(2);
+    fsm.GetFsm().AddRepeatEdge(0, 1, 0, 1, 2);
+    fsm.GetFsm().GetEdges(0).emplace_back('a', 'a', 2);
+    return fsm;
+  };
+
+  auto simplify_fsm = make_invalid_fsm();
+  EXPECT_THROW(simplify_fsm.SimplifyEpsilon(), LogFatalError);
+
+  auto merge_fsm = make_invalid_fsm();
+  EXPECT_THROW(merge_fsm.MergeEquivalentStates(), LogFatalError);
+}
+
 TEST(XGrammarFSMTest, MergeEquivalentStatesNoCrossRuleChaining) {
   FSMWithStartEnd fsm_wse;
   for (int i = 0; i < 7; ++i) {

@@ -229,20 +229,16 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
   std::vector<FSMEdge>& GetEdges(int state) { return edges_[state]; }
 
   void ValidateRepeatEdgeInvariant() const {
-#if !XGRAMMAR_ENABLE_INTERNAL_CHECK
-    return;
-#else
     for (int32_t state = 0; state < static_cast<int32_t>(edges_.size()); ++state) {
       const auto& edges = edges_[state];
       if (edges.size() <= 1) {
         continue;
       }
-      XGRAMMAR_DCHECK(std::none_of(
+      XGRAMMAR_CHECK(std::none_of(
           edges.begin(), edges.end(), [](const FSMEdge& edge) { return edge.IsRepeatRef(); }
       )) << "A state with a kRepeatRef edge must have exactly one outgoing edge, but state "
          << state << " has " << edges.size() << ".";
     }
-#endif
   }
 
   void Advance(
@@ -488,12 +484,16 @@ FSM::FSM(int num_states) : pimpl_(std::make_shared<Impl>(num_states)) {}
 
 FSM::FSM(const std::vector<std::vector<FSMEdge>>& edges, std::vector<int32_t> edge_aux_data)
     : pimpl_(std::make_shared<Impl>(edges, std::move(edge_aux_data))) {
-  pimpl_->ValidateRepeatEdgeInvariant();
+  if constexpr (kInternalChecksEnabled) {
+    pimpl_->ValidateRepeatEdgeInvariant();
+  }
 }
 
 FSM::FSM(std::vector<std::vector<FSMEdge>>&& edges, std::vector<int32_t> edge_aux_data)
     : pimpl_(std::make_shared<Impl>(std::move(edges), std::move(edge_aux_data))) {
-  pimpl_->ValidateRepeatEdgeInvariant();
+  if constexpr (kInternalChecksEnabled) {
+    pimpl_->ValidateRepeatEdgeInvariant();
+  }
 }
 
 int FSM::NumStates() const { return pimpl_->NumStates(); }
@@ -1270,7 +1270,9 @@ bool FSMWithStartEnd::IsDFA() {
 }
 
 FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon(int max_num_states) const {
-  fsm_->ValidateRepeatEdgeInvariant();
+  if constexpr (kInternalChecksEnabled) {
+    fsm_->ValidateRepeatEdgeInvariant();
+  }
   if (is_dfa_) {
     return *this;
   }
@@ -1365,12 +1367,16 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon(int max_num_states) const {
     }
   }
   auto result = RebuildWithMapping(new_to_old, cnt);
-  result.GetFsm().ValidateRepeatEdgeInvariant();
+  if constexpr (kInternalChecksEnabled) {
+    result.GetFsm().ValidateRepeatEdgeInvariant();
+  }
   return result;
 }
 
 FSMWithStartEnd FSMWithStartEnd::MergeEquivalentStates(int max_result_num_states) const {
-  fsm_->ValidateRepeatEdgeInvariant();
+  if constexpr (kInternalChecksEnabled) {
+    fsm_->ValidateRepeatEdgeInvariant();
+  }
   if (max_result_num_states < NumStates()) {
     return *this;
   }
@@ -1636,7 +1642,9 @@ FSMWithStartEnd FSMWithStartEnd::MergeEquivalentStates(int max_result_num_states
       result.GetFsm()->SortEdges();
     }
   }
-  result.GetFsm().ValidateRepeatEdgeInvariant();
+  if constexpr (kInternalChecksEnabled) {
+    result.GetFsm().ValidateRepeatEdgeInvariant();
+  }
   return result;
 }
 
