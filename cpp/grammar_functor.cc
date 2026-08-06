@@ -3644,36 +3644,41 @@ std::pair<bool, uint64_t> GrammarFSMHasherImpl::IsPartialHashable(int fsm_index)
     // First, check the edges which are rule references (including repeat refs).
     // To keep consistent, we need to sort them with hashes.
     int32_t unhashed_rules_count = 0;
-    auto hash_rule_like_edge = [&](int32_t ref_rule_id, int32_t target) {
+    auto hash_rule_like_edge = [&](int32_t ref_rule_id,
+                                   int32_t target,
+                                   std::optional<std::pair<int32_t, int32_t>> repeat_bounds) {
+      uint64_t edge_hash;
       if (ref_rule_id == fsm_index) {
-        hash_and_target.insert({kSelfRecursionFlag, target});
-        return true;
-      }
-      if (!grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].has_value()) {
+        edge_hash = kSelfRecursionFlag;
+      } else if (!grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].has_value()) {
         if (!is_start) {
           return false;
-        } else {
-          unhashed_rules_count++;
-          if (unhashed_rules_count > 1) {
-            return false;
-          }
-          hash_and_target.insert({kUnKnownFlag, target});
         }
-        return true;
+        unhashed_rules_count++;
+        if (unhashed_rules_count > 1) {
+          return false;
+        }
+        edge_hash = kUnKnownFlag;
+      } else {
+        edge_hash = grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].value();
       }
-      hash_and_target.insert({grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].value(), target}
-      );
+      if (repeat_bounds.has_value()) {
+        edge_hash = HashCombine(edge_hash, repeat_bounds->first, repeat_bounds->second);
+      }
+      hash_and_target.insert({edge_hash, target});
       return true;
     };
 
     for (const auto& edge : sorted_edges_[current_old_state_id]) {
       if (edge.IsRuleRef()) {
-        if (!hash_rule_like_edge(edge.GetRefRuleId(), edge.target)) {
+        if (!hash_rule_like_edge(edge.GetRefRuleId(), edge.target, std::nullopt)) {
           return {false, 0};
         }
       } else if (edge.IsRepeatRef()) {
         auto info = grammar_->ImplPtr()->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
-        if (!hash_rule_like_edge(info.RuleId(), edge.target)) {
+        if (!hash_rule_like_edge(
+                info.RuleId(), edge.target, std::make_pair(info.Lower(), info.Upper())
+            )) {
           return {false, 0};
         }
       }

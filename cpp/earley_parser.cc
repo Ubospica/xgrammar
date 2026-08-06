@@ -175,6 +175,8 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
 
   // Check all the possible parent states.
   const auto& parent_states_map = rule_id_to_completable_states_[state.rule_start_pos];
+  const bool completed_without_input =
+      state.rule_start_pos == static_cast<int32_t>(rule_id_to_completable_states_.size()) - 1;
   for (const auto& [ref_id, parent_state] : parent_states_map) {
     if (ref_id != state.rule_id || !IsCompletionCompatibleWithParent(state, parent_state)) {
       continue;
@@ -229,7 +231,9 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
       }
       // If the repeat count is less than the max repeat count, we can continue to
       // visit the repeat state for another round.
-      if (max_repeat_count == -1 || new_state.repeat_count < max_repeat_count) {
+      if ((max_repeat_count == -1 &&
+           (!completed_without_input || new_state.repeat_count < min_repeat_count)) ||
+          (max_repeat_count != -1 && new_state.repeat_count < max_repeat_count)) {
         Enqueue(new_state);
       }
       continue;
@@ -237,14 +241,18 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
     // If the rule is referenced by a fsm, we need to advance the fsm.
     XGRAMMAR_DCHECK(grammar_->per_rule_fsms[parent_state.rule_id].has_value());
 
-    // Check if the parent_state sits on a kRepeatRef edge
-    bool handled_as_repeat = false;
-    // State merging can place repeat edges from several alternatives on the same source state.
-    for (const auto& edge : grammar_->complete_fsm.GetEdges(parent_state.element_id)) {
-      if (!edge.IsRepeatRef()) continue;
+    // A repeat edge is the only outgoing edge of its source state, so repeat_count belongs to
+    // exactly one repetition.
+    const auto& parent_edges = grammar_->complete_fsm.GetEdges(parent_state.element_id);
+    if (parent_edges.size() == 1 && parent_edges[0].IsRepeatRef()) {
+      const auto& edge = parent_edges[0];
       auto info = grammar_->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
-      if (info.RuleId() != ref_id) continue;
-      handled_as_repeat = true;
+      // A normal rule reference may land on a repeat source state. It is a repeat completion
+      // only when the completed rule matches the repeat edge.
+      if (info.RuleId() != ref_id) {
+        Enqueue(parent_state);
+        continue;
+      }
       int32_t new_count = parent_state.repeat_count + 1;
       if (new_count >= info.Lower() && (info.Upper() == -1 || new_count <= info.Upper())) {
         Enqueue(ParserState{
@@ -260,7 +268,8 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
             parent_state.char_budget_deadline
         });
       }
-      if (info.Upper() == -1 || new_count < info.Upper()) {
+      if ((info.Upper() == -1 && (!completed_without_input || new_count < info.Lower())) ||
+          (info.Upper() != -1 && new_count < info.Upper())) {
         Enqueue(ParserState{
             parent_state.rule_id,
             parent_state.sequence_id,
@@ -274,10 +283,9 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
             parent_state.char_budget_deadline
         });
       }
+      continue;
     }
-    if (!handled_as_repeat) {
-      Enqueue(parent_state);
-    }
+    Enqueue(parent_state);
   }
 }
 
@@ -720,6 +728,8 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
       target = edge.target;
       ref_rule_id = edge.GetRefRuleId();
     } else if (edge.IsRepeatRef()) {
+      XGRAMMAR_CHECK(grammar_->complete_fsm.GetEdges(state.element_id).size() == 1)
+          << "A state with a kRepeatRef edge must have exactly one outgoing edge.";
       is_repeat = true;
       repeat_info = grammar_->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
       target = edge.target;
