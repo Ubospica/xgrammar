@@ -231,13 +231,13 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
   void ValidateRepeatEdgeInvariant() const {
     for (int32_t state = 0; state < static_cast<int32_t>(edges_.size()); ++state) {
       const auto& edges = edges_[state];
-      if (std::any_of(edges.begin(), edges.end(), [](const FSMEdge& edge) {
-            return edge.IsRepeatRef();
-          })) {
-        XGRAMMAR_CHECK(edges.size() == 1 && edges[0].IsRepeatRef())
-            << "A state with a kRepeatRef edge must have exactly one outgoing edge, but state "
-            << state << " has " << edges.size() << ".";
+      if (edges.size() <= 1) {
+        continue;
       }
+      XGRAMMAR_DCHECK(std::none_of(
+          edges.begin(), edges.end(), [](const FSMEdge& edge) { return edge.IsRepeatRef(); }
+      )) << "A state with a kRepeatRef edge must have exactly one outgoing edge, but state "
+         << state << " has " << edges.size() << ".";
     }
   }
 
@@ -256,11 +256,12 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
 
   void AddEdge(int from, int to, int32_t min, int32_t max) {
     XGRAMMAR_DCHECK(from < static_cast<int>(edges_.size()));
-    if (min == FSMEdge::EdgeType::kRepeatRef ||
-        std::any_of(edges_[from].begin(), edges_[from].end(), [](const FSMEdge& edge) {
-          return edge.IsRepeatRef();
-        })) {
-      XGRAMMAR_CHECK(edges_[from].empty())
+    const auto& outgoing_edges = edges_[from];
+    if (min == FSMEdge::EdgeType::kRepeatRef) {
+      XGRAMMAR_DCHECK(outgoing_edges.empty())
+          << "A state with a kRepeatRef edge must have no other outgoing edges.";
+    } else {
+      XGRAMMAR_DCHECK(outgoing_edges.empty() || !outgoing_edges.front().IsRepeatRef())
           << "A state with a kRepeatRef edge must have no other outgoing edges.";
     }
     edges_[from].push_back({min, max, to});
@@ -275,8 +276,6 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
   void AddEOSEdge(int from, int to) { AddEdge(from, to, FSMEdge::EdgeType::kEOS, 0); }
 
   void AddRepeatEdge(int from, int to, int32_t rule_id, int32_t lower, int32_t upper) {
-    XGRAMMAR_CHECK(edges_[from].empty())
-        << "A state with a kRepeatRef edge must have no other outgoing edges.";
     XGRAMMAR_DCHECK(edge_aux_data_.size() <= INT32_MAX);
     int32_t aux_index = static_cast<int32_t>(edge_aux_data_.size());
     edge_aux_data_.reserve(edge_aux_data_.size() + 3);
@@ -295,7 +294,7 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
     for (int32_t id : token_ids) {
       edge_aux_data_.push_back(id);
     }
-    edges_[from].push_back(FSMEdge(FSMEdge::EdgeType::kToken, aux_index, to));
+    AddEdge(from, to, FSMEdge::EdgeType::kToken, aux_index);
   }
 
   void AddExcludeTokenEdge(int from, int to, const std::vector<int32_t>& token_ids) {
@@ -307,7 +306,7 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
     for (int32_t id : token_ids) {
       edge_aux_data_.push_back(id);
     }
-    edges_[from].push_back(FSMEdge(FSMEdge::EdgeType::kExcludeToken, aux_index, to));
+    AddEdge(from, to, FSMEdge::EdgeType::kExcludeToken, aux_index);
   }
 
   void AddFSM(const FSM& fsm, std::vector<int>* state_mapping);
@@ -485,12 +484,16 @@ FSM::FSM(int num_states) : pimpl_(std::make_shared<Impl>(num_states)) {}
 
 FSM::FSM(const std::vector<std::vector<FSMEdge>>& edges, std::vector<int32_t> edge_aux_data)
     : pimpl_(std::make_shared<Impl>(edges, std::move(edge_aux_data))) {
+#if XGRAMMAR_ENABLE_INTERNAL_CHECK
   pimpl_->ValidateRepeatEdgeInvariant();
+#endif
 }
 
 FSM::FSM(std::vector<std::vector<FSMEdge>>&& edges, std::vector<int32_t> edge_aux_data)
     : pimpl_(std::make_shared<Impl>(std::move(edges), std::move(edge_aux_data))) {
+#if XGRAMMAR_ENABLE_INTERNAL_CHECK
   pimpl_->ValidateRepeatEdgeInvariant();
+#endif
 }
 
 int FSM::NumStates() const { return pimpl_->NumStates(); }
@@ -544,8 +547,6 @@ std::string FSM::EdgesToString(std::optional<std::vector<int>> states) const {
 }
 
 const std::vector<FSMEdge>& FSM::GetEdges(int state) const { return pimpl_->GetEdges(state); }
-
-void FSM::ValidateRepeatEdgeInvariant() const { pimpl_->ValidateRepeatEdgeInvariant(); }
 
 std::vector<std::vector<FSMEdge>>& FSM::GetEdges() { return pimpl_->GetEdges(); }
 
@@ -1267,7 +1268,6 @@ bool FSMWithStartEnd::IsDFA() {
 }
 
 FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon(int max_num_states) const {
-  fsm_->ValidateRepeatEdgeInvariant();
   if (is_dfa_) {
     return *this;
   }
@@ -1361,13 +1361,10 @@ FSMWithStartEnd FSMWithStartEnd::SimplifyEpsilon(int max_num_states) const {
       cnt++;
     }
   }
-  auto result = RebuildWithMapping(new_to_old, cnt);
-  result.GetFsm().ValidateRepeatEdgeInvariant();
-  return result;
+  return RebuildWithMapping(new_to_old, cnt);
 }
 
 FSMWithStartEnd FSMWithStartEnd::MergeEquivalentStates(int max_result_num_states) const {
-  fsm_->ValidateRepeatEdgeInvariant();
   if (max_result_num_states < NumStates()) {
     return *this;
   }
@@ -1633,7 +1630,6 @@ FSMWithStartEnd FSMWithStartEnd::MergeEquivalentStates(int max_result_num_states
       result.GetFsm()->SortEdges();
     }
   }
-  result.GetFsm().ValidateRepeatEdgeInvariant();
   return result;
 }
 
