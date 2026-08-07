@@ -770,6 +770,13 @@ std::optional<ParserState> GrammarMatcher::Impl::FindRepeatParent(const ParserSt
     if (repeat_info.RuleId() != state.rule_id) {
       return std::nullopt;
     }
+    if (parent.rule_id == grammar_->GetRootRuleId() &&
+        parent.rule_start_pos != ParserState::kNoPrevInputPos) {
+      // A recursive root occurrence still has an outer continuation. The repeat cache treats
+      // completion of a root parent as completion of the whole grammar, so use the ordinary
+      // state mask and resolve the outer context at runtime.
+      return std::nullopt;
+    }
     if (repeat_parent.has_value() && !StateEqualForParsing()(*repeat_parent, parent)) {
       return std::nullopt;
     }

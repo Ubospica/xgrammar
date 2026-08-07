@@ -659,6 +659,20 @@ def test_preserved_repetition_ranges_survive_serialization():
                 )
 
 
+@pytest.mark.parametrize("enable_dynamic_compilation", [False, True], ids=["eager", "dynamic"])
+def test_repeated_rule_ending_in_rule_reference_preserves_completion(enable_dynamic_compilation):
+    tokenizer_info = xgr.TokenizerInfo(["acy"], stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=enable_dynamic_compilation
+    ).compile_grammar('root ::= unit{1} "y"\nunit ::= "a" tail\ntail ::= "c" | "d"')
+    restored = xgr.CompiledGrammar.deserialize_json(compiled.serialize_json(), tokenizer_info)
+
+    for compiled_grammar in [compiled, restored]:
+        matcher = xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True)
+        assert matcher.accept_string("acy")
+        assert matcher.is_terminated()
+
+
 @pytest.mark.parametrize("max_threads", [1, 4])
 def test_eager_repetition_phase_masks_match_token_acceptance(max_threads):
     vocabulary = ["a", "aa", "aaaa", "az", "aaz", "aaaaaz", "z", "x"]
@@ -834,6 +848,31 @@ def test_large_finite_nullable_repeat_skips_redundant_empty_matches():
     ]
 
 
+@pytest.mark.parametrize("enable_dynamic_compilation", [False, True], ids=["eager", "dynamic"])
+def test_lookahead_analysis_includes_repeat_references(enable_dynamic_compilation):
+    vocabulary = ["L", "R", "ay", "ax"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info,
+        max_threads=1,
+        cache_enabled=False,
+        enable_dynamic_compilation=enable_dynamic_compilation,
+    ).compile_grammar(
+        'root ::= "L" item "yy" | "R" item{1} "x"\n' 'item[max_tokens=10] ::= "a" | "ab"'
+    )
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    assert matcher.accept_token(vocabulary.index("R"))
+
+    actual = _next_token_mask(matcher, tokenizer_info.vocab_size)[0]
+    expected = torch.tensor(
+        [matcher.fork().accept_token(token_id) for token_id in range(tokenizer_info.vocab_size)],
+        dtype=torch.bool,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert not actual[vocabulary.index("ay")]
+    assert actual[vocabulary.index("ax")]
+
+
 @pytest.mark.parametrize(
     ("grammar", "accepted_input"),
     [
@@ -844,8 +883,22 @@ def test_large_finite_nullable_repeat_skips_redundant_empty_matches():
         ),
         ('root ::= unit{1,4} "z"\nunit ::= "ab"', "ababz"),
         ('root ::= "L" wrapper "x"\nwrapper ::= unit{0,4} "z"\nunit ::= "" | "ab"', "Labzx"),
+        (
+            'root ::= "L" wrapper "yy" | "R" wrapper{1} "x"\n'
+            'wrapper ::= unit{1} "z"\n'
+            'unit ::= "a" | "ab"',
+            "Rabzx",
+        ),
+        ('root ::= unit{1,3} "x" | "(" root ")"\nunit ::= "a" | "ab"', "(ax)"),
     ],
-    ids=["exact-lookahead", "branching-lookahead", "root-parent", "nullable-unit"],
+    ids=[
+        "exact-lookahead",
+        "branching-lookahead",
+        "root-parent",
+        "nullable-unit",
+        "repeated-parent-context",
+        "recursive-root-parent",
+    ],
 )
 def test_repeat_parent_lookahead_masks_stay_exact(grammar, accepted_input):
     # Repeat masks apply the parent rule's lookahead assertion to tokens crossing the parent's
@@ -863,6 +916,7 @@ def test_repeat_parent_lookahead_masks_stay_exact(grammar, accepted_input):
         "abzx",
         "abzxx",
         "abzy",
+        "ax)",
         "zx",
         "zz",
         "L",

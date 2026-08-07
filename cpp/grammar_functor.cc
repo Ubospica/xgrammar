@@ -1015,6 +1015,7 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
   struct RuleLookaheadInfo {
     bool is_triggered_by_dispatch = false;
     bool appears_as_last_in_other_rule = false;
+    bool has_multi_repetition_occurrence = false;
     int non_last_occurrence_count = 0;
     std::vector<int32_t> suffix_after_first_occurrence;
   };
@@ -1022,11 +1023,17 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
   bool CanUseDerivedLookahead(int32_t rule_id) const {
     const auto& info = rule_lookahead_infos_[rule_id];
     return !info.is_triggered_by_dispatch && !info.appears_as_last_in_other_rule &&
-           info.non_last_occurrence_count == 1;
+           !info.has_multi_repetition_occurrence && info.non_last_occurrence_count == 1;
   }
 
   void BuildRuleLookaheadInfo() {
     rule_lookahead_infos_.assign(base_grammar_->NumRules(), RuleLookaheadInfo{});
+    const auto get_referenced_rule_id = [](const GrammarExpr& element) {
+      if (element.type == GrammarExprType::kRuleRef || element.type == GrammarExprType::kRepeat) {
+        return element[0];
+      }
+      return -1;
+    };
     for (int i = 0; i < static_cast<int>(base_grammar_->NumRules()); ++i) {
       auto rule = base_grammar_->GetRule(i);
       auto grammar_expr = base_grammar_->GetGrammarExpr(rule.body_expr_id);
@@ -1055,15 +1062,32 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
           continue;
         }
         auto last_element = base_grammar_->GetGrammarExpr(sequence_expr.end()[-1]);
-        if (last_element.type == GrammarExprType::kRuleRef && i != last_element[0]) {
-          rule_lookahead_infos_[last_element[0]].appears_as_last_in_other_rule = true;
+        const int32_t last_referenced_rule_id = get_referenced_rule_id(last_element);
+        const bool last_element_can_occur =
+            last_element.type != GrammarExprType::kRepeat || last_element[2] != 0;
+        if (last_referenced_rule_id != -1 && last_element_can_occur) {
+          auto& info = rule_lookahead_infos_[last_referenced_rule_id];
+          if (last_element.type == GrammarExprType::kRepeat &&
+              (last_element[2] == -1 || last_element[2] > 1)) {
+            info.has_multi_repetition_occurrence = true;
+          }
+          if (i != last_referenced_rule_id) {
+            info.appears_as_last_in_other_rule = true;
+          }
         }
         for (int j = 0; j < sequence_expr.size() - 1; ++j) {
           auto element_expr = base_grammar_->GetGrammarExpr(sequence_expr[j]);
-          if (element_expr.type != GrammarExprType::kRuleRef) {
+          const int32_t referenced_rule_id = get_referenced_rule_id(element_expr);
+          if (referenced_rule_id == -1 ||
+              (element_expr.type == GrammarExprType::kRepeat && element_expr[2] == 0)) {
             continue;
           }
-          auto& info = rule_lookahead_infos_[element_expr[0]];
+          auto& info = rule_lookahead_infos_[referenced_rule_id];
+          if (element_expr.type == GrammarExprType::kRepeat &&
+              (element_expr[2] == -1 || element_expr[2] > 1)) {
+            info.has_multi_repetition_occurrence = true;
+            continue;
+          }
           if (info.non_last_occurrence_count == 0) {
             info.suffix_after_first_occurrence.assign(
                 sequence_expr.begin() + j + 1, sequence_expr.end()

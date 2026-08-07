@@ -818,13 +818,32 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
                          << grammar_->GetRule(state.rule_id).name << " predict the new rule "
                          << ref_rule_id << ": " << grammar_->GetRule(ref_rule_id).name << ".";
     }
+    bool completion_advances_repeat = false;
+    if (!is_repeat && state.rule_start_pos >= 0) {
+      for (const auto& [completed_rule_id, parent_state] :
+           rule_id_to_completable_states_[state.rule_start_pos]) {
+        if (completed_rule_id != state.rule_id ||
+            !IsCompletionCompatibleWithParent(state, parent_state) || parent_state.rule_id < 0) {
+          continue;
+        }
+        const auto& parent_edges = grammar_->complete_fsm.GetEdges(parent_state.element_id);
+        if (parent_edges.size() == 1 && parent_edges[0].IsRepeatRef() &&
+            grammar_->complete_fsm.GetRepeatEdgeInfo(parent_edges[0].GetAuxIndex()).RuleId() ==
+                state.rule_id) {
+          completion_advances_repeat = true;
+          break;
+        }
+      }
+    }
     const uint8_t target_flags = features_->fsm_state_flags[target];
     if (!is_repeat && !(target_flags & EarleyParserFeatures::kFsmStateHasEdges) &&
         (target_flags & EarleyParserFeatures::kFsmStateEnd) &&
         state.rule_start_pos != static_cast<int32_t>(rule_id_to_completable_states_.size() - 1) &&
-        !RuleNeedsCaptureEvent(state.rule_id) && !RuleNeedsCaptureEvent(ref_rule_id)) {
+        !RuleNeedsCaptureEvent(state.rule_id) && !RuleNeedsCaptureEvent(ref_rule_id) &&
+        !completion_advances_repeat) {
       // It's a right recursion. We can optimize it. The optimization elides the completion of
-      // the parent rule, so it is disabled when either rule produces capture-history events.
+      // the parent rule, so it is disabled when either rule produces capture-history events or
+      // when completing the parent must advance a repetition count.
       // If it's the right recursion, we need to add the ancestors of the parent state.
       if (state.rule_start_pos == ParserState::kNoPrevInputPos) {
         // In this case, we can mark the new state as the root state to speed up.
