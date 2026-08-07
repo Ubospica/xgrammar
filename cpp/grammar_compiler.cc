@@ -927,6 +927,18 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
   const std::string* prev_token = nullptr;
   int32_t skip_ptr = 0;
   const int32_t skip_size = static_cast<int32_t>(token_edge_accepted.size());
+  bool accepts_ascii_string_safe_slice =
+      speculative_calculation && !definite_accepted_bitset.has_value();
+  if (accepts_ascii_string_safe_slice) {
+    for (int32_t byte = 0x20; byte < 0x7f; ++byte) {
+      if (byte != '"' && byte != '\\' && !speculative_mask[byte]) {
+        accepts_ascii_string_safe_slice = false;
+        break;
+      }
+    }
+  }
+  const auto& ascii_string_safe_indices = tokenizer_info_.ImplPtr()->GetAsciiStringSafeIndices();
+  size_t ascii_string_safe_position = 0;
   for (size_t interval_idx = 0; interval_idx < possible_intervals.size(); ++interval_idx) {
     const auto& interval = possible_intervals[interval_idx];
     for (int i = interval.first; i < interval.second; ++i) {
@@ -949,6 +961,17 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
         continue;
       }
       const auto& token = sorted_decoded_vocab[i].second;
+      if (accepts_ascii_string_safe_slice) {
+        while (ascii_string_safe_position < ascii_string_safe_indices.size() &&
+               ascii_string_safe_indices[ascii_string_safe_position] < i) {
+          ++ascii_string_safe_position;
+        }
+        if (ascii_string_safe_position < ascii_string_safe_indices.size() &&
+            ascii_string_safe_indices[ascii_string_safe_position] == i) {
+          tmp_accepted_indices_.push_back(i);
+          continue;
+        }
+      }
       // This optimization is useful for simple self-recursive rules, like string content.
       if (speculative_calculation) {
         // Optimization for tag dispatch rules.
