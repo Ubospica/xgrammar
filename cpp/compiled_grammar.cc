@@ -162,6 +162,49 @@ std::string AdaptiveTokenMask::Print(const TokenizerInfo& tokenizer_info) const 
   return ss.str();
 }
 
+/************** TokenMaskCache **************/
+
+picojson::value SerializeJSONValue(const TokenMaskCache& token_mask_cache) {
+  std::lock_guard<std::mutex> lock(token_mask_cache.mutex_);
+  picojson::object result;
+  result["dynamic"] = picojson::value(token_mask_cache.dynamic_);
+  result["masks"] = AutoSerializeJSONValue(
+      token_mask_cache.dynamic_ ? decltype(token_mask_cache.masks_){} : token_mask_cache.masks_
+  );
+  result["repeat_masks"] = AutoSerializeJSONValue(
+      token_mask_cache.dynamic_ ? decltype(token_mask_cache.repeat_masks_){}
+                                : token_mask_cache.repeat_masks_
+  );
+  return picojson::value(std::move(result));
+}
+
+std::optional<SerializationError> DeserializeJSONValue(
+    TokenMaskCache* token_mask_cache,
+    const picojson::value& json_value,
+    const std::string& type_name
+) {
+  if (!json_value.is<picojson::object>()) {
+    return ConstructDeserializeError("Expect an object", type_name);
+  }
+  const auto& object = json_value.get<picojson::object>();
+  for (const auto& field : {"dynamic", "masks", "repeat_masks"}) {
+    if (object.find(field) == object.end()) {
+      return ConstructDeserializeError("Expect a '" + std::string(field) + "' field", type_name);
+    }
+  }
+  if (auto error =
+          AutoDeserializeJSONValue(&token_mask_cache->dynamic_, object.at("dynamic"), type_name)) {
+    return error;
+  }
+  if (auto error =
+          AutoDeserializeJSONValue(&token_mask_cache->masks_, object.at("masks"), type_name)) {
+    return error;
+  }
+  return AutoDeserializeJSONValue(
+      &token_mask_cache->repeat_masks_, object.at("repeat_masks"), type_name
+  );
+}
+
 /************** CompiledGrammar::Impl **************/
 
 picojson::value SerializeJSONValue(const CompiledGrammar::Impl& impl) {
@@ -169,13 +212,7 @@ picojson::value SerializeJSONValue(const CompiledGrammar::Impl& impl) {
   result["grammar"] = AutoSerializeJSONValue(impl.grammar);
   result["earley_parser_features"] = AutoSerializeJSONValue(impl.earley_parser_features);
   result["tokenizer_metadata"] = impl.tokenizer_info->DumpMetadataValue();
-  // In dynamic mode, serialize an empty mask cache; masks are generated on first use again
-  // after deserialization.
-  result["dynamic"] = picojson::value(impl.token_mask_cache.dynamic_);
-  result["adaptive_token_mask_cache"] = AutoSerializeJSONValue(
-      impl.token_mask_cache.dynamic_ ? decltype(impl.token_mask_cache.masks_){}
-                                     : impl.token_mask_cache.masks_
-  );
+  result["token_mask_cache"] = AutoSerializeJSONValue(impl.token_mask_cache);
   return picojson::value(result);
 }
 
@@ -207,6 +244,8 @@ std::optional<SerializationError> DeserializeJSONValue(
   if (impl->earley_parser_features.fsm_state_flags.size() !=
           static_cast<std::size_t>(impl->grammar->complete_fsm.NumStates()) ||
       impl->earley_parser_features.rule_is_nullable.size() !=
+          static_cast<std::size_t>(impl->grammar->NumRules()) ||
+      impl->earley_parser_features.rule_is_context_independent.size() !=
           static_cast<std::size_t>(impl->grammar->NumRules())) {
     return ConstructDeserializeError(
         "Earley parser feature dimensions do not match the grammar", type_name
@@ -222,16 +261,14 @@ std::optional<SerializationError> DeserializeJSONValue(
     );
   }
   impl->tokenizer_info = tokenizer_info;
-  if (object.find("adaptive_token_mask_cache") == object.end()) {
-    return ConstructDeserializeError("Expect a 'adaptive_token_mask_cache' field", type_name);
+  const auto token_mask_cache_it = object.find("token_mask_cache");
+  if (token_mask_cache_it == object.end()) {
+    return ConstructDeserializeError("Expect a 'token_mask_cache' field", type_name);
   }
-  AutoDeserializeJSONValue(&(impl->token_mask_cache.masks_), object["adaptive_token_mask_cache"]);
-  const auto dynamic_it = object.find("dynamic");
-  if (dynamic_it != object.end() && !dynamic_it->second.is<bool>()) {
-    return ConstructDeserializeError("Expect a boolean 'dynamic' field", type_name);
-  }
-  if (dynamic_it != object.end() && dynamic_it->second.get<bool>()) {
-    impl->token_mask_cache.dynamic_ = true;
+  if (auto error = AutoDeserializeJSONValue(
+          &impl->token_mask_cache, token_mask_cache_it->second, "TokenMaskCache"
+      )) {
+    return error;
   }
   return std::nullopt;
 }

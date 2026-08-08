@@ -538,6 +538,8 @@ class GrammarMatcher::Impl : public EarleyParser {
  private:
   using StoreType = AdaptiveTokenMask::StoreType;
 
+  std::optional<ParserState> FindRepeatParent(const ParserState& state) const;
+
   /*!
    * \brief If is_uncertain_saved is true, find the next token in uncertain_indices. Otherwise,
    * find the next token that is set to true in uncertain_tokens_bitset.
@@ -741,6 +743,47 @@ class GrammarMatcher::Impl : public EarleyParser {
   std::vector<int32_t> tmp_rejected_indices_;
   std::vector<int32_t> tmp_rejected_indices_delta_;
 };
+
+std::optional<ParserState> GrammarMatcher::Impl::FindRepeatParent(const ParserState& state) const {
+  if (state.rule_id < 0 || !features_->IsRuleContextIndependent(state.rule_id) ||
+      state.rule_start_pos < 0 ||
+      state.rule_start_pos >= static_cast<int32_t>(rule_id_to_completable_states_.size())) {
+    return std::nullopt;
+  }
+
+  std::optional<ParserState> repeat_parent;
+  for (const auto& [completed_rule_id, parent] :
+       rule_id_to_completable_states_[state.rule_start_pos]) {
+    if (completed_rule_id != state.rule_id || !IsCompletionCompatibleWithParent(state, parent)) {
+      continue;
+    }
+    if (parent.rule_id < 0) {
+      return std::nullopt;
+    }
+    if (!(features_->fsm_state_flags[parent.element_id] &
+          EarleyParserFeatures::kFsmStateRepeatSource)) {
+      return std::nullopt;
+    }
+    const auto& edges = grammar_->complete_fsm.GetEdges(parent.element_id);
+    XGRAMMAR_DCHECK(edges.size() == 1 && edges[0].IsRepeatRef());
+    const auto repeat_info = grammar_->complete_fsm.GetRepeatEdgeInfo(edges[0].GetAuxIndex());
+    if (repeat_info.RuleId() != state.rule_id) {
+      return std::nullopt;
+    }
+    if (parent.rule_id == grammar_->GetRootRuleId() &&
+        parent.rule_start_pos != ParserState::kNoPrevInputPos) {
+      // A recursive root occurrence still has an outer continuation. The repeat cache treats
+      // completion of a root parent as completion of the whole grammar, so use the ordinary
+      // state mask and resolve the outer context at runtime.
+      return std::nullopt;
+    }
+    if (repeat_parent.has_value() && !StateEqualForParsing()(*repeat_parent, parent)) {
+      return std::nullopt;
+    }
+    repeat_parent = parent;
+  }
+  return repeat_parent;
+}
 
 class BatchGrammarMatcher::Impl {
  public:
@@ -1837,15 +1880,23 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
                        << ", num of states=" << latest_states.size();
   }
 
+  std::optional<ParserState> single_repeat_parent;
+  if (latest_states.size() == 1) {
+    single_repeat_parent = FindRepeatParent(latest_states[0]);
+  }
+
   std::vector<std::pair<ParserState, const AdaptiveTokenMask*>> latest_states_with_masks;
 
   for (const auto& state : latest_states) {
+    const auto repeat_parent =
+        latest_states.size() == 1 ? single_repeat_parent : FindRepeatParent(state);
     const AdaptiveTokenMask& adaptive_token_mask = compiled_grammar_->token_mask_cache.Get(
         state,
-        state.rule_id == grammar_->GetRootRuleId(),
+        repeat_parent.has_value() ? false : state.rule_id == grammar_->GetRootRuleId(),
         grammar_,
         tokenizer_info_,
-        compiled_grammar_->earley_parser_features
+        compiled_grammar_->earley_parser_features,
+        repeat_parent.has_value() ? &*repeat_parent : nullptr
     );
     if (state.char_budget_deadline >= 0) {
       int32_t remaining_chars = state.char_budget_deadline - GetCurrentCharIndex();
@@ -1854,7 +1905,6 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
         continue;
       }
     }
-    latest_states_with_masks.emplace_back(state, &adaptive_token_mask);
     if (adaptive_token_mask.store_type == StoreType::kAcceptedBitset) {
       tmp_accepted_bitset_ |= adaptive_token_mask.accepted_bitset;
     } else if (adaptive_token_mask.store_type == StoreType::kAccepted) {
@@ -1862,6 +1912,19 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
         tmp_accepted_bitset_.Set(sorted_decoded_vocab[idx].first, true);
       }
     }
+    if (latest_states.size() == 1 && adaptive_token_mask.uncertain_indices.empty()) {
+      if (adaptive_token_mask.store_type == StoreType::kRejected) {
+        IntsetIntersection(&tmp_rejected_indices_, adaptive_token_mask.rejected_indices);
+      }
+      SetTokenBitmask(
+          bitmask_data_ptr, tmp_accepted_bitset_, tmp_rejected_indices_, IsCompleted(), false
+      );
+      if (debug_print) {
+        XGRAMMAR_LOG(INFO) << "Filled bitmask: " << PrintBitmask(bitmask_data_ptr, tokenizer_info_);
+      }
+      return;
+    }
+    latest_states_with_masks.emplace_back(state, &adaptive_token_mask);
   }
 
   for (const auto& [state, adaptive_token_mask_ptr] : latest_states_with_masks) {
@@ -1869,6 +1932,12 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
 
     // For each ParserState, we will check every uncertain token and put them into the accepted or
     // rejected list.
+    if (adaptive_token_mask.uncertain_indices.empty()) {
+      if (adaptive_token_mask.store_type == StoreType::kRejected) {
+        IntsetIntersection(&tmp_rejected_indices_, adaptive_token_mask.rejected_indices);
+      }
+      continue;
+    }
 
     // Step 2. Update the accepted tokens in accepted_indices_delta, or the rejected tokens in
     // rejected_indices_delta.
