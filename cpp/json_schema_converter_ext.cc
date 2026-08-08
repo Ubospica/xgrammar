@@ -7,6 +7,7 @@
 
 #include <picojson.h>
 
+#include <algorithm>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -83,17 +84,21 @@ void XMLToolCallingConverter::AddBasicRules() {
 
   auto any_spec = SchemaSpec::Make(AnySpec{}, "{}", kBasicAny);
   constexpr const char* kStringCacheKey = "{\"type\":\"string\"}";
+  constexpr const char* kArrayCacheKey = "{\"type\":\"array\"}";
   constexpr const char* kObjectCacheKey = "{\"type\":\"object\"}";
 
   // The outer part, xml format, is at level 1.
   nested_object_level_ = 1;
   // Add XML string rule
+  AddCache(kStringCacheKey, 0, builder_.GetRuleId(kXMLString));
   builder_.UpdateRuleBody(kXMLString, TagDispatch(false, {xml_wrapper_.parameter_suffix}));
-  AddCache(kStringCacheKey, builder_.GetRuleId(kXMLString));
 
   // Add XML any rule
+  int64_t recursive_context = GetCacheContext(any_spec);
+  AddCache(any_spec->cache_key, recursive_context, builder_.GetRuleId(kXMLAny));
   builder_.UpdateRuleBody(kXMLAny, GenerateAny(AnySpec{}, kXMLAny));
-  AddCache("{}", builder_.GetRuleId(kXMLAny));
+  AddCache(kArrayCacheKey, recursive_context, builder_.GetRuleId(kBasicArray));
+  AddCache(kObjectCacheKey, recursive_context, builder_.GetRuleId(kBasicObject));
 
   // Reset the nested object level to 0, which is the root level.
   nested_object_level_ = 0;
@@ -102,8 +107,8 @@ void XMLToolCallingConverter::AddBasicRules() {
   ObjectSpec xml_object_spec;
   xml_object_spec.allow_additional_properties = true;
   xml_object_spec.additional_properties_schema = any_spec;
+  AddCache(kObjectCacheKey, recursive_context, builder_.GetRuleId(kXMLObject));
   builder_.UpdateRuleBody(kXMLObject, GenerateObject(xml_object_spec, kXMLObject));
-  AddCache(kObjectCacheKey, builder_.GetRuleId(kXMLObject));
 
   // Add XML variable name rule
   builder_.UpdateRuleBody(
@@ -122,13 +127,6 @@ std::string XMLToolCallingConverter::GetKeyPattern() const {
   return kBasicString;
 }
 
-std::string XMLToolCallingConverter::GetBasicAnyRuleName() const {
-  if (nested_object_level_ <= 1) {
-    return kXMLAny;
-  }
-  return kBasicAny;
-}
-
 int32_t XMLToolCallingConverter::GetKeyPatternExcluding(
     const std::vector<ObjectSpec::Property>& properties, const std::string& rule_name
 ) {
@@ -143,6 +141,28 @@ std::string XMLToolCallingConverter::NextSeparator(bool is_end) {
     return GetWhitespacePattern();
   }
   return JSONSchemaConverter::NextSeparator(is_end);
+}
+
+std::string XMLToolCallingConverter::LayeredCacheKey(const std::string& key) const {
+  // Levels deeper than 2 are all plain JSON, so they share the same layer.
+  return std::to_string(std::min(nested_object_level_, 2)) + "|" + key;
+}
+
+void XMLToolCallingConverter::AddCache(
+    const std::string& key, int64_t indentation_context, int32_t rule_id
+) {
+  if (!key.empty()) {
+    JSONSchemaConverter::AddCache(LayeredCacheKey(key), indentation_context, rule_id);
+  }
+}
+
+std::optional<int32_t> XMLToolCallingConverter::GetCache(
+    const std::string& key, int64_t indentation_context
+) const {
+  if (key.empty()) {
+    return std::nullopt;
+  }
+  return JSONSchemaConverter::GetCache(LayeredCacheKey(key), indentation_context);
 }
 
 int32_t XMLToolCallingConverter::GenerateString(
@@ -282,20 +302,6 @@ int32_t XMLToolCallingConverter::GenerateObject(
   auto result = JSONSchemaConverter::GenerateObject(spec, rule_name, need_brace);
   nested_object_level_--;
   return result;
-}
-
-void XMLToolCallingConverter::AddCache(const std::string& key, int32_t rule_id) {
-  if (key.empty()) {
-    return;
-  }
-  rule_cache_manager_.AddCache(key, nested_object_level_ > 1, rule_id);
-}
-
-std::optional<int32_t> XMLToolCallingConverter::GetCache(const std::string& key) const {
-  if (key.empty()) {
-    return std::nullopt;
-  }
-  return rule_cache_manager_.GetCache(key, nested_object_level_ > 1);
 }
 
 }  // namespace xgrammar
