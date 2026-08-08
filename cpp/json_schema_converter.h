@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -185,7 +186,11 @@ struct SchemaSpec {
   static SchemaSpecPtr Make(T&& spec_value, std::string cache_key = "", std::string hint = "") {
     auto ptr = std::make_shared<SchemaSpec>();
     ptr->spec = std::forward<T>(spec_value);
-    ptr->cache_key = std::move(cache_key);
+    if constexpr (std::is_same_v<std::decay_t<T>, AnySpec>) {
+      ptr->cache_key = "{}";
+    } else {
+      ptr->cache_key = std::move(cache_key);
+    }
     ptr->rule_name_hint = std::move(hint);
     return ptr;
   }
@@ -215,21 +220,25 @@ std::optional<JSONFormat> JSONFormatFromString(const std::string& format);
 class GenerateCacheManager {
  public:
   /*! \brief Add a key-value pair to the cache. */
-  void AddCache(const std::string& key, bool is_inner_layer, int32_t rule_id) {
-    cache_[{key, is_inner_layer}] = rule_id;
+  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id) {
+    cache_[key][indentation_context] = rule_id;
   }
 
   /*! \brief Get cached rule id by key. Returns std::nullopt if not found. */
-  std::optional<int32_t> GetCache(const std::string& key, bool is_inner_layer) const {
-    auto it = cache_.find({key, is_inner_layer});
-    if (it != cache_.end()) {
-      return it->second;
+  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context) const {
+    auto key_it = cache_.find(key);
+    if (key_it == cache_.end()) {
+      return std::nullopt;
+    }
+    auto context_it = key_it->second.find(indentation_context);
+    if (context_it != key_it->second.end()) {
+      return context_it->second;
     }
     return std::nullopt;
   }
 
  private:
-  std::unordered_map<std::pair<std::string, bool>, int32_t> cache_;
+  std::unordered_map<std::string, std::unordered_map<int64_t, int32_t>> cache_;
 };
 
 /*!
@@ -251,6 +260,9 @@ class IndentManager {
   std::string EndSeparator();
   std::string EmptySeparator();
   std::string NextSeparator(bool is_end = false);
+  int64_t GetCacheContext() const {
+    return any_whitespace_ || !enable_newline_ ? 0 : total_indent_;
+  }
 
  private:
   bool any_whitespace_;
@@ -343,18 +355,20 @@ class JSONSchemaConverter {
       const std::vector<ObjectSpec::Property>& properties, const std::string& rule_name
   );
 
-  /*! \brief Get the basic any rule name. Override for different formats. */
-  virtual std::string GetBasicAnyRuleName() const;
-
   /*! \brief Add basic rules for the format. Override for different formats. */
   virtual void AddBasicRules();
   void AddBasicRules(const std::vector<std::string>& additional_rule_names);
 
-  /*! \brief Add a key-value pair to the generation cache. Override for custom cache behavior. */
-  virtual void AddCache(const std::string& key, int32_t rule_id);
+  /*! \brief Add a key-value pair to the generation cache. Subclasses can override to adjust the
+   * cache key (e.g. XML formats add their output layer to the key). */
+  virtual void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id);
 
   /*! \brief Get cached value by key. Returns std::nullopt if not found. */
-  virtual std::optional<int32_t> GetCache(const std::string& key) const;
+  virtual std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context)
+      const;
+
+  /*! \brief Get the indentation context for a schema. */
+  int64_t GetCacheContext(const SchemaSpecPtr& spec) const;
 
   // ==================== Helper methods (for subclasses to use) ====================
 
@@ -437,6 +451,7 @@ class JSONSchemaConverter {
   IndentManager indent_manager_;
   int32_t colon_expr_id_;
   bool any_whitespace_;
+  bool indentation_enabled_;
   std::optional<int> max_whitespace_cnt_;
   // When true, object properties may appear in any order (see GetAnyOrderRuleForProperties).
   // Applies to all objects (including nested ones). Default false preserves the fixed-order
@@ -460,10 +475,16 @@ class JSONSchemaConverter {
   GenerateCacheManager rule_cache_manager_;
 
  private:
-  void AddHelperRules();
+  // Cache context for recursive rules generated with arbitrary whitespace.
+  static constexpr int64_t kAnyWhitespaceCacheContext = -1;
 
-  std::unordered_map<std::string, int32_t> uri_to_rule_id_;  // For circular reference handling
+  void AddHelperRules();
+  int32_t CreateRuleWithAnyWhitespace(const SchemaSpecPtr& spec, const std::string& rule_name_hint);
+  int32_t GenerateRuleBody(const SchemaSpecPtr& spec, const std::string& rule_name);
+
   RefResolver ref_resolver_;  // Resolves $ref URI to SchemaSpecPtr at generate time
+  bool generating_any_whitespace_ = false;
+  std::unordered_map<std::string, int32_t> active_schema_keys_;
 
   // Trie over property names, for key patterns that exclude specific properties
   struct TrieNode {
