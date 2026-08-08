@@ -218,25 +218,22 @@ class LogMessage {
 #define XGRAMMAR_ICHECK(x) \
   if (!(x)) LogFatal(__FILE__, __LINE__).stream() << "Internal check failed: (" #x << ") is false: "
 
-#ifndef XGRAMMAR_ENABLE_INTERNAL_CHECK
-#define XGRAMMAR_ENABLE_INTERNAL_CHECK 0
-#endif
-
-/*! \brief Whether internal checks are enabled for this build. */
-inline constexpr bool kInternalChecksEnabled = XGRAMMAR_ENABLE_INTERNAL_CHECK != 0;
-
 /*!
  * \brief Check if the condition is true. Used to guarantee some internal conditions in the code.
  * \note This check is only enabled in debug mode. In release mode, it will be disabled for
  * efficiency. This should be used in preference to XGRAMMAR_ICHECK.
  * \param x The condition to check.
  */
-#if XGRAMMAR_ENABLE_INTERNAL_CHECK
+#if defined(XGRAMMAR_ENABLE_INTERNAL_CHECK) && XGRAMMAR_ENABLE_INTERNAL_CHECK
+/*! \brief Whether internal checks are enabled for this build. */
+inline constexpr bool kInternalChecksEnabled = true;
 #define XGRAMMAR_DCHECK(x) XGRAMMAR_ICHECK(x)
 #else
+/*! \brief Whether internal checks are enabled for this build. */
+inline constexpr bool kInternalChecksEnabled = false;
 #define XGRAMMAR_DCHECK(x) \
   while (false) XGRAMMAR_ICHECK(x)
-#endif  // XGRAMMAR_ENABLE_DCHECK
+#endif  // defined(XGRAMMAR_ENABLE_INTERNAL_CHECK) && XGRAMMAR_ENABLE_INTERNAL_CHECK
 
 }  // namespace xgrammar
 

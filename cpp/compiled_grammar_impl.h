@@ -209,8 +209,8 @@ class TokenMaskCache {
       const EarleyParserFeatures& features
   );
 
-  /*! \brief Release summaries that are only needed while repeat masks are generated. */
-  void ClearRepeatTokenSummaries();
+  /*! \brief Release per-token DFA information after repeat masks are generated. */
+  void ClearRepeatDFATokenInfo();
 
   /*! \brief Build the cache key shared by compiled masks and the matcher fast path. */
   RepeatTokenMaskKey GetRepeatTokenMaskKey(
@@ -221,21 +221,21 @@ class TokenMaskCache {
   ) const;
 
  private:
-  struct RepeatTokenSummary {
-    int32_t sorted_vocabulary_index;
-    int32_t locally_consumed_repetitions;
+  struct RepeatDFATokenInfo {
+    int32_t sorted_token_index;
+    int32_t repeat_count;
     bool consumed_whole_token;
-    bool has_completed_repetition_prefix;
+    bool has_complete_repeat;
   };
 
-  std::optional<AdaptiveTokenMask> TryGetSimpleRepeatTokenMask(
+  std::optional<AdaptiveTokenMask> TryCreateRepeatDFATokenMask(
       const ParserState& state,
       int32_t upper_bound_distance,
       const Grammar& grammar,
       const TokenizerInfo& tokenizer_info
   );
 
-  std::shared_ptr<const std::vector<RepeatTokenSummary>> GetSimpleRepeatTokenSummaries(
+  std::shared_ptr<const std::vector<RepeatDFATokenInfo>> GetRepeatDFATokenInfo(
       const ParserState& state, const Grammar& grammar, const TokenizerInfo& tokenizer_info
   );
 
@@ -265,13 +265,13 @@ class TokenMaskCache {
   /*! \brief Context-aware masks for states entered through a repeat edge. */
   std::unordered_map<RepeatTokenMaskKey, AdaptiveTokenMask, RepeatTokenMaskKeyHash> repeat_masks_;
 
-  /*! \brief Token summaries for repeated rules that only contain deterministic byte transitions. */
+  /*! \brief Per-token DFA information for repeated rules with deterministic byte transitions. */
   std::unordered_map<
       ParserState,
-      std::shared_ptr<const std::vector<RepeatTokenSummary>>,
+      std::shared_ptr<const std::vector<RepeatDFATokenInfo>>,
       StateHashForCache,
       StateEqualForCache>
-      repeat_token_summaries_;
+      repeat_dfa_token_info_;
 
   /*! \brief Tag-dispatch data computed on first use in dynamic mode. */
   std::unordered_map<int32_t, DynamicBitset> tag_dispatch_rule_id_to_second_slicing_bitset_;
@@ -279,12 +279,11 @@ class TokenMaskCache {
   /*! \brief Protects on-demand token mask lookup and insertion. */
   mutable std::mutex mutex_;
 
-  friend struct member_trait<TokenMaskCache>;
-  friend picojson::value SerializeJSONValue(const CompiledGrammar::Impl& impl);
+  friend picojson::value SerializeJSONValue(const TokenMaskCache& token_mask_cache);
   friend std::optional<SerializationError> DeserializeJSONValue(
-      CompiledGrammar::Impl* impl,
+      TokenMaskCache* token_mask_cache,
       const picojson::value& json_value,
-      const TokenizerInfo& tokenizer_info
+      const std::string& type_name
   );
 
   friend std::size_t MemorySize(const TokenMaskCache& token_mask_cache) {
@@ -292,10 +291,10 @@ class TokenMaskCache {
     std::size_t result =
         MemorySize(token_mask_cache.masks_) + MemorySize(token_mask_cache.repeat_masks_) +
         MemorySize(token_mask_cache.tag_dispatch_rule_id_to_second_slicing_bitset_);
-    for (const auto& [state, summaries] : token_mask_cache.repeat_token_summaries_) {
-      result += sizeof(state) + sizeof(summaries);
-      if (summaries != nullptr) {
-        result += MemorySize(*summaries);
+    for (const auto& [state, token_info] : token_mask_cache.repeat_dfa_token_info_) {
+      result += sizeof(state) + sizeof(token_info);
+      if (token_info != nullptr) {
+        result += MemorySize(*token_info);
       }
     }
     return result;
@@ -340,8 +339,6 @@ class CompiledGrammar::Impl {
   );
   friend std::size_t MemorySize(const Impl& impl);
 };
-
-XGRAMMAR_MEMBER_TABLE(TokenMaskCache, "adaptive_token_mask_cache", &TokenMaskCache::masks_);
 
 XGRAMMAR_MEMBER_TABLE(
     CompiledGrammar::Impl,

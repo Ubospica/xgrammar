@@ -1398,19 +1398,19 @@ const DynamicBitset* TokenMaskCache::GetTagDispatchSecondSlicingBitset(
               .first->second;
 }
 
-std::shared_ptr<const std::vector<TokenMaskCache::RepeatTokenSummary>>
-TokenMaskCache::GetSimpleRepeatTokenSummaries(
+std::shared_ptr<const std::vector<TokenMaskCache::RepeatDFATokenInfo>>
+TokenMaskCache::GetRepeatDFATokenInfo(
     const ParserState& state, const Grammar& grammar, const TokenizerInfo& tokenizer_info
 ) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto existing = repeat_token_summaries_.find(state);
-    if (existing != repeat_token_summaries_.end()) {
+    const auto existing = repeat_dfa_token_info_.find(state);
+    if (existing != repeat_dfa_token_info_.end()) {
       return existing->second;
     }
   }
 
-  std::shared_ptr<const std::vector<RepeatTokenSummary>> result;
+  std::shared_ptr<const std::vector<RepeatDFATokenInfo>> result;
   if (state.sub_element_id == 0 && state.partial_codepoint == 0 &&
       grammar->per_rule_fsms[state.rule_id].has_value()) {
     const auto& rule_finite_state_machine = grammar->per_rule_fsms[state.rule_id]->GetFsm();
@@ -1477,70 +1477,68 @@ TokenMaskCache::GetSimpleRepeatTokenSummaries(
       }
 
       if (eligible) {
-        std::vector<RepeatTokenSummary> summaries;
+        std::vector<RepeatDFATokenInfo> token_info;
         const auto& sorted_vocabulary = tokenizer_info.GetSortedDecodedVocab();
-        summaries.reserve(sorted_vocabulary.size());
-        for (int32_t sorted_vocabulary_index = 0;
-             sorted_vocabulary_index < static_cast<int32_t>(sorted_vocabulary.size());
-             ++sorted_vocabulary_index) {
+        token_info.reserve(sorted_vocabulary.size());
+        for (int32_t sorted_token_index = 0;
+             sorted_token_index < static_cast<int32_t>(sorted_vocabulary.size());
+             ++sorted_token_index) {
           int32_t current_state = state_to_local_id[state.element_id];
-          int32_t completed_repetitions = 0;
+          int32_t repeat_count = 0;
           bool consumed_whole_token = true;
-          bool consumed_current_repetition = false;
-          for (uint8_t byte : sorted_vocabulary[sorted_vocabulary_index].second) {
+          bool has_partial_repeat = false;
+          for (uint8_t byte : sorted_vocabulary[sorted_token_index].second) {
             const int32_t next_state = transitions[current_state][byte];
             if (next_state == FSM::kNoNextState) {
               consumed_whole_token = false;
               break;
             }
             current_state = next_state;
-            consumed_current_repetition = true;
+            has_partial_repeat = true;
             if (rule_finite_state_machine.IsEndState(pending_states[current_state])) {
-              ++completed_repetitions;
+              ++repeat_count;
               current_state = state_to_local_id[start_state];
-              consumed_current_repetition = false;
+              has_partial_repeat = false;
             }
           }
-          if (consumed_whole_token || completed_repetitions > 0) {
-            summaries.push_back(RepeatTokenSummary{
-                sorted_vocabulary_index,
-                completed_repetitions +
-                    static_cast<int32_t>(consumed_whole_token && consumed_current_repetition),
+          if (consumed_whole_token || repeat_count > 0) {
+            token_info.push_back(RepeatDFATokenInfo{
+                sorted_token_index,
+                repeat_count + static_cast<int32_t>(consumed_whole_token && has_partial_repeat),
                 consumed_whole_token,
-                completed_repetitions > 0
+                repeat_count > 0
             });
           }
         }
-        result = std::make_shared<const std::vector<RepeatTokenSummary>>(std::move(summaries));
+        result = std::make_shared<const std::vector<RepeatDFATokenInfo>>(std::move(token_info));
       }
     }
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
-  return repeat_token_summaries_.try_emplace(state, std::move(result)).first->second;
+  return repeat_dfa_token_info_.try_emplace(state, std::move(result)).first->second;
 }
 
-std::optional<AdaptiveTokenMask> TokenMaskCache::TryGetSimpleRepeatTokenMask(
+std::optional<AdaptiveTokenMask> TokenMaskCache::TryCreateRepeatDFATokenMask(
     const ParserState& state,
     int32_t upper_bound_distance,
     const Grammar& grammar,
     const TokenizerInfo& tokenizer_info
 ) {
-  const auto summaries = GetSimpleRepeatTokenSummaries(state, grammar, tokenizer_info);
-  if (summaries == nullptr) {
+  const auto token_info = GetRepeatDFATokenInfo(state, grammar, tokenizer_info);
+  if (token_info == nullptr) {
     return std::nullopt;
   }
 
   std::vector<int32_t> accepted_indices;
   std::vector<int32_t> uncertain_indices;
-  accepted_indices.reserve(summaries->size());
-  for (const auto& summary : *summaries) {
-    if (summary.consumed_whole_token &&
-        (upper_bound_distance == -1 || summary.locally_consumed_repetitions <= upper_bound_distance
-        )) {
-      accepted_indices.push_back(summary.sorted_vocabulary_index);
-    } else if (summary.has_completed_repetition_prefix) {
-      uncertain_indices.push_back(summary.sorted_vocabulary_index);
+  accepted_indices.reserve(token_info->size());
+  for (const auto& info : *token_info) {
+    if (info.consumed_whole_token &&
+        (upper_bound_distance == -1 || info.repeat_count <= upper_bound_distance)) {
+      accepted_indices.push_back(info.sorted_token_index);
+    } else if (info.has_complete_repeat) {
+      uncertain_indices.push_back(info.sorted_token_index);
     }
   }
   return AdaptiveTokenMask(
@@ -1589,7 +1587,7 @@ AdaptiveTokenMask TokenMaskCache::GenerateRepeatTokenMask(
     const EarleyParserFeatures& features
 ) {
   auto generated_mask =
-      TryGetSimpleRepeatTokenMask(state, repeat_key.upper_bound_distance, grammar, tokenizer_info);
+      TryCreateRepeatDFATokenMask(state, repeat_key.upper_bound_distance, grammar, tokenizer_info);
   if (generated_mask.has_value()) {
     return std::move(*generated_mask);
   }
@@ -1651,9 +1649,9 @@ void TokenMaskCache::PrecomputeRepeat(
   repeat_masks_.emplace(repeat_key, std::move(generated_mask));
 }
 
-void TokenMaskCache::ClearRepeatTokenSummaries() {
+void TokenMaskCache::ClearRepeatDFATokenInfo() {
   std::lock_guard<std::mutex> lock(mutex_);
-  repeat_token_summaries_.clear();
+  repeat_dfa_token_info_.clear();
 }
 
 const AdaptiveTokenMask& TokenMaskCache::Get(
@@ -2009,7 +2007,7 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_un
   if (max_threads_ > 1) {
     thread_pool->Join();
   }
-  compiled_grammar_impl->token_mask_cache.ClearRepeatTokenSummaries();
+  compiled_grammar_impl->token_mask_cache.ClearRepeatDFATokenInfo();
 
   return CompiledGrammar(compiled_grammar_impl);
 }

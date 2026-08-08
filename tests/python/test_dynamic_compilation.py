@@ -157,7 +157,13 @@ def test_serialization_roundtrips_dynamic_mode():
     )
     initial_size = dynamic.memory_size_bytes
 
-    restored = xgr.CompiledGrammar.deserialize_json(dynamic.serialize_json(), tokenizer_info)
+    serialized = dynamic.serialize_json()
+    assert json.loads(serialized)["token_mask_cache"] == {
+        "dynamic": True,
+        "masks": [],
+        "repeat_masks": [],
+    }
+    restored = xgr.CompiledGrammar.deserialize_json(serialized, tokenizer_info)
     # Serialization does not materialize masks, and the restored grammar is dynamic again.
     assert dynamic.memory_size_bytes == initial_size
     restored_initial_size = restored.memory_size_bytes
