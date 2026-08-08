@@ -2643,8 +2643,8 @@ class RepetitionNormalizerImpl {
  * \brief Rewrite lazy rule bodies into their terminal-like form where possible: unwrap the
  * single-reference chains produced by regex conversion, and flatten the right-recursive plus
  * pattern (x ::= cc x | cc) and star pattern (x ::= cc x | "") produced by regex conversion and
- * repetition expansion into (cc cc*) and (cc*). Grammars without lazy rules are returned
- * unchanged.
+ * repetition expansion into (cc cc*) and (cc*), and flatten preserved compact star/plus
+ * repetitions over character-like rules. Grammars without lazy rules are returned unchanged.
  */
 class LazyBodyFlattenerImpl : public GrammarMutator {
  public:
@@ -2753,6 +2753,12 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
         elements->push_back(builder_->AddGrammarExpr(element));
         continue;
       }
+      if (element.type == GrammarExprType::kRepeat) {
+        if (!TryEmitCompactRepeat(element, elements)) {
+          return false;
+        }
+        continue;
+      }
       if (element.type != GrammarExprType::kRuleRef) {
         return false;
       }
@@ -2784,6 +2790,36 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
     return true;
   }
 
+  /*! \brief Flatten an unbounded compact repetition over character-like rules. */
+  bool TryEmitCompactRepeat(const GrammarExpr& repeat, std::vector<int32_t>* elements) {
+    XGRAMMAR_DCHECK(repeat.type == GrammarExprType::kRepeat);
+    const int32_t min_repeat_count = repeat[1];
+    const int32_t max_repeat_count = repeat[2];
+    if (max_repeat_count != -1 || (min_repeat_count != 0 && min_repeat_count != 1)) {
+      return false;
+    }
+
+    std::vector<GrammarBuilder::CharacterClassElement> ranges;
+    if (min_repeat_count == 0) {
+      if (!CollectStarRangesFromRule(repeat[0], &ranges, 0)) {
+        return false;
+      }
+      ranges = UnionRanges(std::move(ranges));
+      if (!ranges.empty()) {
+        elements->push_back(builder_->AddCharacterClassStar(ranges, false));
+      }
+      return true;
+    }
+
+    if (!CollectSingleCharRangesFromRule(repeat[0], &ranges, 0)) {
+      return false;
+    }
+    ranges = UnionRanges(std::move(ranges));
+    elements->push_back(builder_->AddCharacterClass(ranges, false));
+    elements->push_back(builder_->AddCharacterClassStar(ranges, false));
+    return true;
+  }
+
   /*! \brief Resolve an expr matching exactly one character into the set of codepoint ranges it
    * accepts, appending them to ranges. Accepts character classes, single-byte strings, and
    * references to non-lazy rules that are alternations of such elements. Returns false
@@ -2806,7 +2842,16 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
     if (expr.type != GrammarExprType::kRuleRef) {
       return false;
     }
-    const auto& rule = base_grammar_->GetRule(expr[0]);
+    return CollectSingleCharRangesFromRule(expr[0], ranges, depth);
+  }
+
+  bool CollectSingleCharRangesFromRule(
+      int32_t rule_id, std::vector<GrammarBuilder::CharacterClassElement>* ranges, int depth
+  ) {
+    if (depth > 64) {
+      return false;
+    }
+    const auto& rule = base_grammar_->GetRule(rule_id);
     if (rule.is_lazy) {
       return false;
     }
@@ -2997,7 +3042,15 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
     if (expr.type != GrammarExprType::kRuleRef) {
       return false;
     }
-    int32_t rule_id = expr[0];
+    return CollectStarRangesFromRule(expr[0], ranges, depth);
+  }
+
+  bool CollectStarRangesFromRule(
+      int32_t rule_id, std::vector<GrammarBuilder::CharacterClassElement>* ranges, int depth
+  ) {
+    if (depth > 64) {
+      return false;
+    }
     const auto& rule = base_grammar_->GetRule(rule_id);
     if (rule.is_lazy) {
       return false;

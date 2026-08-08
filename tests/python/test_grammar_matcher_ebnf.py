@@ -827,12 +827,9 @@ def test_repeat_ref_range():
 
 
 def test_repeat_ref_boundary():
-    """Test that {128} does NOT activate RepeatRef, but {129} does."""
+    """Test that exact repetition ranges retain RepeatRef edges."""
     g128 = xgr.Grammar.from_ebnf('root ::= "a"{128}')
-    tokenizer_info = xgr.TokenizerInfo([])
-    compiler = xgr.GrammarCompiler(tokenizer_info, cache_enabled=False)
-    fsm128 = _print_grammar_fsms(compiler.compile_grammar(g128).grammar)
-    assert "Repeat(" not in fsm128
+    _assert_repeat_ref_active(g128)
 
     assert _is_grammar_accept_string(g128, "a" * 128)
     assert not _is_grammar_accept_string(g128, "a" * 127)

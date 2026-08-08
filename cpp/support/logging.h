@@ -218,6 +218,10 @@ class LogMessage {
 #define XGRAMMAR_ICHECK(x) \
   if (!(x)) LogFatal(__FILE__, __LINE__).stream() << "Internal check failed: (" #x << ") is false: "
 
+#ifndef XGRAMMAR_ENABLE_INTERNAL_CHECK
+#define XGRAMMAR_ENABLE_INTERNAL_CHECK 0
+#endif
+
 /*! \brief Whether internal checks are enabled for this build. */
 inline constexpr bool kInternalChecksEnabled = XGRAMMAR_ENABLE_INTERNAL_CHECK != 0;
 
