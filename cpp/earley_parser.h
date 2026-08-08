@@ -350,10 +350,13 @@ struct EarleyParserFeatures {
     kFsmStateNonTerminal = 1 << 2,
     kFsmStateEnd = 1 << 3,
     kFsmStateHasEdges = 1 << 4,
+    kFsmStateRepeatSource = 1 << 5,
   };
 
   std::vector<uint8_t> fsm_state_flags;
   std::vector<uint8_t> rule_is_nullable;
+  /*! \brief Whether each rule is independent of runtime parser state. */
+  std::vector<uint8_t> rule_is_context_independent;
   bool has_budget_rules = false;
   bool has_char_budget_rules = false;
   bool capture_tracking = false;
@@ -362,8 +365,15 @@ struct EarleyParserFeatures {
   EarleyParserFeatures() = default;
   explicit EarleyParserFeatures(const Grammar& grammar);
 
+  /*! \brief Whether the rule is independent of runtime parser state. */
+  bool IsRuleContextIndependent(int32_t rule_id) const {
+    return rule_id >= 0 && rule_id < static_cast<int32_t>(rule_is_context_independent.size()) &&
+           rule_is_context_independent[rule_id];
+  }
+
   friend std::size_t MemorySize(const EarleyParserFeatures& features) {
-    return MemorySize(features.fsm_state_flags) + MemorySize(features.rule_is_nullable);
+    return MemorySize(features.fsm_state_flags) + MemorySize(features.rule_is_nullable) +
+           MemorySize(features.rule_is_context_independent);
   }
 };
 
@@ -697,11 +707,13 @@ class EarleyParser {
    * \param initial_state The state to start parsing from. If not provided, parsing starts
    * from the root rule of the grammar.
    * \param features Shared parser features. If not provided, they are built from the grammar.
+   * \param initial_parent_state Optional parent used when generating a context-aware token mask.
    */
   explicit EarleyParser(
       const Grammar& grammar,
       std::optional<ParserState> initial_state = std::nullopt,
-      const EarleyParserFeatures* features = nullptr
+      const EarleyParserFeatures* features = nullptr,
+      std::optional<ParserState> initial_parent_state = std::nullopt
   );
 
   /*!
@@ -730,8 +742,11 @@ class EarleyParser {
   /*!
    * \brief Push the initial state into the Earley parser.
    * \param state The initial state to be pushed.
+   * \param initial_parent_state Optional parent of the initial state.
    */
-  void PushStateAndExpand(const ParserState& state);
+  void PushStateAndExpand(
+      const ParserState& state, std::optional<ParserState> initial_parent_state = std::nullopt
+  );
 
   /*!
    * \brief Reset the parser.

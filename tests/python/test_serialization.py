@@ -267,6 +267,7 @@ def test_serialize_compiled_grammar():
         "earley_parser_features": {
             "fsm_state_flags": [19, 19, 27, 21, 19, 9, 19, 21, 9],
             "rule_is_nullable": [1, 0],
+            "rule_is_context_independent": [1, 1],
             "has_budget_rules": False,
             "has_char_budget_rules": False,
             "capture_tracking": False,
@@ -278,7 +279,7 @@ def test_serialize_compiled_grammar():
             "add_prefix_space": True,
             "stop_token_ids": [0, 1],
         },
-        "dynamic": False,
+        "token_mask_cache": {"dynamic": False, "repeat_masks": []},
         "__VERSION__": "v16",
     }
 
@@ -293,7 +294,7 @@ def test_serialize_compiled_grammar():
         root: List[Tuple[List[int], AdaptiveTokenMask]]
 
     recovered_obj = json.loads(serialized)
-    adaptive_token_mask_cache = recovered_obj.pop("adaptive_token_mask_cache", None)
+    adaptive_token_mask_cache = recovered_obj["token_mask_cache"].pop("masks", None)
     print(serialized)
     assert recovered_obj == expected_json
     AdaptiveTokenMaskCache.model_validate(adaptive_token_mask_cache)
