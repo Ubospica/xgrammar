@@ -603,6 +603,11 @@ def test_preserved_repetition_ranges_keep_shared_repeat_edges(
             ["a", "aaaax", "xx"],
         ),
         ('root ::= unit{2,} "x"\nunit ::= "" | "a"', ["x", "ax", "aax", "aaaaax"], ["a", "xx"]),
+        (
+            'root ::= unit{63,64} "x" | "y"\nunit ::= inner{0,2}\ninner ::= "c"',
+            ["x", "cx", "c" * 128 + "x", "y"],
+            ["c" * 129 + "x", "c", "xx"],
+        ),
     ],
     ids=[
         "repeat-and-literal",
@@ -610,12 +615,13 @@ def test_preserved_repetition_ranges_keep_shared_repeat_edges(
         "nested-repeats",
         "bounded-nullable-repeat",
         "unbounded-nullable-repeat",
+        "indirect-nullable-repeat",
     ],
 )
 def test_preserved_repetition_ranges_keep_repeat_branches_isolated(
     grammar, accepted_values, rejected_values
 ):
-    tokenizer_info = xgr.TokenizerInfo(["a", "b", "x", "y"], stop_token_ids=[])
+    tokenizer_info = xgr.TokenizerInfo(["a", "b", "c", "x", "y"], stop_token_ids=[])
     eager = xgr.GrammarCompiler(
         tokenizer_info, max_threads=1, enable_dynamic_compilation=False
     ).compile_grammar(grammar)

@@ -75,3 +75,37 @@ TEST(EarleyParserTest, HandlesMoreThanFiftyStatesAcrossCopyFailureAndReset) {
   }
   EXPECT_TRUE(parser.IsCompleted());
 }
+
+TEST(EarleyParserTest, EmptyRepeatCompletionDoesNotDependOnNullableMetadata) {
+  xgrammar::Grammar grammar = xgrammar::GrammarOptimizer::Apply(
+      xgrammar::Grammar::FromEBNF("root ::= unit{63,64} \"x\"\n"
+                                  "unit ::= inner{0,2}\n"
+                                  "inner ::= \"c\""),
+      false
+  );
+
+  // Simulate incomplete nullable metadata after optimization while retaining the original range.
+  grammar->allow_empty_rule_ids.clear();
+  bool repeat_range_updated = false;
+  for (int32_t state_id = 0; state_id < grammar->complete_fsm.NumStates(); ++state_id) {
+    for (const auto& edge : grammar->complete_fsm.GetEdges(state_id)) {
+      if (!edge.IsRepeatRef()) {
+        continue;
+      }
+      auto repeat_info = grammar->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
+      if (grammar->GetRule(repeat_info.RuleId()).name != "unit") {
+        continue;
+      }
+      int32_t* repeat_data = const_cast<int32_t*>(repeat_info.data);
+      repeat_data[1] = 63;
+      repeat_data[2] = 64;
+      repeat_range_updated = true;
+    }
+  }
+  ASSERT_TRUE(repeat_range_updated);
+
+  xgrammar::EarleyParserFeatures features(grammar);
+  xgrammar::EarleyParser parser(grammar, std::nullopt, &features);
+  EXPECT_TRUE(parser.Advance('x'));
+  EXPECT_TRUE(parser.IsCompleted());
+}
