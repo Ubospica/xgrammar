@@ -6,6 +6,22 @@
 #include "earley_parser.h"
 #include "grammar_functor.h"
 
+class EarleyParserStateInspector : public xgrammar::EarleyParser {
+ public:
+  using EarleyParser::EarleyParser;
+
+  bool LatestCompletableStatesHavePositiveRepeatCount() const {
+    const auto& latest_states =
+        rule_id_to_completable_states_[rule_id_to_completable_states_.size() - 1];
+    for (const auto& entry : latest_states) {
+      if (entry.second.repeat_count > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
 TEST(RepeatDetectorTest, PreservesStatesAcrossSetTransitionAndResetsCopies) {
   xgrammar::RepeatDetector detector(2);
   const xgrammar::ParserState first_state(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
@@ -105,7 +121,8 @@ TEST(EarleyParserTest, EmptyRepeatCompletionDoesNotDependOnNullableMetadata) {
   ASSERT_TRUE(repeat_range_updated);
 
   xgrammar::EarleyParserFeatures features(grammar);
-  xgrammar::EarleyParser parser(grammar, std::nullopt, &features);
+  EarleyParserStateInspector parser(grammar, std::nullopt, &features);
+  EXPECT_FALSE(parser.LatestCompletableStatesHavePositiveRepeatCount());
   EXPECT_TRUE(parser.Advance('x'));
   EXPECT_TRUE(parser.IsCompleted());
 }

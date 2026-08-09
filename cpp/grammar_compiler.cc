@@ -1588,7 +1588,10 @@ AdaptiveTokenMask TokenMaskCache::GenerateRepeatTokenMask(
 ) {
   auto generated_mask =
       TryCreateRepeatDFATokenMask(state, repeat_key.upper_bound_distance, grammar, tokenizer_info);
-  if (generated_mask.has_value()) {
+  // A root repeat has its full continuation context, so resolve boundary-crossing tokens once
+  // instead of leaving every matcher to recheck them.
+  if (generated_mask.has_value() && (generated_mask->uncertain_indices.empty() ||
+                                     repeat_parent_state.rule_id != grammar->GetRootRuleId())) {
     return std::move(*generated_mask);
   }
 
