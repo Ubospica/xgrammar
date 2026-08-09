@@ -84,7 +84,6 @@ void XMLToolCallingConverter::AddBasicRules() {
 
   auto any_spec = SchemaSpec::Make(AnySpec{}, "{}", kBasicAny);
   constexpr const char* kStringCacheKey = "{\"type\":\"string\"}";
-  constexpr const char* kArrayCacheKey = "{\"type\":\"array\"}";
   constexpr const char* kObjectCacheKey = "{\"type\":\"object\"}";
 
   // The outer part, xml format, is at level 1.
@@ -97,8 +96,6 @@ void XMLToolCallingConverter::AddBasicRules() {
   int64_t recursive_context = GetCacheContext(any_spec);
   AddCache(any_spec->cache_key, recursive_context, builder_.GetRuleId(kXMLAny));
   builder_.UpdateRuleBody(kXMLAny, GenerateAny(AnySpec{}, kXMLAny));
-  AddCache(kArrayCacheKey, recursive_context, builder_.GetRuleId(kBasicArray));
-  AddCache(kObjectCacheKey, recursive_context, builder_.GetRuleId(kBasicObject));
 
   // Reset the nested object level to 0, which is the root level.
   nested_object_level_ = 0;
