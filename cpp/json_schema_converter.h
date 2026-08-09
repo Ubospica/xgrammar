@@ -127,6 +127,7 @@ struct EnumSpec {
 
 struct RefSpec {
   std::string uri;
+  std::optional<std::string> default_type;
 
   std::string ToString() const;
 };
@@ -284,8 +285,11 @@ class IndentManager {
  */
 class JSONSchemaConverter {
  public:
-  using RefResolver =
-      std::function<SchemaSpecPtr(const std::string& uri, const std::string& rule_name_hint)>;
+  using RefResolver = std::function<SchemaSpecPtr(
+      const std::string& uri,
+      const std::string& rule_name_hint,
+      const std::optional<std::string>& default_type
+  )>;
 
   JSONSchemaConverter(
       std::optional<int> indent,
@@ -453,6 +457,8 @@ class JSONSchemaConverter {
   bool any_whitespace_;
   bool indentation_enabled_;
   std::optional<int> max_whitespace_cnt_;
+  std::string recursive_comma_separator_;
+  std::string recursive_colon_separator_;
   // When true, object properties may appear in any order (see GetAnyOrderRuleForProperties).
   // Applies to all objects (including nested ones). Default false preserves the fixed-order
   // behavior.

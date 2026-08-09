@@ -301,11 +301,12 @@ def test_direct_converter_schema_cache_separates_untyped_schema_after_default_ty
 
 
 @pytest.mark.parametrize(
-    "first_schema, second_schema",
+    "first_schema, second_schema, expected_reuse",
     [
         (
             {"type": "string", "minLength": 2, "maxLength": 4},
             {"maxLength": 4, "type": "string", "minLength": 2},
+            True,
         ),
         (
             {"type": "string", "minLength": 2, "maxLength": 4, "title": "First value"},
@@ -316,12 +317,13 @@ def test_direct_converter_schema_cache_separates_untyped_schema_after_default_ty
                 "type": "string",
                 "minLength": 2,
             },
+            False,
         ),
     ],
-    ids=["key-order", "ignored-metadata"],
+    ids=["key-order", "annotation-values"],
 )
 def test_direct_converter_schema_cache_uses_canonical_key(
-    first_schema: Dict[str, Any], second_schema: Dict[str, Any]
+    first_schema: Dict[str, Any], second_schema: Dict[str, Any], expected_reuse: bool
 ):
     schema = {
         "type": "object",
@@ -333,7 +335,88 @@ def test_direct_converter_schema_cache_uses_canonical_key(
     grammar = xgr.Grammar.from_json_schema(json.dumps(schema))
     assert _is_grammar_accept_string(grammar, '{"first":"ab","second":"cd"}')
     assert not _is_grammar_accept_string(grammar, '{"first":"a","second":"cd"}')
-    assert "root_prop_1 ::=" not in str(grammar)
+    assert ("root_prop_1 ::=" not in str(grammar)) is expected_reuse
+
+
+@pytest.mark.parametrize(
+    "property_name",
+    [
+        "title",
+        "default",
+        "description",
+        "examples",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "$comment",
+        "$schema",
+    ],
+)
+def test_direct_converter_schema_cache_preserves_property_names(property_name: str):
+    leaf_schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    nested_schema = {
+        "type": "object",
+        "properties": {property_name: leaf_schema},
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {property_name: nested_schema},
+        "required": [property_name],
+        "additionalProperties": False,
+    }
+
+    assert _accepts(schema, json.dumps({property_name: {property_name: {}}}))
+    assert not _accepts(schema, json.dumps({property_name: {property_name: {property_name: {}}}}))
+
+
+def test_direct_converter_schema_cache_escapes_property_names():
+    injected_property_name = 'x":{"type":"string"},"y'
+    first_schema = {
+        "type": "object",
+        "properties": {injected_property_name: {"type": "number"}},
+        "additionalProperties": False,
+    }
+    second_schema = {
+        "type": "object",
+        "properties": {"x": {"type": "string"}, "y": {"type": "number"}},
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {"first": first_schema, "second": second_schema},
+        "required": ["first", "second"],
+        "additionalProperties": False,
+    }
+
+    assert _accepts(
+        schema, json.dumps({"first": {injected_property_name: 1}, "second": {"x": "value", "y": 2}})
+    )
+    assert not _accepts(schema, json.dumps({"first": {}, "second": {injected_property_name: 1}}))
+
+
+@pytest.mark.parametrize("explicit_string_type", [False, True], ids=["implicit", "explicit"])
+def test_direct_converter_reference_preserves_property_name_string_context(
+    explicit_string_type: bool,
+):
+    name_schema = {"pattern": "^[a-z]+$"}
+    reference_schema = {"$ref": "#/$defs/name"}
+    if explicit_string_type:
+        reference_schema["type"] = "string"
+    schema = {
+        "$defs": {"name": name_schema},
+        "type": "array",
+        "prefixItems": [
+            reference_schema,
+            {"type": "object", "propertyNames": name_schema, "additionalProperties": True},
+            {"type": "object", "propertyNames": reference_schema, "additionalProperties": True},
+        ],
+        "minItems": 3,
+        "maxItems": 3,
+    }
+
+    assert _accepts(schema, '["value",{"valid":1},{"validtoo":2}]')
+    assert not _accepts(schema, '["value",{"valid":1},{"INVALID":2}]')
 
 
 def test_direct_converter_reuses_cached_reference_targets():
@@ -633,6 +716,72 @@ def test_direct_converter_recursive_reference_uses_any_whitespace_after_first_de
     )
     assert not _is_grammar_accept_string(
         grammar, '{\n  "value": 1,\n  "next": {"value": "invalid", "next": null}\n}'
+    )
+
+
+def test_direct_converter_recursive_fallback_precedes_same_depth_cache_hit():
+    node_schema = {
+        "type": "object",
+        "properties": {
+            "value": {"type": "integer"},
+            "next": {"anyOf": [{"$ref": "#/$defs/node"}, {"type": "null"}]},
+        },
+        "required": ["value", "next"],
+        "additionalProperties": False,
+    }
+    schema = {
+        "$defs": {"node": node_schema},
+        "type": "object",
+        "properties": {
+            "a": {
+                "type": "object",
+                "properties": {"node": {"$ref": "#/$defs/node"}},
+                "required": ["node"],
+                "additionalProperties": False,
+            },
+            "b": {"$ref": "#/$defs/node"},
+        },
+        "required": ["b"],
+        "additionalProperties": False,
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), any_whitespace=False, indent=2)
+
+    assert _is_grammar_accept_string(
+        grammar, '{\n  "b": {\n    "value": 2,\n    "next": {"value":3,"next":null}\n  }\n}'
+    )
+    assert not _is_grammar_accept_string(
+        grammar, '{\n  "b": {\n    "value": 2,\n    "next": {"value":"invalid","next":null}\n  }\n}'
+    )
+
+
+def test_direct_converter_recursive_fallback_preserves_custom_separators():
+    unconstrained_grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "object"}),
+        any_whitespace=False,
+        indent=2,
+        separators=(",", " => "),
+        strict_mode=False,
+    )
+    assert _is_grammar_accept_string(unconstrained_grammar, '{"value" => 1}')
+    assert not _is_grammar_accept_string(unconstrained_grammar, '{"value":1}')
+
+    recursive_schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "value": {"type": "integer"},
+            "next": {"anyOf": [{"$ref": "#"}, {"type": "null"}]},
+        },
+        "required": ["value", "next"],
+        "additionalProperties": False,
+    }
+    recursive_grammar = xgr.Grammar.from_json_schema(
+        json.dumps(recursive_schema), any_whitespace=False, indent=2, separators=(",", " => ")
+    )
+    assert _is_grammar_accept_string(
+        recursive_grammar, '{\n  "value" => 1,\n  "next" => {"value"=>2,"next"=>null}\n}'
+    )
+    assert not _is_grammar_accept_string(
+        recursive_grammar, '{\n  "value" => 1,\n  "next" => {"value":2,"next":null}\n}'
     )
 
 

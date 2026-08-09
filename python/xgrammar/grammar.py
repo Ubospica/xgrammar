@@ -214,6 +214,10 @@ class Grammar(XGRObject):
             <https://github.com/sgl-project/sglang/issues/2216#issuecomment-2516192009> for more
             details.
 
+            For schemas with unbounded recursion, indentation is relaxed when a reference closes
+            a cycle. The configured separators, after trimming surrounding whitespace, and
+            max_whitespace_cnt are still enforced.
+
         separators : Optional[Tuple[str, str]], default: None
             Two separators used in the schema: comma and colon. Examples: (",", ":"), (", ", ": ").
             If None, the default separators will be used: (",", ": ") when the indent is not None,

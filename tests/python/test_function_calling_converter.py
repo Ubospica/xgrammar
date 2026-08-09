@@ -87,7 +87,7 @@ def test_xml_container_cache_keeps_nested_json_context(
         "required": ["payload"],
         "additionalProperties": False,
     }
-    grammar = _json_schema_to_ebnf(schema, json_format=json_format)
+    grammar = _json_schema_to_ebnf(schema, json_format=json_format, strict_mode=False)
     assert _is_grammar_accept_string(
         grammar, _make_xml_parameter(json_format, "payload", payload_value)
     )
@@ -99,6 +99,53 @@ def test_xml_container_cache_keeps_nested_json_context(
         _make_xml_parameter(
             json_format, "payload", _make_xml_parameter(json_format, "nested", "1")
         ),
+    )
+
+
+@pytest.mark.parametrize("json_format", ["qwen_xml", "minimax_xml", "deepseek_xml", "glm_xml"])
+@pytest.mark.parametrize(
+    "payload_schema, empty_payload, undeclared_payload",
+    [({"type": "object"}, "{}", '{"value":1}'), ({"type": "array"}, "[]", "[1]")],
+    ids=["object", "array"],
+)
+def test_xml_bare_containers_respect_strict_mode(
+    json_format: str, payload_schema: dict, empty_payload: str, undeclared_payload: str
+):
+    schema = {
+        "type": "object",
+        "properties": {"payload": payload_schema},
+        "required": ["payload"],
+        "additionalProperties": False,
+    }
+    grammar = _json_schema_to_ebnf(schema, json_format=json_format)
+
+    assert _is_grammar_accept_string(
+        grammar, _make_xml_parameter(json_format, "payload", empty_payload)
+    )
+    assert not _is_grammar_accept_string(
+        grammar, _make_xml_parameter(json_format, "payload", undeclared_payload)
+    )
+
+
+@pytest.mark.parametrize("json_format", ["qwen_xml", "minimax_xml", "deepseek_xml", "glm_xml"])
+def test_xml_bare_array_respects_custom_separator(json_format: str):
+    schema = {
+        "type": "object",
+        "properties": {"payload": {"type": "array"}},
+        "required": ["payload"],
+        "additionalProperties": False,
+    }
+    grammar = _json_schema_to_ebnf(
+        schema,
+        json_format=json_format,
+        any_whitespace=False,
+        separators=(",", ":"),
+        strict_mode=False,
+    )
+
+    assert _is_grammar_accept_string(grammar, _make_xml_parameter(json_format, "payload", "[1,2]"))
+    assert not _is_grammar_accept_string(
+        grammar, _make_xml_parameter(json_format, "payload", "[1, 2]")
     )
 
 

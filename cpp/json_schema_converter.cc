@@ -114,7 +114,10 @@ std::string EnumSpec::ToString() const {
   return s;
 }
 
-std::string RefSpec::ToString() const { return "RefSpec{uri=\"" + uri + "\"}"; }
+std::string RefSpec::ToString() const {
+  return "RefSpec{uri=\"" + uri + "\", default_type=" +
+         (default_type.has_value() ? "\"" + *default_type + "\"" : "nullopt") + "}";
+}
 
 std::string AnyOfSpec::ToString() const {
   return "AnyOfSpec{options.size()=" + std::to_string(options.size()) + "}";
@@ -142,6 +145,18 @@ std::string SchemaSpec::ToString() const {
 // ==================== SchemaParser (Internal) ====================
 
 namespace {
+
+std::string TrimSeparatorWhitespace(const std::string& separator) {
+  size_t start = 0;
+  while (start < separator.size() && std::isspace(static_cast<unsigned char>(separator[start]))) {
+    ++start;
+  }
+  size_t end = separator.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(separator[end - 1]))) {
+    --end;
+  }
+  return separator.substr(start, end - start);
+}
 
 enum class SchemaErrorType : int {
   kInvalidSchema = 0,
@@ -671,7 +686,9 @@ class SchemaParser {
   bool IsStrictMode() const { return config_.strict_mode; }
 
   Result<SchemaSpecPtr, SchemaError> ResolveRef(
-      const std::string& uri, const std::string& rule_name_hint
+      const std::string& uri,
+      const std::string& rule_name_hint,
+      std::optional<std::string> default_type = std::nullopt
   );
 
  private:
@@ -684,7 +701,9 @@ class SchemaParser {
   Result<ObjectSpec, SchemaError> ParseObject(const picojson::object& schema);
   Result<ConstSpec, SchemaError> ParseConst(const picojson::object& schema);
   Result<EnumSpec, SchemaError> ParseEnum(const picojson::object& schema);
-  Result<RefSpec, SchemaError> ParseRef(const picojson::object& schema);
+  Result<RefSpec, SchemaError> ParseRef(
+      const picojson::object& schema, std::optional<std::string> default_type
+  );
   Result<AnyOfSpec, SchemaError> ParseAnyOf(
       const picojson::object& schema, const std::string& keyword
   );
@@ -702,30 +721,16 @@ class SchemaParser {
 
   Config config_;
   const picojson::value& root_schema_;
-  std::unordered_map<std::string, SchemaSpecPtr> ref_cache_;
+  std::map<std::pair<std::string, std::optional<std::string>>, SchemaSpecPtr> ref_cache_;
   std::unordered_map<std::string, SchemaSpecPtr> schema_cache_;
 };
 
 std::string SchemaParser::ComputeCacheKey(const picojson::value& schema) {
-  static const std::unordered_set<std::string> kSkippedKeys = {
-      "title",
-      "default",
-      "description",
-      "examples",
-      "deprecated",
-      "readOnly",
-      "writeOnly",
-      "$comment",
-      "$schema",
-  };
-
   if (schema.is<picojson::object>()) {
     std::string result = "{";
     std::vector<std::pair<const std::string*, const picojson::value*>> sorted_kv;
     for (const auto& kv : schema.get<picojson::object>()) {
-      if (kSkippedKeys.count(kv.first) == 0) {
-        sorted_kv.emplace_back(&kv.first, &kv.second);
-      }
+      sorted_kv.emplace_back(&kv.first, &kv.second);
     }
     std::sort(sorted_kv.begin(), sorted_kv.end(), [](const auto& lhs, const auto& rhs) {
       return *lhs.first < *rhs.first;
@@ -736,7 +741,7 @@ std::string SchemaParser::ComputeCacheKey(const picojson::value& schema) {
         result += ",";
       }
       ++idx;
-      result += "\"" + *key + "\":" + ComputeCacheKey(*value);
+      result += picojson::value(*key).serialize(false) + ":" + ComputeCacheKey(*value);
     }
     return result + "}";
   } else if (schema.is<picojson::array>()) {
@@ -773,9 +778,11 @@ Result<SchemaSpecPtr, SchemaError> SchemaParser::Parse(
     std::optional<std::string> default_type
 ) {
   std::string cache_key = ComputeCacheKey(schema);
-  if (default_type.has_value() && schema.is<picojson::object>() &&
-      schema.get<picojson::object>().count("type") == 0) {
-    cache_key += "|default_type=" + *default_type;
+  if (default_type.has_value() && schema.is<picojson::object>()) {
+    const auto& schema_object = schema.get<picojson::object>();
+    if (schema_object.count("type") == 0 || schema_object.count("$ref")) {
+      cache_key += "|default_type=" + *default_type;
+    }
   }
   if (schema_cache_.count(cache_key)) {
     return ResultOk(schema_cache_[cache_key]);
@@ -807,7 +814,7 @@ Result<SchemaSpecPtr, SchemaError> SchemaParser::Parse(
   SchemaSpecPtr result;
 
   if (schema_obj.count("$ref")) {
-    auto ref_result = ParseRef(schema_obj);
+    auto ref_result = ParseRef(schema_obj, default_type);
     if (ref_result.IsErr()) return ResultErr(std::move(ref_result).UnwrapErr());
     auto ref_spec = std::move(ref_result).Unwrap();
     result = SchemaSpec::Make(std::move(ref_spec), cache_key, rule_name_hint);
@@ -1438,27 +1445,33 @@ Result<EnumSpec, SchemaError> SchemaParser::ParseEnum(const picojson::object& sc
   return ResultOk(std::move(spec));
 }
 
-Result<RefSpec, SchemaError> SchemaParser::ParseRef(const picojson::object& schema) {
+Result<RefSpec, SchemaError> SchemaParser::ParseRef(
+    const picojson::object& schema, std::optional<std::string> default_type
+) {
   if (!schema.at("$ref").is<std::string>()) {
     return ResultErr<SchemaError>(SchemaErrorType::kInvalidSchema, "$ref must be a string");
   }
   RefSpec spec;
   spec.uri = schema.at("$ref").get<std::string>();
+  spec.default_type = std::move(default_type);
   return ResultOk(std::move(spec));
 }
 
 Result<SchemaSpecPtr, SchemaError> SchemaParser::ResolveRef(
-    const std::string& uri, const std::string& rule_name_hint
+    const std::string& uri,
+    const std::string& rule_name_hint,
+    std::optional<std::string> default_type
 ) {
-  if (ref_cache_.count(uri)) return ResultOk(ref_cache_[uri]);
+  auto cache_key = std::make_pair(uri, default_type);
+  if (ref_cache_.count(cache_key)) return ResultOk(ref_cache_[cache_key]);
 
   if (uri == "#") {
     auto placeholder = SchemaSpec::Make(AnySpec{}, "", "root");
-    ref_cache_[uri] = placeholder;
-    auto result = Parse(root_schema_, "root");
+    ref_cache_[cache_key] = placeholder;
+    auto result = Parse(root_schema_, "root", default_type);
     if (result.IsErr()) return ResultErr(std::move(result).UnwrapErr());
     auto resolved = std::move(result).Unwrap();
-    ref_cache_[uri] = resolved;
+    ref_cache_[cache_key] = resolved;
     return ResultOk(resolved);
   }
 
@@ -1489,10 +1502,10 @@ Result<SchemaSpecPtr, SchemaError> SchemaParser::ResolveRef(
     current = current.get().get(p);
   }
 
-  auto result = Parse(current, new_rule_name_prefix);
+  auto result = Parse(current, new_rule_name_prefix, default_type);
   if (result.IsErr()) return ResultErr(std::move(result).UnwrapErr());
   auto resolved = std::move(result).Unwrap();
-  ref_cache_[uri] = resolved;
+  ref_cache_[cache_key] = resolved;
   return ResultOk(resolved);
 }
 
@@ -1741,6 +1754,12 @@ JSONSchemaConverter::JSONSchemaConverter(
       any_whitespace_(any_whitespace),
       indentation_enabled_(!any_whitespace && indent.has_value()),
       max_whitespace_cnt_(max_whitespace_cnt),
+      recursive_comma_separator_(TrimSeparatorWhitespace(
+          separators.has_value() ? separators->first : (indent.has_value() ? "," : ", ")
+      )),
+      recursive_colon_separator_(
+          TrimSeparatorWhitespace(separators.has_value() ? separators->second : ": ")
+      ),
       any_order_(any_order),
       ref_resolver_(std::move(ref_resolver)) {
   std::string colon_sep =
@@ -1808,7 +1827,7 @@ void JSONSchemaConverter::AddBasicRules(const std::vector<std::string>& addition
   bool use_any_whitespace = any_whitespace_ || indentation_enabled_;
   indent_manager_ = IndentManager(
       std::nullopt,
-      use_any_whitespace ? "," : ", ",
+      use_any_whitespace ? recursive_comma_separator_ : saved_indent_manager.separator_,
       use_any_whitespace,
       use_any_whitespace ? max_whitespace_cnt_ : std::nullopt
   );
@@ -1816,7 +1835,7 @@ void JSONSchemaConverter::AddBasicRules(const std::vector<std::string>& addition
     any_whitespace_ = true;
     generating_any_whitespace_ = true;
     int32_t whitespace = WhitespaceExpression();
-    colon_expr_id_ = Sequence({whitespace, ByteString(":"), whitespace});
+    colon_expr_id_ = Sequence({whitespace, ByteString(recursive_colon_separator_), whitespace});
   }
 
   for (const auto& spec : basic_specs) {
@@ -2161,11 +2180,12 @@ int32_t JSONSchemaConverter::CreateRuleWithAnyWhitespace(
   auto saved_indent_manager = indent_manager_;
   int32_t saved_colon_expr_id = colon_expr_id_;
   bool saved_any_whitespace = any_whitespace_;
-  indent_manager_ = IndentManager(std::nullopt, ",", true, max_whitespace_cnt_);
+  indent_manager_ =
+      IndentManager(std::nullopt, recursive_comma_separator_, true, max_whitespace_cnt_);
   any_whitespace_ = true;
   generating_any_whitespace_ = true;
   int32_t whitespace = WhitespaceExpression();
-  colon_expr_id_ = Sequence({whitespace, ByteString(":"), whitespace});
+  colon_expr_id_ = Sequence({whitespace, ByteString(recursive_colon_separator_), whitespace});
 
   int32_t rule_id = CreateRule(spec, rule_name_hint);
 
@@ -2181,6 +2201,10 @@ int32_t JSONSchemaConverter::CreateRule(
 ) {
   const std::string& cache_key = spec->cache_key;
   int64_t indentation_context = GetCacheContext(spec);
+  if (indentation_enabled_ && indentation_context != kAnyWhitespaceCacheContext &&
+      active_schema_keys_.count(cache_key)) {
+    return CreateRuleWithAnyWhitespace(spec, rule_name_hint);
+  }
   auto cached = GetCache(cache_key, indentation_context);
   if (cached.has_value()) {
     return cached.value();
@@ -2188,11 +2212,6 @@ int32_t JSONSchemaConverter::CreateRule(
   if (indentation_context == kAnyWhitespaceCacheContext && !generating_any_whitespace_) {
     return CreateRuleWithAnyWhitespace(spec, rule_name_hint);
   }
-  if (indentation_enabled_ && indentation_context != kAnyWhitespaceCacheContext &&
-      active_schema_keys_.count(cache_key)) {
-    return CreateRuleWithAnyWhitespace(spec, rule_name_hint);
-  }
-
   int32_t rule_id = builder_.AddEmptyRuleWithHint(rule_name_hint);
   AddCache(cache_key, indentation_context, rule_id);
   // Copy the name before generating: GenerateFromSpec may add rules and reallocate the
@@ -3135,7 +3154,7 @@ int32_t JSONSchemaConverter::GenerateRef(const RefSpec& spec, const std::string&
     }
   }
 
-  SchemaSpecPtr resolved = ref_resolver_(spec.uri, rule_name_hint);
+  SchemaSpecPtr resolved = ref_resolver_(spec.uri, rule_name_hint, spec.default_type);
   return RuleRef(CreateRule(resolved, rule_name_hint));
 }
 
@@ -4129,8 +4148,12 @@ Grammar JSONSchemaToGrammar(
     XGRAMMAR_LOG(FATAL) << std::move(spec_result).UnwrapErr().what();
   }
   auto spec = std::move(spec_result).Unwrap();
-  auto ref_resolver = [&parser](const std::string& uri, const std::string& rule_name_hint) {
-    auto result = parser.ResolveRef(uri, rule_name_hint);
+  auto ref_resolver = [&parser](
+                          const std::string& uri,
+                          const std::string& rule_name_hint,
+                          const std::optional<std::string>& default_type
+                      ) {
+    auto result = parser.ResolveRef(uri, rule_name_hint, default_type);
     if (result.IsErr()) {
       XGRAMMAR_LOG(FATAL) << std::move(result).UnwrapErr().what();
     }
@@ -4214,8 +4237,12 @@ std::string JSONSchemaToEBNF(
   }
   auto spec = std::move(spec_result).Unwrap();
 
-  auto ref_resolver = [&parser](const std::string& uri, const std::string& rule_name_hint) {
-    auto r = parser.ResolveRef(uri, rule_name_hint);
+  auto ref_resolver = [&parser](
+                          const std::string& uri,
+                          const std::string& rule_name_hint,
+                          const std::optional<std::string>& default_type
+                      ) {
+    auto r = parser.ResolveRef(uri, rule_name_hint, default_type);
     if (r.IsErr()) {
       XGRAMMAR_LOG(FATAL) << std::move(r).UnwrapErr().what();
     }
