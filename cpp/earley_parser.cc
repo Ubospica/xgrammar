@@ -213,9 +213,11 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
       const int32_t& min_repeat_count = element_expr[1];
       const int32_t& max_repeat_count = element_expr[2];
       new_state.repeat_count++;
+      XGRAMMAR_DCHECK(max_repeat_count == -1 || new_state.repeat_count <= max_repeat_count);
       // The repeat rule can be completed, and we advance the state. Don't forget to
-      // reset the repeat count.
-      if (new_state.repeat_count >= min_repeat_count) {
+      // reset the repeat count. An empty completion can pad any remaining minimum without
+      // consuming input, so advance immediately without relying on nullable-rule analysis.
+      if (completed_without_input || new_state.repeat_count >= min_repeat_count) {
         Enqueue(ParserState{
             parent_state.rule_id,
             parent_state.sequence_id,
@@ -257,7 +259,10 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
         continue;
       }
       int32_t new_count = parent_state.repeat_count + 1;
-      if (new_count >= info.Lower() && (info.Upper() == -1 || new_count <= info.Upper())) {
+      XGRAMMAR_DCHECK(info.Upper() == -1 || new_count <= info.Upper());
+      // An empty completion proves that the remaining minimum can be satisfied without input.
+      if (completed_without_input ||
+          (new_count >= info.Lower() && (info.Upper() == -1 || new_count <= info.Upper()))) {
         Enqueue(ParserState{
             parent_state.rule_id,
             parent_state.sequence_id,
