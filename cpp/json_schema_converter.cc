@@ -705,10 +705,16 @@ class SchemaParser {
       const picojson::object& schema, std::optional<std::string> default_type
   );
   Result<AnyOfSpec, SchemaError> ParseAnyOf(
-      const picojson::object& schema, const std::string& keyword
+      const picojson::object& schema,
+      const std::string& keyword,
+      std::optional<std::string> default_type
   );
-  Result<OneOfSpec, SchemaError> ParseOneOf(const picojson::object& schema);
-  Result<AllOfSpec, SchemaError> ParseAllOf(const picojson::object& schema);
+  Result<OneOfSpec, SchemaError> ParseOneOf(
+      const picojson::object& schema, std::optional<std::string> default_type
+  );
+  Result<AllOfSpec, SchemaError> ParseAllOf(
+      const picojson::object& schema, std::optional<std::string> default_type
+  );
   Result<TypeArraySpec, SchemaError> ParseTypeArray(
       const picojson::object& schema, const std::string& rule_name_hint
   );
@@ -827,24 +833,24 @@ Result<SchemaSpecPtr, SchemaError> SchemaParser::Parse(
     if (enum_result.IsErr()) return ResultErr(std::move(enum_result).UnwrapErr());
     result = SchemaSpec::Make(std::move(enum_result).Unwrap(), cache_key, rule_name_hint);
   } else if (schema_obj.count("anyOf")) {
-    auto anyof_result = ParseAnyOf(schema_obj, "anyOf");
+    auto anyof_result = ParseAnyOf(schema_obj, "anyOf", default_type);
     if (anyof_result.IsErr()) return ResultErr(std::move(anyof_result).UnwrapErr());
     result = SchemaSpec::Make(std::move(anyof_result).Unwrap(), cache_key, rule_name_hint);
   } else if (schema_obj.count("oneOf")) {
-    auto oneof_result = ParseOneOf(schema_obj);
+    auto oneof_result = ParseOneOf(schema_obj, default_type);
     if (oneof_result.IsErr()) {
       if (oneof_result.ErrRef().Type() != SchemaErrorType::kUnsupportedSchema) {
         return ResultErr(std::move(oneof_result).UnwrapErr());
       }
       XGRAMMAR_LOG(WARNING) << oneof_result.ErrRef().what();
-      auto anyof_result = ParseAnyOf(schema_obj, "oneOf");
+      auto anyof_result = ParseAnyOf(schema_obj, "oneOf", default_type);
       if (anyof_result.IsErr()) return ResultErr(std::move(anyof_result).UnwrapErr());
       result = SchemaSpec::Make(std::move(anyof_result).Unwrap(), cache_key, rule_name_hint);
     } else {
       result = SchemaSpec::Make(std::move(oneof_result).Unwrap(), cache_key, rule_name_hint);
     }
   } else if (schema_obj.count("allOf")) {
-    auto allof_result = ParseAllOf(schema_obj);
+    auto allof_result = ParseAllOf(schema_obj, default_type);
     if (allof_result.IsErr()) return ResultErr(std::move(allof_result).UnwrapErr());
     result = SchemaSpec::Make(std::move(allof_result).Unwrap(), cache_key, rule_name_hint);
   } else if (schema_obj.count("type") || default_type.has_value()) {
@@ -1510,7 +1516,9 @@ Result<SchemaSpecPtr, SchemaError> SchemaParser::ResolveRef(
 }
 
 Result<AnyOfSpec, SchemaError> SchemaParser::ParseAnyOf(
-    const picojson::object& schema, const std::string& keyword
+    const picojson::object& schema,
+    const std::string& keyword,
+    std::optional<std::string> default_type
 ) {
   AnyOfSpec spec;
   if (!schema.at(keyword).is<picojson::array>()) {
@@ -1518,7 +1526,7 @@ Result<AnyOfSpec, SchemaError> SchemaParser::ParseAnyOf(
   }
   int idx = 0;
   for (const auto& option : schema.at(keyword).get<picojson::array>()) {
-    auto option_result = Parse(option, "case_" + std::to_string(idx));
+    auto option_result = Parse(option, "case_" + std::to_string(idx), default_type);
     if (option_result.IsErr()) return ResultErr(std::move(option_result).UnwrapErr());
     spec.options.push_back(std::move(option_result).Unwrap());
     ++idx;
@@ -1526,7 +1534,9 @@ Result<AnyOfSpec, SchemaError> SchemaParser::ParseAnyOf(
   return ResultOk(std::move(spec));
 }
 
-Result<OneOfSpec, SchemaError> SchemaParser::ParseOneOf(const picojson::object& schema) {
+Result<OneOfSpec, SchemaError> SchemaParser::ParseOneOf(
+    const picojson::object& schema, std::optional<std::string> default_type
+) {
   OneOfSpec spec;
   if (!schema.at("oneOf").is<picojson::array>()) {
     return ResultErr<SchemaError>(SchemaErrorType::kInvalidSchema, "oneOf must be an array");
@@ -1539,7 +1549,7 @@ Result<OneOfSpec, SchemaError> SchemaParser::ParseOneOf(const picojson::object& 
 
   int idx = 0;
   for (const auto& option : options) {
-    auto option_result = Parse(option, "case_" + std::to_string(idx));
+    auto option_result = Parse(option, "case_" + std::to_string(idx), default_type);
     if (option_result.IsErr()) return ResultErr(std::move(option_result).UnwrapErr());
     spec.options.push_back(std::move(option_result).Unwrap());
     ++idx;
@@ -1552,14 +1562,16 @@ Result<OneOfSpec, SchemaError> SchemaParser::ParseOneOf(const picojson::object& 
   return ResultOk(std::move(spec));
 }
 
-Result<AllOfSpec, SchemaError> SchemaParser::ParseAllOf(const picojson::object& schema) {
+Result<AllOfSpec, SchemaError> SchemaParser::ParseAllOf(
+    const picojson::object& schema, std::optional<std::string> default_type
+) {
   AllOfSpec spec;
   if (!schema.at("allOf").is<picojson::array>()) {
     return ResultErr<SchemaError>(SchemaErrorType::kInvalidSchema, "allOf must be an array");
   }
   int idx = 0;
   for (const auto& sub_schema : schema.at("allOf").get<picojson::array>()) {
-    auto sub_result = Parse(sub_schema, "all_" + std::to_string(idx));
+    auto sub_result = Parse(sub_schema, "all_" + std::to_string(idx), default_type);
     if (sub_result.IsErr()) return ResultErr(std::move(sub_result).UnwrapErr());
     spec.schemas.push_back(std::move(sub_result).Unwrap());
     ++idx;

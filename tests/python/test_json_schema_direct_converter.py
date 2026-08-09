@@ -396,10 +396,12 @@ def test_direct_converter_schema_cache_escapes_property_names():
 
 
 @pytest.mark.parametrize("explicit_string_type", [False, True], ids=["implicit", "explicit"])
+@pytest.mark.parametrize("composition", ["direct", "anyOf", "oneOf", "allOf"])
 def test_direct_converter_reference_preserves_property_name_string_context(
-    explicit_string_type: bool,
+    explicit_string_type: bool, composition: str
 ):
-    name_schema = {"pattern": "^[a-z]+$"}
+    pattern_schema = {"pattern": "^[a-z]+$"}
+    name_schema = pattern_schema if composition == "direct" else {composition: [pattern_schema]}
     reference_schema = {"$ref": "#/$defs/name"}
     if explicit_string_type:
         reference_schema["type"] = "string"
