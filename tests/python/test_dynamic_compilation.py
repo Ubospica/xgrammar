@@ -1003,6 +1003,32 @@ def test_repeated_character_class_masks_are_shared_by_compiled_grammar():
     assert compiled.memory_size_bytes == populated_size
 
 
+def test_root_repeat_boundary_masks_are_shared_by_compiled_grammar():
+    vocabulary = ["a", "aaa", "aaax", "aaaa", "aaaax", "b", "x"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar('root ::= [a-z]{1,3} "x"')
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_grammar('root ::= [a-z]{1,3} "x"')
+
+    expected = _next_token_mask(
+        xgr.GrammarMatcher(eager, terminate_without_stop_token=True), tokenizer_info.vocab_size
+    )
+    actual = _next_token_mask(
+        xgr.GrammarMatcher(dynamic, terminate_without_stop_token=True), tokenizer_info.vocab_size
+    )
+    populated_size = dynamic.memory_size_bytes
+    cached = _next_token_mask(
+        xgr.GrammarMatcher(dynamic, terminate_without_stop_token=True), tokenizer_info.vocab_size
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(cached, expected, rtol=0, atol=0)
+    assert dynamic.memory_size_bytes == populated_size
+
+
 def test_serialization_rebuilds_repeated_character_class_masks():
     tokenizer_info = xgr.TokenizerInfo(["a", "ab", "b", "x"], stop_token_ids=[])
     grammar = "root ::= [a-z]{1,3}"
