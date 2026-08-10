@@ -107,6 +107,29 @@ def test_dynamic_compilation_matches_eager_masks(compile_grammar, input_string):
         torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("repeat_range", ["{3,}", "{3,5}"])
+def test_right_recursive_rule_inside_repetition_matches_eager_masks(repeat_range):
+    tokenizer_info = xgr.TokenizerInfo(VOCABULARY, stop_token_ids=[])
+    grammar = (
+        'root ::= "[" item tail "]"\n'
+        f"tail ::= unit{repeat_range}\n"
+        'unit ::= ", " item\n'
+        "item ::= [0-9]+"
+    )
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_grammar(grammar)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar(grammar)
+
+    expected = _mask_trace(eager, "[1, 2, 3, 4]")
+    actual = _mask_trace(dynamic, "[1, 2, 3, 4]")
+    for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
+        assert actual_apply == expected_apply
+        torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
 def test_dynamic_masks_are_cached():
     tokenizer_info = xgr.TokenizerInfo(VOCABULARY, stop_token_ids=[])
     dynamic = _compile_builtin_json(

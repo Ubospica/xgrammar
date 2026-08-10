@@ -757,9 +757,30 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
                          << ref_rule_id << ": " << grammar_->GetRule(ref_rule_id).name << ".";
     }
     const uint8_t target_flags = GetFsmStateFlags(state.rule_id, target);
-    if (!is_repeat && !(target_flags & kFsmStateHasEdges) && (target_flags & kFsmStateEnd) &&
+    const bool can_elide_parent_completion =
+        !is_repeat && !(target_flags & kFsmStateHasEdges) && (target_flags & kFsmStateEnd) &&
         state.rule_start_pos != static_cast<int32_t>(rule_id_to_completable_states_.size() - 1) &&
-        !RuleNeedsCaptureEvent(state.rule_id) && !RuleNeedsCaptureEvent(ref_rule_id)) {
+        !RuleNeedsCaptureEvent(state.rule_id) && !RuleNeedsCaptureEvent(ref_rule_id);
+    // Eliding this rule's completion would also elide the repeat-count increment in a parent
+    // kRepeatRef. A state can represent several parent occurrences, so one repeated parent makes
+    // the optimization unsafe for the merged state.
+    bool parent_occurrence_is_repeated = false;
+    if (can_elide_parent_completion && state.rule_start_pos != ParserState::kNoPrevInputPos) {
+      const auto& parent_states_map = rule_id_to_completable_states_[state.rule_start_pos];
+      for (const auto& [completed_rule_id, parent_state] : parent_states_map) {
+        if (completed_rule_id != state.rule_id || parent_state.rule_id < 0) {
+          continue;
+        }
+        const auto& parent_edges = (*complete_fsm_edges_)[parent_state.element_id];
+        if (parent_edges.size() == 1 && parent_edges[0].IsRepeatRef() &&
+            grammar_->complete_fsm.GetRepeatEdgeInfo(parent_edges[0].GetAuxIndex()).RuleId() ==
+                state.rule_id) {
+          parent_occurrence_is_repeated = true;
+          break;
+        }
+      }
+    }
+    if (can_elide_parent_completion && !parent_occurrence_is_repeated) {
       // It's a right recursion. We can optimize it. The optimization elides the completion of
       // the parent rule, so it is disabled when either rule produces capture-history events.
       // If it's the right recursion, we need to add the ancestors of the parent state.
