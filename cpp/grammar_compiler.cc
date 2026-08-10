@@ -24,6 +24,7 @@
 #include "fsm.h"
 #include "grammar_functor.h"
 #include "grammar_impl.h"
+#include "json_schema_converter.h"
 #include "support/dynamic_bitset.h"
 #include "support/int_set.h"
 #include "support/logging.h"
@@ -42,15 +43,25 @@ std::vector<uint8_t> GetRuleLevelCacheableRules(const Grammar& grammar) {
   const int32_t num_rules = grammar->NumRules();
   std::vector<uint8_t> context_dependent(num_rules, 0);
   std::vector<std::vector<int32_t>> referenced_rules(num_rules);
+  std::vector<uint32_t> state_epochs(grammar->complete_fsm.NumStates(), 0);
+  uint32_t state_epoch = 0;
+  std::vector<int32_t> reachable_states;
   for (int32_t rule_id = 0; rule_id < num_rules; ++rule_id) {
     const auto& rule = grammar->GetRule(rule_id);
     context_dependent[rule_id] = rule.max_tokens >= 0 || rule.max_chars >= 0 || rule.is_lazy ||
                                  rule.temperature.has_value() ||
                                  grammar->GetSuffixStopInfo(rule_id) != nullptr;
     const auto& fsm = grammar->per_rule_fsms[rule_id]->GetFsm();
-    std::unordered_set<int32_t> reachable_states;
-    fsm.GetReachableStates(&reachable_states);
-    for (int32_t state_id : reachable_states) {
+    ++state_epoch;
+    if (state_epoch == 0) {
+      std::fill(state_epochs.begin(), state_epochs.end(), 0);
+      ++state_epoch;
+    }
+    reachable_states.clear();
+    reachable_states.push_back(fsm.GetStart());
+    state_epochs[fsm.GetStart()] = state_epoch;
+    for (size_t state_index = 0; state_index < reachable_states.size(); ++state_index) {
+      int32_t state_id = reachable_states[state_index];
       for (const auto& edge : fsm.GetFsm().GetEdges(state_id)) {
         if (edge.IsRuleRef()) {
           referenced_rules[rule_id].push_back(edge.GetRefRuleId());
@@ -59,22 +70,28 @@ std::vector<uint8_t> GetRuleLevelCacheableRules(const Grammar& grammar) {
               grammar->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex()).RuleId()
           );
         }
+        if (state_epochs[edge.target] != state_epoch) {
+          state_epochs[edge.target] = state_epoch;
+          reachable_states.push_back(edge.target);
+        }
       }
     }
   }
 
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (int32_t rule_id = 0; rule_id < num_rules; ++rule_id) {
-      if (!context_dependent[rule_id]) {
-        continue;
-      }
-      for (int32_t referenced_rule_id : referenced_rules[rule_id]) {
-        if (!context_dependent[referenced_rule_id]) {
-          context_dependent[referenced_rule_id] = 1;
-          changed = true;
-        }
+  // Propagate context dependence through rule references once, instead of rescanning the complete
+  // graph until a fixed point is reached.
+  std::vector<int32_t> worklist;
+  worklist.reserve(num_rules);
+  for (int32_t rule_id = 0; rule_id < num_rules; ++rule_id) {
+    if (context_dependent[rule_id]) {
+      worklist.push_back(rule_id);
+    }
+  }
+  for (size_t work_index = 0; work_index < worklist.size(); ++work_index) {
+    for (int32_t referenced_rule_id : referenced_rules[worklist[work_index]]) {
+      if (!context_dependent[referenced_rule_id]) {
+        context_dependent[referenced_rule_id] = 1;
+        worklist.push_back(referenced_rule_id);
       }
     }
   }
@@ -1352,7 +1369,9 @@ class GrammarCompilerSub {
 
  private:
   /*! \brief The main logic. Compile the grammar with multi-threading. */
-  CompiledGrammar MultiThreadCompileGrammar(Grammar grammar);
+  CompiledGrammar MultiThreadCompileGrammar(
+      Grammar grammar, RegexFSMCache* regex_fsm_cache = nullptr
+  );
   /*! \brief Optimization for TagDispatch.
    *  \param compiled_grammar_impl the compiled_grammar to be optimized.
    *  \param tag_dispatch_rule_id_to_second_slicing_bitset Return value. Mapping from the rule_id to
@@ -1396,10 +1415,12 @@ class GrammarCompilerSub {
       tag_dispatch_slicing_cache_;
 };
 
-CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_unoptimized) {
+CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(
+    Grammar grammar_unoptimized, RegexFSMCache* regex_fsm_cache
+) {
   auto compiled_grammar_impl = std::make_shared<CompiledGrammar::Impl>();
   compiled_grammar_impl->grammar =
-      GrammarOptimizer::Apply(grammar_unoptimized, !enable_dynamic_compilation_);
+      GrammarOptimizer::Apply(grammar_unoptimized, !enable_dynamic_compilation_, regex_fsm_cache);
   compiled_grammar_impl->tokenizer_info = tokenizer_info_;
   compiled_grammar_impl->enable_dynamic_compilation = enable_dynamic_compilation_;
   compiled_grammar_impl->earley_parser_grammar_features =
@@ -1515,16 +1536,19 @@ CompiledGrammar GrammarCompilerSub::CompileJSONSchema(
     std::optional<int> max_whitespace_cnt,
     bool any_order
 ) {
-  return MultiThreadCompileGrammar(Grammar::FromJSONSchema(
+  RegexFSMCache regex_fsm_cache;
+  Grammar grammar = GrammarNormalizer::Apply(JSONSchemaToGrammar(
       schema,
       any_whitespace,
       indent,
       separators,
       strict_mode,
       max_whitespace_cnt,
-      /*print_converted_ebnf=*/false,
-      any_order
+      any_order,
+      JSONFormat::kJSON,
+      &regex_fsm_cache
   ));
+  return MultiThreadCompileGrammar(std::move(grammar), &regex_fsm_cache);
 }
 
 CompiledGrammar GrammarCompilerSub::CompileStructuralTag(const std::string& structural_tag_json) {

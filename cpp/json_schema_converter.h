@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "grammar_builder.h"
+#include "regex_fsm_cache.h"
 #include "support/utils.h"
 
 namespace xgrammar {
@@ -308,7 +309,8 @@ class JSONSchemaConverter {
       bool any_whitespace,
       std::optional<int> max_whitespace_cnt,
       RefResolver ref_resolver = nullptr,
-      bool any_order = false
+      bool any_order = false,
+      RegexFSMCache* regex_fsm_cache = nullptr
   );
 
   virtual ~JSONSchemaConverter() = default;
@@ -476,6 +478,9 @@ class JSONSchemaConverter {
   // Applies to all objects (including nested ones). Default false preserves the fixed-order
   // behavior.
   bool any_order_ = false;
+  // Optional cache owned by the caller. It lets grammar optimization reuse the automata built
+  // here to validate regex-backed schema constraints.
+  RegexFSMCache* regex_fsm_cache_ = nullptr;
 
  public:
   // Basic rule names
@@ -552,7 +557,8 @@ Grammar JSONSchemaToGrammar(
     bool strict_mode = true,
     std::optional<int> max_whitespace_cnt = std::nullopt,
     bool any_order = false,
-    JSONFormat json_format = JSONFormat::kJSON
+    JSONFormat json_format = JSONFormat::kJSON,
+    RegexFSMCache* regex_fsm_cache = nullptr
 );
 
 // ==================== Public API functions (backward compatible) ====================

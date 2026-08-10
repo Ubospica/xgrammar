@@ -1725,7 +1725,8 @@ JSONSchemaConverter::JSONSchemaConverter(
     bool any_whitespace,
     std::optional<int> max_whitespace_cnt,
     RefResolver ref_resolver,
-    bool any_order
+    bool any_order,
+    RegexFSMCache* regex_fsm_cache
 )
     : indent_manager_(
           indent,
@@ -1737,6 +1738,7 @@ JSONSchemaConverter::JSONSchemaConverter(
       any_whitespace_(any_whitespace),
       max_whitespace_cnt_(max_whitespace_cnt),
       any_order_(any_order),
+      regex_fsm_cache_(regex_fsm_cache),
       ref_resolver_(std::move(ref_resolver)) {
   std::string colon_sep =
       separators.has_value() ? separators->second : (any_whitespace ? ":" : ": ");
@@ -2259,14 +2261,35 @@ int32_t JSONSchemaConverter::RegexExpression(
         });
   }
   if (can_use_fsm) {
-    auto fsm_result = GrammarFSMBuilder::Regex(regex, json_string);
-    if (fsm_result.IsOk()) {
-      auto fsm = std::move(fsm_result).Unwrap();
+    std::optional<FSMWithStartEnd> local_fsm;
+    const FSMWithStartEnd* fsm = nullptr;
+    std::string fsm_cache_key;
+    if (regex_fsm_cache_ != nullptr) {
+      fsm_cache_key = MakeRegexFSMCacheKey(regex, json_string);
+      const auto cached_fsm = regex_fsm_cache_->find(fsm_cache_key);
+      if (cached_fsm != regex_fsm_cache_->end()) {
+        fsm = &cached_fsm->second;
+      }
+    }
+    if (fsm == nullptr) {
+      auto fsm_result = GrammarFSMBuilder::Regex(regex, json_string);
+      if (fsm_result.IsOk()) {
+        if (regex_fsm_cache_ != nullptr) {
+          const auto inserted =
+              regex_fsm_cache_->emplace(std::move(fsm_cache_key), std::move(fsm_result).Unwrap());
+          fsm = &inserted.first->second;
+        } else {
+          local_fsm.emplace(std::move(fsm_result).Unwrap());
+          fsm = &*local_fsm;
+        }
+      }
+    }
+    if (fsm != nullptr) {
       std::unordered_set<int> reachable_states;
-      fsm.GetReachableStates(&reachable_states);
+      fsm->GetReachableStates(&reachable_states);
       bool language_is_empty =
           std::none_of(reachable_states.begin(), reachable_states.end(), [&](int state) {
-            return fsm.IsEndState(state);
+            return fsm->IsEndState(state);
           });
       if (!language_is_empty) {
         const int32_t result = builder_.AddRegex(regex, json_string);
@@ -4120,7 +4143,8 @@ Grammar JSONSchemaToGrammar(
     bool strict_mode,
     std::optional<int> max_whitespace_cnt,
     bool any_order,
-    JSONFormat json_format
+    JSONFormat json_format,
+    RegexFSMCache* regex_fsm_cache
 ) {
   picojson::value schema_value;
   std::string error = picojson::parse(schema_value, schema);
@@ -4148,7 +4172,8 @@ Grammar JSONSchemaToGrammar(
           any_whitespace,
           max_whitespace_cnt,
           std::move(ref_resolver),
-          any_order
+          any_order,
+          regex_fsm_cache
       );
       return converter.Convert(spec);
     }
@@ -4163,7 +4188,8 @@ Grammar JSONSchemaToGrammar(
           max_whitespace_cnt,
           std::move(ref_resolver),
           json_format,
-          any_order
+          any_order,
+          regex_fsm_cache
       );
       return converter.Convert(spec);
     }
