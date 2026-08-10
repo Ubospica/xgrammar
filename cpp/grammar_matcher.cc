@@ -775,6 +775,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   explicit ContinuationTransitionCache(Impl* matcher)
       : matcher_(matcher),
         external_row_count_(matcher_->rule_id_to_completable_states_.size() - 1) {
+    first_configuration_for_row_.fill(kNoConfiguration);
     // FillBitmaskForStates creates at most one cache at a time in its normal path. Reuse a
     // per-thread table, while retaining an owned fallback for any same-thread nested call.
     auto& scratch = GetThreadLocalScratch();
@@ -1074,6 +1075,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   }
 
   std::optional<int32_t> InternCurrentConfiguration(int32_t current_row_id) {
+    XGRAMMAR_DCHECK(current_row_id >= 0 && current_row_id < kMaxRows);
     const int32_t current_row = matcher_->scanable_state_history_.size() - 1;
     const auto scanable_states = matcher_->scanable_state_history_[current_row];
     CanonicalConfiguration normalized{current_row_id, matcher_->is_completed_.back(), {}};
@@ -1085,7 +1087,8 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       }
       normalized.scanable_states.push_back(*normalized_state);
     }
-    for (int32_t i = 0; i < static_cast<int32_t>(configurations_.size()); ++i) {
+    for (int32_t i = first_configuration_for_row_[current_row_id]; i != kNoConfiguration;
+         i = next_configuration_for_row_[i]) {
       if (configurations_[i] == normalized) {
         return i;
       }
@@ -1093,9 +1096,13 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
     if (configurations_.size() >= kMaxConfigurations) {
       return std::nullopt;
     }
+    const int32_t new_configuration_id = configurations_.size();
     configurations_.push_back(std::move(normalized));
-    std::fill_n(transition_table_ + (configurations_.size() - 1) * 256, 256, kEmpty);
-    return configurations_.size() - 1;
+    next_configuration_for_row_[new_configuration_id] =
+        first_configuration_for_row_[current_row_id];
+    first_configuration_for_row_[current_row_id] = new_configuration_id;
+    std::fill_n(transition_table_ + new_configuration_id * 256, 256, kEmpty);
+    return new_configuration_id;
   }
 
   void RecordMaterializedRow(int32_t row_id) {
@@ -1155,6 +1162,9 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   uint16_t* current_transition_row_{nullptr};
   std::vector<CanonicalRow> rows_;
   std::vector<CanonicalConfiguration> configurations_;
+  static constexpr int16_t kNoConfiguration = -1;
+  std::array<int16_t, kMaxRows> first_configuration_for_row_;
+  std::array<int16_t, kMaxConfigurations> next_configuration_for_row_;
   std::vector<std::vector<int32_t>> absolute_rows_by_id_;
   std::array<uint16_t, kMaxVirtualDepth> transition_history_;
   size_t transition_depth_{0};
@@ -2463,12 +2473,12 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
       atomic_trial_base->capture_recording_ = false;
     }
     PushOneStateToCheck(state);
-    std::unique_ptr<ContinuationTransitionCache> continuation_cache;
+    std::optional<ContinuationTransitionCache> continuation_cache;
     constexpr size_t kMinUncertainTokensForContinuationCache = 128;
     if (!has_budget_rules_ && !has_char_budget_rules_ && !capture_tracking_ &&
         adaptive_token_mask.store_type != StoreType::kRejected &&
         adaptive_token_mask.uncertain_indices.size() >= kMinUncertainTokensForContinuationCache) {
-      continuation_cache = std::make_unique<ContinuationTransitionCache>(this);
+      continuation_cache.emplace(this);
     }
     bool track_temporary_input = has_char_budget_rules_ && has_budget_marker_rules_;
     int32_t saved_temporary_input_start_row = -1;
