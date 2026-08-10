@@ -758,6 +758,8 @@ class GrammarMatcher::Impl : public EarleyParser {
   DynamicBitset tmp_accepted_bitset_;
   std::vector<int32_t> tmp_rejected_indices_;
   std::vector<int32_t> tmp_rejected_indices_delta_;
+  std::vector<ParserState> tmp_latest_states_;
+  std::vector<std::pair<ParserState, const AdaptiveTokenMask*>> tmp_latest_states_with_masks_;
   bool repeat_mask_cache_enabled_{false};
   struct RepeatMaskCacheEntry {
     std::vector<int32_t> key;
@@ -772,22 +774,44 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
  public:
   explicit ContinuationTransitionCache(Impl* matcher)
       : matcher_(matcher),
-        external_row_count_(matcher_->rule_id_to_completable_states_.size() - 1),
-        transition_table_(new uint16_t[kMaxConfigurations * 256]) {
-    const auto initial_row_id = InternCurrentCompletableRow();
-    if (!initial_row_id.has_value()) {
-      enabled_ = false;
-      return;
+        external_row_count_(matcher_->rule_id_to_completable_states_.size() - 1) {
+    // FillBitmaskForStates creates at most one cache at a time in its normal path. Reuse a
+    // per-thread table, while retaining an owned fallback for any same-thread nested call.
+    auto& scratch = GetThreadLocalScratch();
+    if (!scratch.in_use) {
+      scratch.in_use = true;
+      uses_thread_local_scratch_ = true;
+      transition_table_ = scratch.transition_table.data();
+    } else {
+      owned_transition_table_ = std::make_unique<uint16_t[]>(kMaxConfigurations * 256);
+      transition_table_ = owned_transition_table_.get();
     }
-    const auto initial_configuration_id = InternCurrentConfiguration(*initial_row_id);
-    if (!initial_configuration_id.has_value()) {
-      enabled_ = false;
-      return;
+    try {
+      const auto initial_row_id = InternCurrentCompletableRow();
+      if (!initial_row_id.has_value()) {
+        enabled_ = false;
+        return;
+      }
+      const auto initial_configuration_id = InternCurrentConfiguration(*initial_row_id);
+      if (!initial_configuration_id.has_value()) {
+        enabled_ = false;
+        return;
+      }
+      PushAcceptedTransition(EncodeAccepted(*initial_row_id, *initial_configuration_id));
+      RecordMaterializedRow(*initial_row_id);
+      materialized_depth_ = 1;
+    } catch (...) {
+      ReleaseThreadLocalScratch();
+      throw;
     }
-    PushAcceptedTransition(EncodeAccepted(*initial_row_id, *initial_configuration_id));
-    RecordMaterializedRow(*initial_row_id);
-    materialized_depth_ = 1;
   }
+
+  ~ContinuationTransitionCache() { ReleaseThreadLocalScratch(); }
+
+  ContinuationTransitionCache(const ContinuationTransitionCache&) = delete;
+  ContinuationTransitionCache& operator=(const ContinuationTransitionCache&) = delete;
+  ContinuationTransitionCache(ContinuationTransitionCache&&) = delete;
+  ContinuationTransitionCache& operator=(ContinuationTransitionCache&&) = delete;
 
 #ifdef _MSC_VER
   __forceinline bool Advance(uint8_t byte) {
@@ -859,7 +883,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
     current_transition_row_ =
         target_depth == 0
             ? nullptr
-            : transition_table_.get() +
+            : transition_table_ +
                   static_cast<size_t>(DecodeConfigurationId(transition_history_[target_depth - 1])
                   ) * 256;
   }
@@ -871,6 +895,12 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   bool IsEnabled() const { return enabled_; }
 
  private:
+  void ReleaseThreadLocalScratch() noexcept {
+    if (uses_thread_local_scratch_) {
+      GetThreadLocalScratch().in_use = false;
+      uses_thread_local_scratch_ = false;
+    }
+  }
   static constexpr int32_t kMaxRows = 128;
   static constexpr int32_t kMaxConfigurations = 128;
   static constexpr size_t kMaxVirtualDepth = 1024;
@@ -879,6 +909,16 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   static constexpr int32_t kRowShift = 2;
   static constexpr int32_t kConfigurationShift = 9;
   static constexpr uint16_t kIdMask = 127;
+
+  struct ThreadLocalScratch {
+    std::array<uint16_t, kMaxConfigurations * 256> transition_table;
+    bool in_use{false};
+  };
+
+  static ThreadLocalScratch& GetThreadLocalScratch() {
+    static thread_local ThreadLocalScratch scratch;
+    return scratch;
+  }
 
   enum class RowRefKind : uint8_t { kNone, kExternal, kCanonical, kCurrent };
 
@@ -942,7 +982,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   void PushAcceptedTransition(uint16_t transition) {
     transition_history_[transition_depth_++] = transition;
     current_transition_row_ =
-        transition_table_.get() + static_cast<size_t>(DecodeConfigurationId(transition)) * 256;
+        transition_table_ + static_cast<size_t>(DecodeConfigurationId(transition)) * 256;
   }
 
   std::optional<CachedState> NormalizeState(const ParserState& state, int32_t current_row) const {
@@ -1054,7 +1094,7 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       return std::nullopt;
     }
     configurations_.push_back(std::move(normalized));
-    std::fill_n(transition_table_.get() + (configurations_.size() - 1) * 256, 256, kEmpty);
+    std::fill_n(transition_table_ + (configurations_.size() - 1) * 256, 256, kEmpty);
     return configurations_.size() - 1;
   }
 
@@ -1109,7 +1149,9 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   bool enabled_{true};
   uint64_t queries_{0};
   uint64_t hits_{0};
-  std::unique_ptr<uint16_t[]> transition_table_;
+  std::unique_ptr<uint16_t[]> owned_transition_table_;
+  uint16_t* transition_table_{nullptr};
+  bool uses_thread_local_scratch_{false};
   uint16_t* current_transition_row_{nullptr};
   std::vector<CanonicalRow> rows_;
   std::vector<CanonicalConfiguration> configurations_;
@@ -2324,7 +2366,8 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
   const auto& subtree_range = tokenizer_info_.GetTrieSubtreeNodesRange();
   // We need to have a copy, because scanable_state_history_ will be modified during the
   // FillNextTokenBitmask process, which can lead to undefined behavior.
-  std::vector<ParserState> latest_states;
+  auto& latest_states = tmp_latest_states_;
+  latest_states.clear();
   for (const auto& state : scanable_state_history_[scanable_state_history_.size() - 1]) {
     if (skip_expired && IsExpiredState(state)) {
       continue;
@@ -2363,7 +2406,8 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
                        << ", num of states=" << latest_states.size();
   }
 
-  std::vector<std::pair<ParserState, const AdaptiveTokenMask*>> latest_states_with_masks;
+  auto& latest_states_with_masks = tmp_latest_states_with_masks_;
+  latest_states_with_masks.clear();
 
   for (const auto& state : latest_states) {
     const auto repeat = GetCharacterClassRepeat(state);

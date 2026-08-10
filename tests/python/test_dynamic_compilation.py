@@ -159,6 +159,31 @@ def test_concurrent_dynamic_mask_generation():
             torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
+def test_shared_character_class_repeat_masks_survive_compiler_cache_clear():
+    vocabulary = [">", "<", "[", "]", "a", "b", "ab", "ab<", "ab]", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=1, enable_dynamic_compilation=True)
+    first = compiler.compile_grammar('root ::= ">" value "<"\nvalue ::= [a-z]{2,4}')
+    expected_first = _mask_trace(first, ">ab<")
+
+    compiler.clear_cache()
+    second = compiler.compile_grammar('root ::= "[" value "]"\nvalue ::= [a-z]{2,4}')
+    expected_second = _mask_trace(second, "[ab]")
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(_mask_trace, grammar, value)
+            for _ in range(8)
+            for grammar, value in ((first, ">ab<"), (second, "[ab]"))
+        ]
+    for index, future in enumerate(futures):
+        expected = expected_first if index % 2 == 0 else expected_second
+        actual = future.result()
+        for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
+            assert actual_apply == expected_apply
+            torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
 def test_limited_compiler_cache_does_not_retain_growing_grammar():
     tokenizer_info = xgr.TokenizerInfo(VOCABULARY, stop_token_ids=[])
     cache_limit = 64 * 1024

@@ -144,7 +144,8 @@ class CompiledGrammar::Impl {
 
   /*! \brief Character-class repeat masks shared by matchers using this grammar. */
   std::shared_ptr<CharacterClassTokenSummaryCache> character_class_token_summary_cache;
-  std::unordered_map<uint64_t, CharacterClassRepeatTokenMask> character_class_repeat_token_masks;
+  std::unordered_map<uint64_t, std::shared_ptr<const CharacterClassRepeatTokenMask>>
+      character_class_repeat_token_masks;
   mutable std::mutex character_class_repeat_token_masks_mutex;
 
   /*! \brief Grammar-wide flags and nullable rules shared by Earley parsers. */

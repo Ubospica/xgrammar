@@ -102,6 +102,34 @@ std::vector<uint8_t> GetRuleLevelCacheableRules(const Grammar& grammar) {
 }
 
 class CharacterClassTokenSummaryCache {
+ private:
+  struct KeyHash {
+    size_t operator()(const std::vector<int32_t>& key) const {
+      uint64_t result = 0;
+      for (int32_t value : key) {
+        HashCombineBinary(result, static_cast<uint64_t>(value));
+      }
+      return result;
+    }
+  };
+
+  struct RepeatKey {
+    std::vector<int32_t> character_class;
+    int32_t max_characters;
+
+    bool operator==(const RepeatKey& other) const {
+      return max_characters == other.max_characters && character_class == other.character_class;
+    }
+  };
+
+  struct RepeatKeyHash {
+    size_t operator()(const RepeatKey& key) const {
+      uint64_t result = KeyHash{}(key.character_class);
+      HashCombineBinary(result, static_cast<uint64_t>(key.max_characters));
+      return result;
+    }
+  };
+
  public:
   using Result = std::vector<CharacterClassTokenSummary>;
 
@@ -125,24 +153,76 @@ class CharacterClassTokenSummaryCache {
     return cache_.emplace(std::move(key), computed).first->second;
   }
 
+  std::shared_ptr<const CharacterClassRepeatTokenMask> GetOrCreateRepeatMask(
+      const Grammar::Impl::GrammarExpr& character_class,
+      const std::vector<std::pair<int32_t, std::string>>& sorted_vocab,
+      size_t vocab_size,
+      int32_t max_characters
+  ) {
+    RepeatKey key{
+        std::vector<int32_t>(character_class.begin(), character_class.end()), max_characters
+    };
+    {
+      std::lock_guard<std::mutex> lock(repeat_mutex_);
+      const auto existing = repeat_cache_.find(key);
+      if (existing != repeat_cache_.end()) {
+        if (auto retained = existing->second.lock()) {
+          return retained;
+        }
+      }
+    }
+
+    const auto summaries = GetOrCreate(character_class, sorted_vocab);
+    std::vector<int32_t> accepted_indices;
+    std::vector<int32_t> uncertain_indices;
+    accepted_indices.reserve(summaries->size());
+    uncertain_indices.reserve(summaries->size());
+    DynamicBitset accepted_prefix_tokens(vocab_size);
+    for (const auto& summary : *summaries) {
+      if (max_characters < 0) {
+        if (summary.consumed_whole_token) {
+          accepted_indices.push_back(summary.sorted_vocab_index);
+        } else if (summary.has_completed_character_prefix) {
+          uncertain_indices.push_back(summary.sorted_vocab_index);
+        }
+      } else if (!summary.consumed_whole_token ||
+                 summary.locally_consumed_characters > max_characters) {
+        uncertain_indices.push_back(summary.sorted_vocab_index);
+      } else {
+        accepted_prefix_tokens.Set(sorted_vocab[summary.sorted_vocab_index].first);
+      }
+    }
+    auto computed =
+        std::make_shared<const CharacterClassRepeatTokenMask>(CharacterClassRepeatTokenMask{
+            AdaptiveTokenMask(vocab_size, sorted_vocab, accepted_indices, uncertain_indices),
+            std::move(accepted_prefix_tokens)
+        });
+    std::lock_guard<std::mutex> lock(repeat_mutex_);
+    auto& cached = repeat_cache_[std::move(key)];
+    if (auto retained = cached.lock()) {
+      return retained;
+    }
+    cached = computed;
+    return computed;
+  }
+
   void Clear() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    cache_.clear();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cache_.clear();
+    }
+    std::lock_guard<std::mutex> lock(repeat_mutex_);
+    repeat_cache_.clear();
   }
 
  private:
-  struct KeyHash {
-    size_t operator()(const std::vector<int32_t>& key) const {
-      uint64_t result = 0;
-      for (int32_t value : key) {
-        HashCombineBinary(result, static_cast<uint64_t>(value));
-      }
-      return result;
-    }
-  };
-
   std::mutex mutex_;
   std::unordered_map<std::vector<int32_t>, std::shared_ptr<const Result>, KeyHash> cache_;
+  std::mutex repeat_mutex_;
+  // Compiled grammars retain shared ownership. Weak values keep evicted grammars from making the
+  // compiler-wide index retain their token bitmasks indefinitely.
+  std::unordered_map<RepeatKey, std::weak_ptr<const CharacterClassRepeatTokenMask>, RepeatKeyHash>
+      repeat_cache_;
 };
 
 /*! \brief The concrete implementation of GrammarMatcherNode. */
@@ -1260,43 +1340,19 @@ const CharacterClassRepeatTokenMask& CompiledGrammar::Impl::GetCharacterClassRep
                              static_cast<uint32_t>(max_characters + 1);
   const auto existing = character_class_repeat_token_masks.find(cache_key);
   if (existing != character_class_repeat_token_masks.end()) {
-    return existing->second;
+    return *existing->second;
   }
 
   const auto& sorted_vocab = tokenizer_info.GetSortedDecodedVocab();
   XGRAMMAR_DCHECK(character_class_token_summary_cache != nullptr);
-  const auto summaries = character_class_token_summary_cache->GetOrCreate(
-      grammar->GetGrammarExpr(character_class_expr_id), sorted_vocab
+  auto repeat_mask = character_class_token_summary_cache->GetOrCreateRepeatMask(
+      grammar->GetGrammarExpr(character_class_expr_id),
+      sorted_vocab,
+      tokenizer_info.GetVocabSize(),
+      max_characters
   );
-  std::vector<int32_t> accepted_indices;
-  std::vector<int32_t> uncertain_indices;
-  DynamicBitset accepted_prefix_tokens(tokenizer_info.GetVocabSize());
-  for (const auto& summary : *summaries) {
-    if (max_characters < 0) {
-      if (summary.consumed_whole_token) {
-        accepted_indices.push_back(summary.sorted_vocab_index);
-      } else if (summary.has_completed_character_prefix) {
-        uncertain_indices.push_back(summary.sorted_vocab_index);
-      }
-    } else if (!summary.consumed_whole_token ||
-               summary.locally_consumed_characters > max_characters) {
-      uncertain_indices.push_back(summary.sorted_vocab_index);
-    } else {
-      accepted_prefix_tokens.Set(sorted_vocab[summary.sorted_vocab_index].first);
-    }
-  }
-
-  return character_class_repeat_token_masks
-      .emplace(
-          cache_key,
-          CharacterClassRepeatTokenMask{
-              AdaptiveTokenMask(
-                  tokenizer_info.GetVocabSize(), sorted_vocab, accepted_indices, uncertain_indices
-              ),
-              std::move(accepted_prefix_tokens)
-          }
-      )
-      .first->second;
+  return *character_class_repeat_token_masks.emplace(cache_key, std::move(repeat_mask))
+              .first->second;
 }
 
 void CompiledGrammar::Impl::MaterializeAdaptiveTokenMaskCache() {
