@@ -130,6 +130,39 @@ def test_right_recursive_rule_inside_repetition_matches_eager_masks(repeat_range
         torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("cache_enabled", [False, True], ids=["cache-off", "cache-on"])
+def test_recursive_json_string_character_class_summary_matches_eager(cache_enabled):
+    vocabulary = [chr(value) for value in range(32, 127)] + [
+        "plainascii",
+        "中文",
+        '中文"',
+        '中文"}',
+        "\\n",
+        b"\xe4",
+        b"\xe4\xb8",
+        b"\xff",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=cache_enabled, enable_dynamic_compilation=False
+    ).compile_json_schema(schema, any_whitespace=False, strict_mode=True)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=cache_enabled, enable_dynamic_compilation=True
+    ).compile_json_schema(schema, any_whitespace=False, strict_mode=True)
+
+    expected = _mask_trace(eager, '{"value": "中文\\nA"}')
+    actual = _mask_trace(dynamic, '{"value": "中文\\nA"}')
+    for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
+        assert actual_apply == expected_apply
+        torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
 def test_dynamic_masks_are_cached():
     tokenizer_info = xgr.TokenizerInfo(VOCABULARY, stop_token_ids=[])
     dynamic = _compile_builtin_json(

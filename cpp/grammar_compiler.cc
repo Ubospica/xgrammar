@@ -131,11 +131,15 @@ class CharacterClassTokenSummaryCache {
   };
 
  public:
-  using Result = std::vector<CharacterClassTokenSummary>;
+  struct Result {
+    std::vector<CharacterClassTokenSummary> summaries;
+    DynamicBitset consumed_whole_token_bitset;
+  };
 
   std::shared_ptr<const Result> GetOrCreate(
       const Grammar::Impl::GrammarExpr& character_class,
-      const std::vector<std::pair<int32_t, std::string>>& sorted_vocab
+      const std::vector<std::pair<int32_t, std::string>>& sorted_vocab,
+      size_t vocab_size
   ) {
     std::vector<int32_t> key(character_class.begin(), character_class.end());
     {
@@ -146,8 +150,15 @@ class CharacterClassTokenSummaryCache {
       }
     }
 
+    auto summaries = BuildCharacterClassTokenSummaries(character_class, sorted_vocab);
+    DynamicBitset consumed_whole_token_bitset(vocab_size);
+    for (const auto& summary : summaries) {
+      if (summary.consumed_whole_token) {
+        consumed_whole_token_bitset.Set(sorted_vocab[summary.sorted_vocab_index].first, true);
+      }
+    }
     auto computed = std::make_shared<const Result>(
-        BuildCharacterClassTokenSummaries(character_class, sorted_vocab)
+        Result{std::move(summaries), std::move(consumed_whole_token_bitset)}
     );
     std::lock_guard<std::mutex> lock(mutex_);
     return cache_.emplace(std::move(key), computed).first->second;
@@ -172,13 +183,13 @@ class CharacterClassTokenSummaryCache {
       }
     }
 
-    const auto summaries = GetOrCreate(character_class, sorted_vocab);
+    const auto summaries = GetOrCreate(character_class, sorted_vocab, vocab_size);
     std::vector<int32_t> accepted_indices;
     std::vector<int32_t> uncertain_indices;
-    accepted_indices.reserve(summaries->size());
-    uncertain_indices.reserve(summaries->size());
+    accepted_indices.reserve(summaries->summaries.size());
+    uncertain_indices.reserve(summaries->summaries.size());
     DynamicBitset accepted_prefix_tokens(vocab_size);
-    for (const auto& summary : *summaries) {
+    for (const auto& summary : summaries->summaries) {
       if (max_characters < 0) {
         if (summary.consumed_whole_token) {
           accepted_indices.push_back(summary.sorted_vocab_index);
@@ -280,6 +291,13 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
   /*! \brief Build a token mask directly for a context-independent single character class. */
   std::optional<AdaptiveTokenMask> GetSingleCharacterClassDirectMask(bool is_root_rule) const;
 
+  AdaptiveTokenMask BuildAdaptiveTokenMask(
+      bool rejected_filled,
+      const std::vector<int32_t>& accepted_indices,
+      const std::vector<int32_t>& rejected_indices,
+      const std::vector<int32_t>& uncertain_indices
+  ) const;
+
   /*! \brief Check if a token can pass the lookahead assertion. */
   std::pair</*acceptable*/ bool, /*can reach end*/ bool> IsTokenPassLookaheadAssertion(
       const std::string& token, const std::vector<bool>& can_reach_end_stack
@@ -292,6 +310,9 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
    * which can be used in speculative calculation.
    */
   std::pair<bool, std::bitset<256>> GetSpeculativeCalculation();
+
+  /*! \brief Return a character class that loops directly back to this rule's start state. */
+  std::optional<int32_t> GetSpeculativeCharacterClassExprId() const;
 
   /*!
    * \brief Get the first character mask.
@@ -340,6 +361,8 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
   std::vector<int32_t> tmp_accepted_by_lookahead_indices_;
   std::vector<bool> tmp_can_reach_end_stack_;
   std::vector<bool> tmp_can_reach_end_prefix_or_stack_;
+  std::shared_ptr<const CharacterClassTokenSummaryCache::Result>
+      speculative_character_class_summary_;
   // Temporary data for GetTokenEdgeAcceptedIndices.
   std::vector<int32_t> tmp_token_edge_accepted_;
   std::vector<int32_t> tmp_token_edge_excluded_;
@@ -695,6 +718,36 @@ std::pair<bool, std::bitset<256>> GrammarMatcherForTokenMaskCache::GetSpeculativ
   return {can_be_applied, speculative_mask};
 }
 
+std::optional<int32_t> GrammarMatcherForTokenMaskCache::GetSpeculativeCharacterClassExprId() const {
+  using GrammarExprType = Grammar::Impl::GrammarExprType;
+  const auto& rule = grammar_->GetRule(init_rule_id_);
+  if (rule.is_lazy || initial_state_.sub_element_id != 0) {
+    return std::nullopt;
+  }
+  XGRAMMAR_DCHECK(grammar_->per_rule_fsms[init_rule_id_].has_value());
+  if (initial_state_.element_id != grammar_->per_rule_fsms[init_rule_id_]->GetFsm().GetStart()) {
+    return std::nullopt;
+  }
+  const auto& body = grammar_->GetGrammarExpr(rule.body_expr_id);
+  if (body.type != GrammarExprType::kChoices) {
+    return std::nullopt;
+  }
+  for (int32_t sequence_id : body) {
+    const auto& sequence = grammar_->GetGrammarExpr(sequence_id);
+    if (sequence.type != GrammarExprType::kSequence || sequence.size() != 2) {
+      continue;
+    }
+    const auto& character_class = grammar_->GetGrammarExpr(sequence[0]);
+    const auto& recursive_reference = grammar_->GetGrammarExpr(sequence[1]);
+    if (character_class.type == GrammarExprType::kCharacterClass &&
+        recursive_reference.type == GrammarExprType::kRuleRef &&
+        recursive_reference[0] == init_rule_id_) {
+      return sequence[0];
+    }
+  }
+  return std::nullopt;
+}
+
 bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
     const std::bitset<256>& first_char_mask,
     bool is_root_rule,
@@ -739,11 +792,23 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
     definite_accepted_bitset = &tag_dispatch_rule_id_to_second_slicing_bitset_.at(init_rule_id_);
   }
 
+  if (speculative_calculation && !definite_accepted_bitset.has_value()) {
+    if (auto character_class_expr_id = GetSpeculativeCharacterClassExprId()) {
+      XGRAMMAR_DCHECK(character_class_token_summary_cache_ != nullptr);
+      speculative_character_class_summary_ = character_class_token_summary_cache_->GetOrCreate(
+          grammar_->GetGrammarExpr(*character_class_expr_id),
+          sorted_decoded_vocab,
+          tokenizer_info_.GetVocabSize()
+      );
+    }
+  }
+
   const std::string* prev_token = nullptr;
   int32_t skip_ptr = 0;
   const int32_t skip_size = static_cast<int32_t>(token_edge_accepted.size());
-  bool accepts_ascii_string_safe_slice =
-      speculative_calculation && !definite_accepted_bitset.has_value();
+  bool accepts_ascii_string_safe_slice = speculative_calculation &&
+                                         !definite_accepted_bitset.has_value() &&
+                                         !speculative_character_class_summary_;
   if (accepts_ascii_string_safe_slice) {
     for (int32_t byte = 0x20; byte < 0x7f; ++byte) {
       if (byte != '"' && byte != '\\' && !speculative_mask[byte]) {
@@ -776,6 +841,11 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
         continue;
       }
       const auto& token = sorted_decoded_vocab[i].second;
+      if (speculative_character_class_summary_ &&
+          speculative_character_class_summary_
+              ->consumed_whole_token_bitset[sorted_decoded_vocab[i].first]) {
+        continue;
+      }
       if (accepts_ascii_string_safe_slice) {
         while (ascii_string_safe_position < ascii_string_safe_indices.size() &&
                ascii_string_safe_indices[ascii_string_safe_position] < i) {
@@ -1038,13 +1108,14 @@ std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetSingleChara
 
   XGRAMMAR_DCHECK(character_class_token_summary_cache_ != nullptr);
   const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
-  const auto summaries =
-      character_class_token_summary_cache_->GetOrCreate(character_class, sorted_vocab);
+  const auto summaries = character_class_token_summary_cache_->GetOrCreate(
+      character_class, sorted_vocab, tokenizer_info_.GetVocabSize()
+  );
   std::vector<int32_t> accepted_indices;
   std::vector<int32_t> uncertain_indices;
-  accepted_indices.reserve(summaries->size() / 16);
-  uncertain_indices.reserve(summaries->size());
-  for (const auto& summary : *summaries) {
+  accepted_indices.reserve(summaries->summaries.size() / 16);
+  uncertain_indices.reserve(summaries->summaries.size());
+  for (const auto& summary : summaries->summaries) {
     if (summary.consumed_whole_token && summary.locally_consumed_characters <= 1) {
       accepted_indices.push_back(summary.sorted_vocab_index);
     } else if (summary.has_completed_character_prefix) {
@@ -1059,6 +1130,35 @@ std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetSingleChara
   );
 }
 
+AdaptiveTokenMask GrammarMatcherForTokenMaskCache::BuildAdaptiveTokenMask(
+    bool rejected_filled,
+    const std::vector<int32_t>& accepted_indices,
+    const std::vector<int32_t>& rejected_indices,
+    const std::vector<int32_t>& uncertain_indices
+) const {
+  const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
+  if (speculative_character_class_summary_) {
+    return AdaptiveTokenMask(
+        speculative_character_class_summary_->consumed_whole_token_bitset,
+        sorted_vocab,
+        accepted_indices,
+        uncertain_indices
+    );
+  }
+  if (rejected_filled) {
+    return AdaptiveTokenMask(
+        tokenizer_info_.GetVocabSize(),
+        sorted_vocab,
+        accepted_indices,
+        rejected_indices,
+        uncertain_indices
+    );
+  }
+  return AdaptiveTokenMask(
+      tokenizer_info_.GetVocabSize(), sorted_vocab, accepted_indices, uncertain_indices
+  );
+}
+
 AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_root_rule) {
   tmp_accepted_indices_.clear();
   tmp_rejected_indices_.clear();
@@ -1067,6 +1167,7 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   tmp_accepted_by_lookahead_indices_.clear();
   tmp_can_reach_end_prefix_or_stack_.clear();
   tmp_can_reach_end_stack_.clear();
+  speculative_character_class_summary_.reset();
   // For every character in the current token, stores whether it is possible to reach the end of
   // the rule when matching until this character. Store it in a stack for later rollback.
   tmp_can_reach_end_stack_.push_back(false);
@@ -1158,12 +1259,8 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
     IntsetDifference(&tmp_rejected_indices_, token_edge_accepted);
   }
   if (rejected_filled) {
-    auto return_value = AdaptiveTokenMask(
-        tokenizer_info_.GetVocabSize(),
-        tokenizer_info_.GetSortedDecodedVocab(),
-        tmp_accepted_indices_,
-        tmp_rejected_indices_,
-        tmp_uncertain_indices_
+    auto return_value = BuildAdaptiveTokenMask(
+        true, tmp_accepted_indices_, tmp_rejected_indices_, tmp_uncertain_indices_
     );
     if (rule_level_cache_is_available) {
       if (lookahead_id == -1 && !is_root_rule) {
@@ -1207,9 +1304,8 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
           new_state_id,
           fsm.GetNodeNum(),
           fsm.GetEdgeNum(),
-          AdaptiveTokenMask(
-              tokenizer_info_.GetVocabSize(),
-              tokenizer_info_.GetSortedDecodedVocab(),
+          BuildAdaptiveTokenMask(
+              true,
               accepted_indices_without_lookahead,
               rejected_indices_without_lookahead,
               tmp_uncertain_indices_
@@ -1228,12 +1324,8 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
     }
     return return_value;
   } else {
-    auto return_value = AdaptiveTokenMask(
-        tokenizer_info_.GetVocabSize(),
-        tokenizer_info_.GetSortedDecodedVocab(),
-        tmp_accepted_indices_,
-        tmp_uncertain_indices_
-    );
+    auto return_value =
+        BuildAdaptiveTokenMask(false, tmp_accepted_indices_, {}, tmp_uncertain_indices_);
 
     if (rule_level_cache_is_available) {
       // Prepare for cache.
@@ -1265,11 +1357,8 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
           new_state_id,
           fsm.GetNodeNum(),
           fsm.GetEdgeNum(),
-          AdaptiveTokenMask(
-              tokenizer_info_.GetVocabSize(),
-              tokenizer_info_.GetSortedDecodedVocab(),
-              accepted_indices_without_lookahead,
-              tmp_uncertain_indices_
+          BuildAdaptiveTokenMask(
+              false, accepted_indices_without_lookahead, {}, tmp_uncertain_indices_
           )
       );
 

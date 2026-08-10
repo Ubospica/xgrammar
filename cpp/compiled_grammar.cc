@@ -45,6 +45,20 @@ AdaptiveTokenMask::AdaptiveTokenMask(
 }
 
 AdaptiveTokenMask::AdaptiveTokenMask(
+    const DynamicBitset& base_accepted_bitset,
+    const std::vector<std::pair<int32_t, std::string>>& sorted_decoded_vocab,
+    const std::vector<int32_t>& additional_accepted_indices,
+    const std::vector<int32_t>& uncertain_indices
+)
+    : store_type(StoreType::kAcceptedBitset),
+      accepted_bitset(base_accepted_bitset),
+      uncertain_indices(uncertain_indices) {
+  for (int32_t index : additional_accepted_indices) {
+    accepted_bitset.Set(sorted_decoded_vocab[index].first, true);
+  }
+}
+
+AdaptiveTokenMask::AdaptiveTokenMask(
     size_t vocab_size,
     const std::vector<std::pair<int32_t, std::string>>& sorted_decoded_vocab,
     const std::vector<int32_t>& accepted_indices,
