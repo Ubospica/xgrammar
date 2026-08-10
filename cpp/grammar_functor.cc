@@ -1020,6 +1020,7 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
   struct RuleLookaheadInfo {
     bool is_triggered_by_dispatch = false;
     bool appears_as_last_in_other_rule = false;
+    bool appears_in_multi_repeat = false;
     int non_last_occurrence_count = 0;
     std::vector<int32_t> suffix_after_first_occurrence;
   };
@@ -1027,7 +1028,7 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
   bool CanUseDerivedLookahead(int32_t rule_id) const {
     const auto& info = rule_lookahead_infos_[rule_id];
     return !info.is_triggered_by_dispatch && !info.appears_as_last_in_other_rule &&
-           info.non_last_occurrence_count == 1;
+           !info.appears_in_multi_repeat && info.non_last_occurrence_count == 1;
   }
 
   void BuildRuleLookaheadInfo() {
@@ -1059,16 +1060,29 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
         if (sequence_expr.type != GrammarExprType::kSequence || sequence_expr.size() == 0) {
           continue;
         }
-        auto last_element = base_grammar_->GetGrammarExpr(sequence_expr.end()[-1]);
-        if (last_element.type == GrammarExprType::kRuleRef && i != last_element[0]) {
-          rule_lookahead_infos_[last_element[0]].appears_as_last_in_other_rule = true;
-        }
-        for (int j = 0; j < sequence_expr.size() - 1; ++j) {
+        for (int j = 0; j < sequence_expr.size(); ++j) {
           auto element_expr = base_grammar_->GetGrammarExpr(sequence_expr[j]);
-          if (element_expr.type != GrammarExprType::kRuleRef) {
+          if (element_expr.type == GrammarExprType::kRepeat) {
+            // A completion inside a multi-repeat can be followed either by another occurrence or
+            // by the surrounding suffix, so there is no single exact derived lookahead. An
+            // at-most-once repeat has the same post-completion suffix as an ordinary reference.
+            if (element_expr[2] == 0) {
+              continue;
+            }
+            if (element_expr[2] != 1) {
+              rule_lookahead_infos_[element_expr[0]].appears_in_multi_repeat = true;
+              continue;
+            }
+          } else if (element_expr.type != GrammarExprType::kRuleRef) {
             continue;
           }
           auto& info = rule_lookahead_infos_[element_expr[0]];
+          if (j == sequence_expr.size() - 1) {
+            if (i != element_expr[0]) {
+              info.appears_as_last_in_other_rule = true;
+            }
+            continue;
+          }
           if (info.non_last_occurrence_count == 0) {
             info.suffix_after_first_occurrence.assign(
                 sequence_expr.begin() + j + 1, sequence_expr.end()
@@ -3609,36 +3623,41 @@ std::pair<bool, uint64_t> GrammarFSMHasherImpl::IsPartialHashable(int fsm_index)
     // First, check the edges which are rule references (including repeat refs).
     // To keep consistent, we need to sort them with hashes.
     int32_t unhashed_rules_count = 0;
-    auto hash_rule_like_edge = [&](int32_t ref_rule_id, int32_t target) {
+    auto hash_rule_like_edge = [&](int32_t ref_rule_id,
+                                   int32_t target,
+                                   std::optional<std::pair<int32_t, int32_t>> repeat_bounds) {
+      uint64_t edge_hash;
       if (ref_rule_id == fsm_index) {
-        hash_and_target.insert({kSelfRecursionFlag, target});
-        return true;
-      }
-      if (!grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].has_value()) {
+        edge_hash = kSelfRecursionFlag;
+      } else if (!grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].has_value()) {
         if (!is_start) {
           return false;
-        } else {
-          unhashed_rules_count++;
-          if (unhashed_rules_count > 1) {
-            return false;
-          }
-          hash_and_target.insert({kUnKnownFlag, target});
         }
-        return true;
+        unhashed_rules_count++;
+        if (unhashed_rules_count > 1) {
+          return false;
+        }
+        edge_hash = kUnKnownFlag;
+      } else {
+        edge_hash = grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].value();
       }
-      hash_and_target.insert({grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].value(), target}
-      );
+      if (repeat_bounds.has_value()) {
+        edge_hash = HashCombine(edge_hash, repeat_bounds->first, repeat_bounds->second);
+      }
+      hash_and_target.insert({edge_hash, target});
       return true;
     };
 
     for (const auto& edge : sorted_edges_[current_old_state_id]) {
       if (edge.IsRuleRef()) {
-        if (!hash_rule_like_edge(edge.GetRefRuleId(), edge.target)) {
+        if (!hash_rule_like_edge(edge.GetRefRuleId(), edge.target, std::nullopt)) {
           return {false, 0};
         }
       } else if (edge.IsRepeatRef()) {
         auto info = grammar_->ImplPtr()->complete_fsm.GetRepeatEdgeInfo(edge.GetAuxIndex());
-        if (!hash_rule_like_edge(info.RuleId(), edge.target)) {
+        if (!hash_rule_like_edge(
+                info.RuleId(), edge.target, std::make_pair(info.Lower(), info.Upper())
+            )) {
           return {false, 0};
         }
       }

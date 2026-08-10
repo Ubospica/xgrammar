@@ -247,6 +247,68 @@ def test_preserved_repetition_ranges_match_eager_masks(repeat_range: str, value:
         torch.testing.assert_close(actual_tokens, expected_tokens, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("cache_enabled", [False, True], ids=["cache-off", "cache-on"])
+@pytest.mark.parametrize(
+    "grammar,value,vocabulary",
+    [
+        (
+            'root ::= unit{0,1} unit "x"\nunit ::= "a"',
+            "aax",
+            ["a", "x", "aa", "ax", "aaa", "aax", b"\xc3", b"\xff"],
+        ),
+        (
+            'root ::= unit unit{0,1} "x"\nunit[capture="u"] ::= "a"',
+            "aax",
+            ["a", "x", "aa", "ax", "aaa", "aax", b"\xc3", b"\xff"],
+        ),
+        (
+            'root ::= unit{2,3} unit "x"\nunit ::= "a"',
+            "aaaax",
+            ["a", "x", "aa", "ax", "aaa", "aax", "aaaa", "aaax", "aaaax", b"\xc3", b"\xff"],
+        ),
+        (
+            'root ::= unit{0,1} unit "x"\nunit ::= "é"',
+            "ééx",
+            ["é", "x", "éé", "éx", "ééx", b"\xc3", b"\xa9", b"\xff"],
+        ),
+    ],
+    ids=[
+        "repeat-then-normal",
+        "normal-then-repeat",
+        "multi-repeat-then-normal",
+        "unicode-repeat-boundary",
+    ],
+)
+def test_preserved_repetition_ranges_match_multitokens_across_repeat_boundaries(
+    cache_enabled, grammar, value, vocabulary
+):
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=cache_enabled, enable_dynamic_compilation=False
+    ).compile_grammar(grammar)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=cache_enabled, enable_dynamic_compilation=True
+    ).compile_grammar(grammar)
+
+    expected = _mask_trace(eager, value)
+    actual = _mask_trace(dynamic, value)
+    for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
+        assert actual_apply == expected_apply
+        torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+    if value == "aax":
+        for compiled_grammar in [eager, dynamic]:
+            matcher = xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True)
+            assert matcher.accept_token(vocabulary.index("aa"))
+            assert not matcher.is_terminated()
+            assert matcher.accept_token(vocabulary.index("x"))
+            assert matcher.is_terminated()
+
+            matcher = xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True)
+            assert matcher.accept_token(vocabulary.index("aax"))
+            assert matcher.is_terminated()
+
+
 @pytest.mark.parametrize(
     "character_class,value", [("[a-z]", "a"), ("[^b]", "é"), ("[a-zа-я一-龥]", "中")]
 )
