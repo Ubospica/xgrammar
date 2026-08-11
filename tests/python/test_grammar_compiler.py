@@ -421,6 +421,34 @@ def test_grammar_compiler_crossing_cache_different_grammar_with_same_fsm():
     ), "Cached and non-cached compilations should yield the same result."
 
 
+def test_rule_level_cache_never_leaks_stop_token():
+    vocabulary = ["<eos>", "a", "b"] + [f"a{index:04d}" for index in range(1100)]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[0])
+    grammar_a = 'root ::= leaf [0-9]*\nleaf ::= "a" [b]?'
+    grammar_b = 'root ::= "a" [b]?'
+
+    cached_compiler = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=True, enable_dynamic_compilation=False
+    )
+    cached_compiler.compile_grammar(grammar_a)
+    cached_grammar = cached_compiler.compile_grammar(grammar_b)
+    fresh_grammar = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, cache_enabled=False, enable_dynamic_compilation=False
+    ).compile_grammar(grammar_b)
+
+    def initial_mask(compiled_grammar):
+        matcher = xgr.GrammarMatcher(compiled_grammar)
+        assert not matcher.is_completed()
+        bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        assert matcher.fill_next_token_bitmask(bitmask)
+        return bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+
+    cached_mask = initial_mask(cached_grammar)
+    fresh_mask = initial_mask(fresh_grammar)
+    assert not cached_mask[tokenizer_info.stop_token_ids[0]]
+    torch.testing.assert_close(cached_mask, fresh_mask, rtol=0, atol=0)
+
+
 HASHER_GRAPH_CASES = [
     (
         """

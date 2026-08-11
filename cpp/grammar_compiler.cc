@@ -508,9 +508,6 @@ void GrammarMatcherForTokenMaskCache::AdaptCacheWithLookahead(
       cache.store_type = AdaptiveTokenMask::StoreType::kAcceptedBitset;
       cache.accepted_bitset = DynamicBitset(tokenizer_info_.GetVocabSize());
       cache.accepted_bitset.Set();
-      for (const auto& special_index : tokenizer_info_.GetSpecialTokenIds()) {
-        cache.accepted_bitset.Reset(special_index);
-      }
       for (const auto& uncertain_index : cache.uncertain_indices) {
         cache.accepted_bitset.Reset(sorted_decoded_vocab[uncertain_index].first);
       }
@@ -528,6 +525,14 @@ void GrammarMatcherForTokenMaskCache::AdaptCacheWithLookahead(
         cache.accepted_bitset.Set(sorted_decoded_vocab[accepted_index].first);
       }
       break;
+    }
+  }
+  if (cache.store_type == AdaptiveTokenMask::StoreType::kAcceptedBitset) {
+    for (const auto& special_token_id : tokenizer_info_.GetSpecialTokenIds()) {
+      cache.accepted_bitset.Reset(special_token_id);
+    }
+    for (const auto& stop_token_id : tokenizer_info_.GetStopTokenIds()) {
+      cache.accepted_bitset.Reset(stop_token_id);
     }
   }
 }
