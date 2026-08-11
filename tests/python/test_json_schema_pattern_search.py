@@ -87,6 +87,31 @@ def test_pattern_json_string_escape_spellings():
     assert not _is_grammar_accept_string(literal, r'"\u0062"')
 
 
+def test_bounded_character_class_repeat_counts_decoded_characters():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": r"^[A-F\d]{2,3}$"})
+    )
+    assert _is_grammar_accept_string(grammar, r'"A\u0039"')
+    assert _is_grammar_accept_string(grammar, r'"\u0041F0"')
+    assert not _is_grammar_accept_string(grammar, r'"\u0041F09"')
+    assert not _is_grammar_accept_string(grammar, r'"A\u0061"')
+
+
+def test_bounded_character_class_repeat_handles_json_escape_forms():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": r'^["\\/\n]{4}$'})
+    )
+    assert _is_grammar_accept_string(grammar, r'"\"\\\/\n"')
+    assert _is_grammar_accept_string(grammar, r'"\u0022\u005c\u002f\u000a"')
+    assert not _is_grammar_accept_string(grammar, r'"\"\\\/x"')
+
+
+def test_zero_bounded_character_class_repeat():
+    grammar = xgr.Grammar.from_json_schema(json.dumps({"type": "string", "pattern": r"^[A]{0}$"}))
+    assert _is_grammar_accept_string(grammar, '""')
+    assert not _is_grammar_accept_string(grammar, '"A"')
+
+
 @pytest.mark.parametrize("enable_dynamic_compilation", [False, True])
 @pytest.mark.parametrize("cache_enabled", [False, True])
 def test_pattern_search_mask_modes(enable_dynamic_compilation: bool, cache_enabled: bool):
