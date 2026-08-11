@@ -30,9 +30,11 @@ TEST(XGrammarRegexFSMCacheTest, JSONSchemaConversionCacheSurvivesOptimization) {
       &regex_fsm_cache
   ));
 
-  const std::string cache_key = MakeRegexFSMCacheKey(pattern, /*json_string=*/true);
-  auto cached = regex_fsm_cache.find(cache_key);
-  ASSERT_NE(cached, regex_fsm_cache.end());
+  // JSON Schema search semantics rewrite the source pattern before compiling it. Preserve and
+  // track the resulting cache entry rather than assuming the source pattern itself is the key.
+  ASSERT_EQ(regex_fsm_cache.size(), 1);
+  auto cached = regex_fsm_cache.begin();
+  const std::string cache_key = cached->first;
   const std::size_t cache_size = regex_fsm_cache.size();
   const auto* cached_fsm_impl = cached->second.GetFsm().ImplPtr();
 

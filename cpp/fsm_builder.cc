@@ -24,6 +24,153 @@
 
 namespace xgrammar {
 
+namespace {
+
+int HexDigitValue(char character) {
+  if (character >= '0' && character <= '9') {
+    return character - '0';
+  }
+  if (character >= 'a' && character <= 'f') {
+    return character - 'a' + 10;
+  }
+  if (character >= 'A' && character <= 'F') {
+    return character - 'A' + 10;
+  }
+  return -1;
+}
+
+bool MustEscapeNormalizedRegexByte(uint8_t byte, bool in_character_class) {
+  if (byte == '\\') {
+    return true;
+  }
+  const std::string syntax = in_character_class ? "[]^-" : ".+*?()|{}[]^$";
+  return syntax.find(static_cast<char>(byte)) != std::string::npos;
+}
+
+/*! \brief Convert valid ECMAScript \xHH escapes into one byte before the legacy parser, which
+ * otherwise consumes every escape as exactly two source characters. Regex syntax bytes stay
+ * escaped, while ordinary bytes are emitted literally so values such as \x6e cannot turn into
+ * the legacy parser's special \n escape. */
+std::string NormalizeRegexHexEscapes(const std::string& regex) {
+  std::string result;
+  result.reserve(regex.size());
+  bool in_character_class = false;
+  for (size_t i = 0; i < regex.size(); ++i) {
+    if (regex[i] == '\\' && i + 1 < regex.size()) {
+      if (regex[i + 1] == 'x' && i + 3 < regex.size()) {
+        int high = HexDigitValue(regex[i + 2]);
+        int low = HexDigitValue(regex[i + 3]);
+        if (high != -1 && low != -1) {
+          uint8_t byte = static_cast<uint8_t>((high << 4) | low);
+          if (MustEscapeNormalizedRegexByte(byte, in_character_class)) {
+            result.push_back('\\');
+          }
+          result.push_back(static_cast<char>(byte));
+          i += 3;
+          continue;
+        }
+      }
+      // Preserve every other escape verbatim. Advancing over its escaped byte also prevents an
+      // escaped '[' or ']' from changing character-class state.
+      result.push_back(regex[i]);
+      result.push_back(regex[i + 1]);
+      ++i;
+      continue;
+    }
+    result.push_back(regex[i]);
+    if (regex[i] == '[' && !in_character_class) {
+      in_character_class = true;
+    } else if (regex[i] == ']' && in_character_class) {
+      in_character_class = false;
+    }
+  }
+  return result;
+}
+
+void AddFixedByteSequence(FSM* fsm, int from, int to, const std::string& bytes) {
+  int current = from;
+  for (size_t i = 0; i < bytes.size(); ++i) {
+    int next = i + 1 == bytes.size() ? to : fsm->AddState();
+    uint8_t byte = static_cast<uint8_t>(bytes[i]);
+    fsm->AddEdge(current, next, byte, byte);
+    current = next;
+  }
+}
+
+void AddHexDigitRange(FSM* fsm, int from, int to, int low, int high) {
+  XGRAMMAR_DCHECK(0 <= low && low <= high && high <= 15);
+  if (low <= 9) {
+    fsm->AddEdge(from, to, '0' + low, '0' + std::min(high, 9));
+  }
+  if (high >= 10) {
+    int letter_low = std::max(low, 10) - 10;
+    int letter_high = high - 10;
+    fsm->AddEdge(from, to, 'A' + letter_low, 'A' + letter_high);
+    fsm->AddEdge(from, to, 'a' + letter_low, 'a' + letter_high);
+  }
+}
+
+/*! \brief Add the compact family of \u00XX spellings for the ASCII range [low, high]. */
+void AddASCIIJSONUnicodeEscapeRange(FSM* fsm, int from, int to, int low, int high) {
+  XGRAMMAR_DCHECK(0 <= low && low <= high && high <= 0x7F);
+  int after_prefix = fsm->AddState();
+  AddFixedByteSequence(fsm, from, after_prefix, "\\u00");
+
+  int first_high = low >> 4;
+  int last_high = high >> 4;
+  auto add_branch = [&](int high_low, int high_high, int low_low, int low_high) {
+    int after_high = fsm->AddState();
+    AddHexDigitRange(fsm, after_prefix, after_high, high_low, high_high);
+    AddHexDigitRange(fsm, after_high, to, low_low, low_high);
+  };
+  if (first_high == last_high) {
+    add_branch(first_high, first_high, low & 0xF, high & 0xF);
+    return;
+  }
+  add_branch(first_high, first_high, low & 0xF, 0xF);
+  if (first_high + 1 <= last_high - 1) {
+    add_branch(first_high + 1, last_high - 1, 0, 0xF);
+  }
+  add_branch(last_high, last_high, 0, high & 0xF);
+}
+
+void AddJSONStringByteRange(FSM* fsm, int from, int to, int low, int high) {
+  static constexpr std::array<std::pair<int, int>, 3> kRawAllowed = {
+      std::pair<int, int>{0x20, 0x21}, {0x23, 0x5B}, {0x5D, 0xFF}
+  };
+  for (const auto& allowed : kRawAllowed) {
+    int raw_low = std::max(low, allowed.first);
+    int raw_high = std::min(high, allowed.second);
+    if (raw_low <= raw_high) {
+      fsm->AddEdge(from, to, raw_low, raw_high);
+    }
+  }
+
+  int ascii_low = std::max(low, 0);
+  int ascii_high = std::min(high, 0x7F);
+  if (ascii_low <= ascii_high) {
+    AddASCIIJSONUnicodeEscapeRange(fsm, from, to, ascii_low, ascii_high);
+  }
+
+  static constexpr std::array<std::pair<int, char>, 8> kShortEscapes = {
+      std::pair<int, char>{'\"', '\"'},
+      {'\\', '\\'},
+      {'/', '/'},
+      {'\b', 'b'},
+      {'\f', 'f'},
+      {'\n', 'n'},
+      {'\r', 'r'},
+      {'\t', 't'},
+  };
+  for (const auto& escaped : kShortEscapes) {
+    if (low <= escaped.first && escaped.first <= high) {
+      AddFixedByteSequence(fsm, from, to, std::string{'\\', escaped.second});
+    }
+  }
+}
+
+}  // namespace
+
 class RegexIR {
  public:
   struct Leaf;
@@ -590,7 +737,8 @@ std::vector<std::pair<int, int>> RegexIR::HandleEscapes(const std::string& regex
   }
 }
 
-Result<FSMWithStartEnd> RegexFSMBuilder::Build(const std::string& regex) {
+Result<FSMWithStartEnd> RegexFSMBuilder::Build(const std::string& input_regex) {
+  const std::string regex = NormalizeRegexHexEscapes(input_regex);
   RegexIR ir;
   using IRState = std::variant<RegexIR::State, char>;
   // We use a stack to store the states.
@@ -832,6 +980,26 @@ Result<FSMWithStartEnd> RegexFSMBuilder::BuildWithForbiddenChars(
           new_fsm.AddEdge(state, edge.target, range_start, c - 1);
           range_start = -1;
         }
+      }
+    }
+  }
+  return ResultOk(FSMWithStartEnd(new_fsm, fsm_wse.GetStart(), fsm_wse.GetEnds()));
+}
+
+Result<FSMWithStartEnd> RegexFSMBuilder::BuildForJSONString(const std::string& regex) {
+  auto build_result = Build(regex);
+  if (build_result.IsErr()) {
+    return build_result;
+  }
+  auto fsm_wse = std::move(build_result).Unwrap();
+  const auto& fsm = fsm_wse.GetFsm();
+  FSM new_fsm(fsm_wse.NumStates());
+  for (int state = 0; state < fsm_wse.NumStates(); ++state) {
+    for (const auto& edge : fsm.GetEdges(state)) {
+      if (edge.IsCharRange()) {
+        AddJSONStringByteRange(&new_fsm, state, edge.target, edge.min, edge.max);
+      } else {
+        new_fsm.AddEdge(state, edge.target, edge.min, edge.max);
       }
     }
   }

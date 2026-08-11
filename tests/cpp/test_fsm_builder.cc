@@ -411,6 +411,31 @@ TEST(XGrammarFSMBuilderTest, TestRegexBuildWithForbiddenChars) {
   EXPECT_TRUE(fsm_wse.AcceptString("你好"));
 }
 
+TEST(XGrammarFSMBuilderTest, TestRegexBuildForJSONString) {
+  auto fsm_wse = RegexFSMBuilder::BuildForJSONString("a").Unwrap();
+  EXPECT_TRUE(fsm_wse.AcceptString("a"));
+  EXPECT_TRUE(fsm_wse.AcceptString("\\u0061"));
+  EXPECT_FALSE(fsm_wse.AcceptString("\\u0062"));
+
+  fsm_wse = RegexFSMBuilder::BuildForJSONString("\\{.*\\}").Unwrap();
+  EXPECT_TRUE(fsm_wse.AcceptString("{\\\"quoted\\\":\\\"value\\\"}"));
+  EXPECT_FALSE(fsm_wse.AcceptString("{\\q}"));
+  EXPECT_FALSE(fsm_wse.AcceptString("{\"raw quote\"}"));
+
+  fsm_wse = RegexFSMBuilder::BuildForJSONString("[\\x01-\\x1f]").Unwrap();
+  EXPECT_TRUE(fsm_wse.AcceptString("\\n"));
+  EXPECT_TRUE(fsm_wse.AcceptString("\\u000A"));
+  EXPECT_FALSE(fsm_wse.AcceptString("\\u0020"));
+  EXPECT_FALSE(fsm_wse.AcceptString("\n"));
+
+  fsm_wse = RegexFSMBuilder::BuildForJSONString(".+").Unwrap();
+  EXPECT_TRUE(fsm_wse.AcceptString("你好"));
+  EXPECT_TRUE(fsm_wse.AcceptString("\\\""));
+  EXPECT_TRUE(fsm_wse.AcceptString("\\\\"));
+  EXPECT_TRUE(fsm_wse.AcceptString("\\/"));
+  EXPECT_FALSE(fsm_wse.AcceptString("\\q"));
+}
+
 TEST(XGrammarFSMBuilderTest, TestGrammarFSMBuilderRegex) {
   // The compiled regex automaton must preserve the language after simplification.
   auto fsm_wse = GrammarFSMBuilder::Regex("(ab)+").Unwrap();
@@ -424,11 +449,13 @@ TEST(XGrammarFSMBuilderTest, TestGrammarFSMBuilderRegex) {
   EXPECT_FALSE(fsm_wse.AcceptString("1234"));
   EXPECT_FALSE(fsm_wse.AcceptString("123456"));
 
-  // json_string=true excludes the JSON forbidden characters.
+  // json_string=true accepts valid encoded spellings of logical regex characters.
   fsm_wse = GrammarFSMBuilder::Regex("\\S+", /*json_string=*/true).Unwrap();
   EXPECT_TRUE(fsm_wse.AcceptString("abc"));
+  EXPECT_TRUE(fsm_wse.AcceptString("a\\\"b"));
+  EXPECT_TRUE(fsm_wse.AcceptString("a\\\\b"));
   EXPECT_FALSE(fsm_wse.AcceptString("a\"b"));
-  EXPECT_FALSE(fsm_wse.AcceptString("a\\b"));
+  EXPECT_FALSE(fsm_wse.AcceptString("a\\qb"));
 
   // Without the flag, the quote is accepted.
   fsm_wse = GrammarFSMBuilder::Regex("\\S+").Unwrap();

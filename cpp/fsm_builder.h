@@ -38,6 +38,15 @@ class RegexFSMBuilder {
   static Result<FSMWithStartEnd> BuildWithForbiddenChars(
       const std::string& regex, const std::bitset<256>& forbidden_chars
   );
+
+  /*!
+   * \brief Converts a regex over the decoded contents of a JSON string to an FSM over its encoded
+   * body. ASCII characters accept their raw spelling where JSON permits it, all applicable short
+   * escapes, and \u00XX; non-ASCII UTF-8 bytes retain their raw spelling.
+   * \param regex The regex string.
+   * \return The FSM with start and end states.
+   */
+  static Result<FSMWithStartEnd> BuildForJSONString(const std::string& regex);
 };
 
 /*!

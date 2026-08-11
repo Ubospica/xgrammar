@@ -156,6 +156,141 @@ using SchemaError = TypedError<SchemaErrorType>;
 constexpr int64_t kIntegerMultipleOfMax = 1024;
 constexpr int64_t kIntegerMultipleOfRangeWidthMax = 10000;
 
+struct RegexScanState {
+  int group_depth = 0;
+  bool in_character_class = false;
+  bool escaped = false;
+};
+
+void AdvanceRegexScanState(char character, RegexScanState* state) {
+  if (state->escaped) {
+    state->escaped = false;
+    return;
+  }
+  if (character == '\\') {
+    state->escaped = true;
+    return;
+  }
+  if (state->in_character_class) {
+    if (character == ']') {
+      state->in_character_class = false;
+    }
+    return;
+  }
+  if (character == '[') {
+    state->in_character_class = true;
+  } else if (character == '(') {
+    ++state->group_depth;
+  } else if (character == ')') {
+    --state->group_depth;
+  }
+}
+
+/*! \brief Return the contents of a transparent group enclosing the complete pattern, if any. */
+std::optional<std::string> UnwrapWholeRegexGroup(const std::string& pattern) {
+  if (pattern.size() < 2 || pattern.front() != '(') {
+    return std::nullopt;
+  }
+  size_t content_begin = 1;
+  if (pattern.size() >= 4 && pattern.compare(0, 3, "(?:") == 0) {
+    content_begin = 3;
+  } else if (pattern.size() >= 3 && pattern[1] == '?') {
+    // Lookarounds, inline flags, and other special groups are not transparent.
+    return std::nullopt;
+  }
+
+  RegexScanState state;
+  for (size_t i = 0; i < pattern.size(); ++i) {
+    AdvanceRegexScanState(pattern[i], &state);
+    if (state.group_depth == 0 && !state.in_character_class && !state.escaped) {
+      if (i != pattern.size() - 1) {
+        return std::nullopt;
+      }
+      return pattern.substr(content_begin, pattern.size() - content_begin - 1);
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<std::string> SplitTopLevelRegexAlternatives(const std::string& pattern) {
+  std::vector<std::string> alternatives;
+  RegexScanState state;
+  size_t alternative_begin = 0;
+  for (size_t i = 0; i < pattern.size(); ++i) {
+    if (pattern[i] == '|' && state.group_depth == 0 && !state.in_character_class &&
+        !state.escaped) {
+      alternatives.push_back(pattern.substr(alternative_begin, i - alternative_begin));
+      alternative_begin = i + 1;
+      continue;
+    }
+    AdvanceRegexScanState(pattern[i], &state);
+  }
+  if (!alternatives.empty()) {
+    alternatives.push_back(pattern.substr(alternative_begin));
+  }
+  return alternatives;
+}
+
+bool IsRegexSyntaxCharacterAt(const std::string& pattern, size_t target) {
+  RegexScanState state;
+  for (size_t i = 0; i <= target; ++i) {
+    if (i == target) {
+      return !state.escaped && !state.in_character_class;
+    }
+    AdvanceRegexScanState(pattern[i], &state);
+  }
+  return false;
+}
+
+/*! \brief Rewrite an ECMAScript search pattern for the whole-string grammar regex engine.
+ *
+ * JSON Schema patterns use search semantics, while grammar regex nodes consume their complete
+ * input. Top-level alternatives therefore receive independent wildcard prefixes and suffixes.
+ * Transparent outer groups are recursively unwrapped so common generated patterns such as
+ * `(^a$)|(^b$)` preserve their branch-local anchors.
+ */
+std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern) {
+  if (auto unwrapped = UnwrapWholeRegexGroup(pattern)) {
+    return RewriteJSONSchemaPatternForFullMatch(*unwrapped);
+  }
+
+  auto alternatives = SplitTopLevelRegexAlternatives(pattern);
+  if (!alternatives.empty()) {
+    std::string result = "(?:";
+    for (size_t i = 0; i < alternatives.size(); ++i) {
+      if (i != 0) {
+        result.push_back('|');
+      }
+      result += "(?:" + RewriteJSONSchemaPatternForFullMatch(alternatives[i]) + ")";
+    }
+    result.push_back(')');
+    return result;
+  }
+
+  size_t content_begin = 0;
+  size_t content_end = pattern.size();
+  bool anchored_at_start = false;
+  bool anchored_at_end = false;
+  while (content_begin < content_end && pattern[content_begin] == '^') {
+    anchored_at_start = true;
+    ++content_begin;
+  }
+  while (content_begin < content_end && pattern[content_end - 1] == '$' &&
+         IsRegexSyntaxCharacterAt(pattern, content_end - 1)) {
+    anchored_at_end = true;
+    --content_end;
+  }
+  std::string result;
+  if (!anchored_at_start) {
+    result += "(?:[\\s\\S]*)";
+  }
+  result += "(?:" + pattern.substr(content_begin, content_end - content_begin) + ")";
+  if (!anchored_at_end) {
+    result += "(?:[\\s\\S]*)";
+  }
+  return result;
+}
+
 bool IsMultipleOf(int64_t value, int64_t multiple_of) { return (value % multiple_of) == 0; }
 
 bool HasMultipleInRange(int64_t start, int64_t end, int64_t multiple_of) {
@@ -2306,6 +2441,10 @@ int32_t JSONSchemaConverter::RegexExpression(
   return result;
 }
 
+int32_t JSONSchemaConverter::JSONSchemaPatternExpression(const std::string& regex) {
+  return RegexExpression(RewriteJSONSchemaPatternForFullMatch(regex), /*json_string=*/true);
+}
+
 // ==================== Generate Methods ====================
 
 int32_t JSONSchemaConverter::GenerateInteger(
@@ -2446,8 +2585,7 @@ int32_t JSONSchemaConverter::GenerateString(const StringSpec& spec, const std::s
   }
   // Check for pattern
   if (spec.pattern.has_value()) {
-    return Sequence(
-        {ByteString("\""), RegexExpression(*spec.pattern, /*json_string=*/true), ByteString("\"")}
+    return Sequence({ByteString("\""), JSONSchemaPatternExpression(*spec.pattern), ByteString("\"")}
     );
   }
   // Check for length constraints
@@ -2949,7 +3087,7 @@ int32_t JSONSchemaConverter::GenerateObject(
             CreateRule(pattern_property.schema, rule_name + "_pp_" + std::to_string(index));
         patterns.push_back(Sequence(
             {ByteString("\""),
-             RegexExpression(pattern_property.pattern, /*json_string=*/true),
+             JSONSchemaPatternExpression(pattern_property.pattern),
              ByteString("\""),
              colon_expr_id_,
              RuleRef(value_rule_id)}
@@ -3004,10 +3142,24 @@ int32_t JSONSchemaConverter::GenerateObject(
           property_choices.push_back(Sequence(
               {beginning_separator,
                ByteString("\""),
-               RegexExpression(pattern_property.pattern, /*json_string=*/true),
+               JSONSchemaPatternExpression(pattern_property.pattern),
                ByteString("\""),
                colon_expr_id_,
                RuleRef(value_rule_id)}
+          ));
+        }
+        // additionalProperties applies to keys not covered by patternProperties. The grammar
+        // engine cannot complement an arbitrary regex here, but omitting this alternative
+        // rejects every unmatched key even when the schema explicitly allows it. This mirrors
+        // the coexistence path above and preserves the additional value constraint.
+        if (additional_property) {
+          int32_t value_rule_id =
+              CreateRule(additional_property, rule_name + "_" + additional_suffix);
+          property_choices.push_back(Sequence(
+              {beginning_separator,
+               FormatOtherProperty(
+                   KeyPatternExpression(), value_rule_id, rule_name, additional_suffix
+               )}
           ));
         }
       } else {

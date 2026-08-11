@@ -1202,11 +1202,8 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
         auto cached = regex_fsm_cache_->find(cache_key);
         bool allows_empty = false;
         if (cached == regex_fsm_cache_->end()) {
-          auto regex_fsm_result = json_string
-                                      ? RegexFSMBuilder::BuildWithForbiddenChars(
-                                            regex, GrammarFSMBuilder::JSONStringForbiddenChars()
-                                        )
-                                      : RegexFSMBuilder::Build(regex);
+          auto regex_fsm_result = json_string ? RegexFSMBuilder::BuildForJSONString(regex)
+                                              : RegexFSMBuilder::Build(regex);
           if (regex_fsm_result.IsOk()) {
             cached = regex_fsm_cache_
                          ->emplace(std::move(cache_key), std::move(regex_fsm_result).Unwrap())
@@ -2195,10 +2192,8 @@ void GrammarFSMBuilderImpl::BuildRegex(
       return;
     }
   }
-  auto build_result = json_string ? RegexFSMBuilder::BuildWithForbiddenChars(
-                                        regex, GrammarFSMBuilder::JSONStringForbiddenChars()
-                                    )
-                                  : RegexFSMBuilder::Build(regex);
+  auto build_result =
+      json_string ? RegexFSMBuilder::BuildForJSONString(regex) : RegexFSMBuilder::Build(regex);
   if (build_result.IsErr()) {
     auto error = std::move(build_result).UnwrapErr();
     if (rule_name_ != nullptr) {
@@ -2327,10 +2322,8 @@ std::optional<FSMWithStartEnd> GrammarFSMBuilderImpl::TagDispatch(
 }
 
 Result<FSMWithStartEnd> GrammarFSMBuilderImpl::Regex(const std::string& regex, bool json_string) {
-  auto build_result = json_string ? RegexFSMBuilder::BuildWithForbiddenChars(
-                                        regex, GrammarFSMBuilder::JSONStringForbiddenChars()
-                                    )
-                                  : RegexFSMBuilder::Build(regex);
+  auto build_result =
+      json_string ? RegexFSMBuilder::BuildForJSONString(regex) : RegexFSMBuilder::Build(regex);
   if (build_result.IsErr()) {
     return build_result;
   }

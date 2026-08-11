@@ -427,6 +427,9 @@ class JSONSchemaConverter {
       const std::string& regex, bool json_string = false, bool force_cfg_expansion = false
   );
 
+  /*! \brief Compile a JSON Schema pattern with search and branch-local anchor semantics. */
+  int32_t JSONSchemaPatternExpression(const std::string& regex);
+
   /*! \brief Helper to create rule with repetition constraints. */
   int32_t GetPropertyWithNumberConstraints(
       int32_t pattern,
