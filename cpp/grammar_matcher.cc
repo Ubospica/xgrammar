@@ -560,10 +560,6 @@ class GrammarMatcher::Impl : public EarleyParser {
 
   std::optional<CharacterClassRepeat> GetCharacterClassRepeat(const ParserState& state) const;
 
-  const CharacterClassRepeatTokenMask& GetCharacterClassRepeatTokenMask(
-      int32_t character_class_expr_id, int32_t max_characters
-  );
-
   std::optional<std::vector<int32_t>> GetStableCharacterClassRepeatMaskKey(
       const std::vector<ParserState>& states
   ) const;
@@ -773,8 +769,6 @@ class GrammarMatcher::Impl : public EarleyParser {
   std::vector<int32_t> tmp_rejected_indices_delta_;
   std::vector<ParserState> tmp_latest_states_;
   std::vector<std::pair<ParserState, const AdaptiveTokenMask*>> tmp_latest_states_with_masks_;
-  std::unordered_map<uint64_t, const CharacterClassRepeatTokenMask*>
-      character_class_repeat_token_mask_cache_;
   bool repeat_mask_cache_enabled_{false};
   struct RepeatMaskCacheEntry {
     std::vector<int32_t> key;
@@ -1238,21 +1232,6 @@ GrammarMatcher::Impl::GetCharacterClassRepeat(const ParserState& state) const {
     }
   }
   return std::nullopt;
-}
-
-const CharacterClassRepeatTokenMask& GrammarMatcher::Impl::GetCharacterClassRepeatTokenMask(
-    int32_t character_class_expr_id, int32_t max_characters
-) {
-  const uint64_t cache_key = (static_cast<uint64_t>(character_class_expr_id) << 32) |
-                             static_cast<uint32_t>(max_characters + 1);
-  const auto cached = character_class_repeat_token_mask_cache_.find(cache_key);
-  if (cached != character_class_repeat_token_mask_cache_.end()) {
-    return *cached->second;
-  }
-  const auto& mask =
-      compiled_grammar_->GetCharacterClassRepeatTokenMask(character_class_expr_id, max_characters);
-  character_class_repeat_token_mask_cache_.emplace(cache_key, &mask);
-  return mask;
 }
 
 std::optional<std::vector<int32_t>> GrammarMatcher::Impl::GetStableCharacterClassRepeatMaskKey(
@@ -2497,7 +2476,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
   for (const auto& state : latest_states) {
     const auto repeat = GetCharacterClassRepeat(state);
     const CharacterClassRepeatTokenMask* repeat_token_mask =
-        repeat.has_value() ? &GetCharacterClassRepeatTokenMask(
+        repeat.has_value() ? &compiled_grammar_->GetCharacterClassRepeatTokenMask(
                                  repeat->character_class_expr_id,
                                  repeat->has_stable_upper ? -1 : repeat->max_characters
                              )
@@ -2532,13 +2511,6 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
 
     // For each ParserState, we will check every uncertain token and put them into the accepted or
     // rejected list.
-
-    if (adaptive_token_mask.uncertain_indices.empty()) {
-      if (adaptive_token_mask.store_type == StoreType::kRejected) {
-        IntsetIntersection(&tmp_rejected_indices_, adaptive_token_mask.rejected_indices);
-      }
-      continue;
-    }
 
     // Step 2. Update the accepted tokens in accepted_indices_delta, or the rejected tokens in
     // rejected_indices_delta.
