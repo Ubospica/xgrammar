@@ -67,6 +67,28 @@ TEST(XGrammarRegexFSMCacheTest, JSONSchemaSearchPatternIsDeterminized) {
   EXPECT_TRUE(regex_fsm_cache.begin()->second.IsDFA());
 }
 
+TEST(XGrammarRegexFSMCacheTest, JSONSchemaAlternativesShareSearchWildcards) {
+  RegexFSMCache regex_fsm_cache;
+  JSONSchemaToGrammar(
+      R"({"type":"string","pattern":"Red|Blue|Yellow|Gold|Silver|Crystal"})",
+      /*any_whitespace=*/false,
+      /*indent=*/std::nullopt,
+      /*separators=*/std::nullopt,
+      /*strict_mode=*/true,
+      /*max_whitespace_cnt=*/std::nullopt,
+      /*any_order=*/false,
+      JSONFormat::kJSON,
+      &regex_fsm_cache
+  );
+
+  ASSERT_EQ(regex_fsm_cache.size(), 1);
+  // The search wildcard pair is shared across all alternatives. The previous branch-wise rewrite
+  // exceeds the 4096-state determinization limit for these six short literals, while the grouped
+  // form stays below 400 states.
+  EXPECT_LT(regex_fsm_cache.begin()->second.NumStates(), 400);
+  EXPECT_TRUE(regex_fsm_cache.begin()->second.IsDFA());
+}
+
 TEST(XGrammarRegexFSMCacheTest, PatternLengthIntersectionUsesCachedFSM) {
   RegexFSMCache regex_fsm_cache;
   auto grammar = GrammarNormalizer::Apply(JSONSchemaToGrammar(

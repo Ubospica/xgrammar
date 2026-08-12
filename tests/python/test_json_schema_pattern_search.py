@@ -26,6 +26,9 @@ def _accepts(pattern: str, value: str) -> bool:
         (r"^[^\x01-\x1f]+$", "Microsoft.PowerToys", "line\nbreak"),
         (r"^$|(^(?:\S+\s+){0,99}\S+$)", "two words", " two words"),
         (r"(^gs://(.+))|(^https://(.+))", "https://example.com/a", "ftp://example.com"),
+        ("alpha|beta|gamma", "prefix-beta-suffix", "delta"),
+        ("^alpha|^beta|gamma$|delta$", "beta-tail", "prefix-beta"),
+        ("^alpha|^beta|gamma$|delta$", "prefix-delta", "delta-tail"),
     ],
 )
 def test_json_schema_pattern_search_and_anchor_semantics(

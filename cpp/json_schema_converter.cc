@@ -373,29 +373,32 @@ bool IsRegexSyntaxCharacterAt(const std::string& pattern, size_t target) {
   return false;
 }
 
-/*! \brief Rewrite an ECMAScript search pattern for the whole-string grammar regex engine.
+struct JSONSchemaPatternAlternative {
+  std::string body;
+  bool anchored_at_start;
+  bool anchored_at_end;
+};
+
+/*! \brief Flatten transparent top-level groups and alternatives, retaining each branch's anchors.
  *
- * JSON Schema patterns use search semantics, while grammar regex nodes consume their complete
- * input. Top-level alternatives therefore receive independent wildcard prefixes and suffixes.
- * Transparent outer groups are recursively unwrapped so common generated patterns such as
- * `(^a$)|(^b$)` preserve their branch-local anchors.
+ * Capture values are irrelevant to JSON Schema validation, so transparent groups enclosing a
+ * complete alternative can be flattened safely. Grouping the resulting branches by their anchor
+ * pair lets all branches with the same search behavior share one wildcard prefix and suffix.
  */
-std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern) {
+void CollectJSONSchemaPatternAlternatives(
+    const std::string& pattern, std::vector<JSONSchemaPatternAlternative>* result
+) {
   if (auto unwrapped = UnwrapWholeRegexGroup(pattern)) {
-    return RewriteJSONSchemaPatternForFullMatch(*unwrapped);
+    CollectJSONSchemaPatternAlternatives(*unwrapped, result);
+    return;
   }
 
   auto alternatives = SplitTopLevelRegexAlternatives(pattern);
   if (!alternatives.empty()) {
-    std::string result = "(?:";
-    for (size_t i = 0; i < alternatives.size(); ++i) {
-      if (i != 0) {
-        result.push_back('|');
-      }
-      result += "(?:" + RewriteJSONSchemaPatternForFullMatch(alternatives[i]) + ")";
+    for (const auto& alternative : alternatives) {
+      CollectJSONSchemaPatternAlternatives(alternative, result);
     }
-    result.push_back(')');
-    return result;
+    return;
   }
 
   size_t content_begin = 0;
@@ -411,19 +414,72 @@ std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern) {
     anchored_at_end = true;
     --content_end;
   }
-  std::string result;
-  if (!anchored_at_start) {
-    result += "(?:[\\s\\S]*)";
+  result->push_back(
+      {pattern.substr(content_begin, content_end - content_begin),
+       anchored_at_start,
+       anchored_at_end}
+  );
+}
+
+/*! \brief Rewrite an ECMAScript search pattern for the whole-string grammar regex engine.
+ *
+ * JSON Schema patterns use search semantics, while grammar regex nodes consume their complete
+ * input. Top-level alternatives therefore receive independent wildcard prefixes and suffixes.
+ * Transparent outer groups are recursively unwrapped so common generated patterns such as
+ * `(^a$)|(^b$)` preserve their branch-local anchors.
+ */
+std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern) {
+  std::vector<JSONSchemaPatternAlternative> alternatives;
+  CollectJSONSchemaPatternAlternatives(pattern, &alternatives);
+
+  std::array<std::vector<std::string>, 4> grouped_bodies;
+  for (auto& alternative : alternatives) {
+    const int group =
+        (alternative.anchored_at_start ? 2 : 0) | (alternative.anchored_at_end ? 1 : 0);
+    grouped_bodies[group].push_back(std::move(alternative.body));
   }
-  result += "(?:" + pattern.substr(content_begin, content_end - content_begin) + ")";
-  if (!anchored_at_end) {
-    result += "(?:[\\s\\S]*)";
+
+  std::vector<std::string> rewritten_groups;
+  for (int group = 0; group < 4; ++group) {
+    if (grouped_bodies[group].empty()) {
+      continue;
+    }
+    std::string rewritten;
+    if ((group & 2) == 0) {
+      rewritten += "(?:[\\s\\S]*)";
+    }
+    rewritten += "(?:";
+    for (size_t index = 0; index < grouped_bodies[group].size(); ++index) {
+      if (index != 0) {
+        rewritten.push_back('|');
+      }
+      rewritten += "(?:" + grouped_bodies[group][index] + ")";
+    }
+    rewritten.push_back(')');
+    if ((group & 1) == 0) {
+      rewritten += "(?:[\\s\\S]*)";
+    }
+    rewritten_groups.push_back(std::move(rewritten));
   }
+
+  XGRAMMAR_DCHECK(!rewritten_groups.empty());
+  if (rewritten_groups.size() == 1) {
+    return std::move(rewritten_groups[0]);
+  }
+  std::string result = "(?:";
+  for (size_t index = 0; index < rewritten_groups.size(); ++index) {
+    if (index != 0) {
+      result.push_back('|');
+    }
+    result += "(?:" + rewritten_groups[index] + ")";
+  }
+  result.push_back(')');
   return result;
 }
 
 struct SimpleCharacterClassRepeat {
   std::bitset<256> allowed_bytes;
+  std::string character_class_regex;
   int min_count;
   int max_count;
 };
@@ -535,7 +591,9 @@ std::optional<SimpleCharacterClassRepeat> ParseSimpleCharacterClassRepeat(const 
       return std::nullopt;
     }
   }
-  return SimpleCharacterClassRepeat{allowed_bytes, min_count, max_count};
+  return SimpleCharacterClassRepeat{
+      allowed_bytes, pattern.substr(1, class_end), min_count, max_count
+  };
 }
 
 bool IsMultipleOf(int64_t value, int64_t multiple_of) { return (value % multiple_of) == 0; }
@@ -2709,6 +2767,23 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
     return cached->second;
   }
 
+  auto emit_regex_pattern = [&](const std::string& effective_regex) {
+    const std::string rewritten = RewriteJSONSchemaPatternForFullMatch(effective_regex);
+    int32_t result = RegexExpression(rewritten, /*json_string=*/true);
+    if (regex_fsm_cache_ != nullptr) {
+      auto cached_fsm =
+          regex_fsm_cache_->find(MakeRegexFSMCacheKey(rewritten, /*json_string=*/true));
+      if (cached_fsm != regex_fsm_cache_->end() && !cached_fsm->second.IsDFA()) {
+        auto dfa = cached_fsm->second.ToDFA(kJSONSchemaPatternDFAStateLimit);
+        if (dfa.IsOk()) {
+          cached_fsm->second = std::move(dfa).Unwrap();
+        }
+      }
+    }
+    json_schema_pattern_expr_ids_.emplace(cache_key, result);
+    return result;
+  };
+
   if (auto simple_repeat = ParseSimpleCharacterClassRepeat(regex)) {
     int32_t min_count = simple_repeat->min_count;
     int32_t max_count = simple_repeat->max_count;
@@ -2723,6 +2798,27 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
         json_schema_pattern_expr_ids_.emplace(std::move(cache_key), result);
         return result;
       }
+    }
+
+    // For ordinary finite bounds and open-ended repetition, the regex FSM keeps matching fast and
+    // already counts one decoded regex character before adding its JSON escape spellings. The CFG
+    // spelling choices below are reserved for very large finite bounds, where expanding the regex
+    // NFA would create thousands of states before compilation even starts.
+    if (max_count == -1 || max_count <= 512) {
+      std::string bounded_regex = "^" + simple_repeat->character_class_regex;
+      if (min_count == 0 && max_count == -1) {
+        bounded_regex += "*";
+      } else if (min_count == 1 && max_count == -1) {
+        bounded_regex += "+";
+      } else if (max_count == -1) {
+        bounded_regex += "{" + std::to_string(min_count) + ",}";
+      } else if (min_count == max_count) {
+        bounded_regex += "{" + std::to_string(min_count) + "}";
+      } else {
+        bounded_regex += "{" + std::to_string(min_count) + "," + std::to_string(max_count) + "}";
+      }
+      bounded_regex += "$";
+      return emit_regex_pattern(bounded_regex);
     }
     std::vector<int32_t> encoded_character_choices;
 
@@ -2790,19 +2886,7 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
     return result;
   }
 
-  const std::string rewritten = RewriteJSONSchemaPatternForFullMatch(regex);
-  int32_t result = RegexExpression(rewritten, /*json_string=*/true);
-  if (regex_fsm_cache_ != nullptr) {
-    auto cached_fsm = regex_fsm_cache_->find(MakeRegexFSMCacheKey(rewritten, /*json_string=*/true));
-    if (cached_fsm != regex_fsm_cache_->end() && !cached_fsm->second.IsDFA()) {
-      auto dfa = cached_fsm->second.ToDFA(kJSONSchemaPatternDFAStateLimit);
-      if (dfa.IsOk()) {
-        cached_fsm->second = std::move(dfa).Unwrap();
-      }
-    }
-  }
-  json_schema_pattern_expr_ids_.emplace(std::move(cache_key), result);
-  return result;
+  return emit_regex_pattern(regex);
 }
 
 int32_t JSONSchemaConverter::ByteRangeExpression(int32_t lower, int32_t upper) {
