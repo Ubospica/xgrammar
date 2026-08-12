@@ -436,27 +436,6 @@ TEST(XGrammarFSMBuilderTest, TestRegexBuildForJSONString) {
   EXPECT_FALSE(fsm_wse.AcceptString("\\q"));
 }
 
-TEST(XGrammarFSMBuilderTest, TestRegexBuildForJSONStringWithDecodedDFA) {
-  auto fsm_wse = RegexFSMBuilder::BuildForJSONStringWithDecodedDFA("a", 100).Unwrap();
-  EXPECT_TRUE(fsm_wse.AcceptString("a"));
-  EXPECT_TRUE(fsm_wse.AcceptString("\\u0061"));
-  EXPECT_FALSE(fsm_wse.AcceptString("\\u006A"));
-  EXPECT_FALSE(fsm_wse.AcceptString("\\u0062"));
-
-  fsm_wse = RegexFSMBuilder::BuildForJSONStringWithDecodedDFA(".+", 100).Unwrap();
-  EXPECT_TRUE(fsm_wse.AcceptString("hello"));
-  EXPECT_TRUE(fsm_wse.AcceptString("\\\"\\\\\\/\\b\\f\\n\\r\\t"));
-  EXPECT_TRUE(fsm_wse.AcceptString("\\u000A\\u0061\\u007F"));
-  EXPECT_TRUE(fsm_wse.AcceptString("\\u000a\\u006A\\u007f"));
-  EXPECT_TRUE(fsm_wse.AcceptString("你好"));
-  EXPECT_FALSE(fsm_wse.AcceptString("\\q"));
-  EXPECT_FALSE(fsm_wse.AcceptString("\""));
-  EXPECT_FALSE(fsm_wse.AcceptString("\\u0080"));
-
-  // The shared decoder should stay compact even when every ASCII byte has the same destination.
-  EXPECT_LT(fsm_wse.NumStates(), 20);
-}
-
 TEST(XGrammarFSMBuilderTest, TestGrammarFSMBuilderRegex) {
   // The compiled regex automaton must preserve the language after simplification.
   auto fsm_wse = GrammarFSMBuilder::Regex("(ab)+").Unwrap();

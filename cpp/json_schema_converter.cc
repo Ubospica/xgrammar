@@ -2791,18 +2791,16 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
   }
 
   const std::string rewritten = RewriteJSONSchemaPatternForFullMatch(regex);
+  int32_t result = RegexExpression(rewritten, /*json_string=*/true);
   if (regex_fsm_cache_ != nullptr) {
-    std::string fsm_cache_key = MakeRegexFSMCacheKey(rewritten, /*json_string=*/true);
-    if (regex_fsm_cache_->count(fsm_cache_key) == 0) {
-      auto optimized_fsm = RegexFSMBuilder::BuildForJSONStringWithDecodedDFA(
-          rewritten, kJSONSchemaPatternDFAStateLimit
-      );
-      if (optimized_fsm.IsOk()) {
-        regex_fsm_cache_->emplace(std::move(fsm_cache_key), std::move(optimized_fsm).Unwrap());
+    auto cached_fsm = regex_fsm_cache_->find(MakeRegexFSMCacheKey(rewritten, /*json_string=*/true));
+    if (cached_fsm != regex_fsm_cache_->end() && !cached_fsm->second.IsDFA()) {
+      auto dfa = cached_fsm->second.ToDFA(kJSONSchemaPatternDFAStateLimit);
+      if (dfa.IsOk()) {
+        cached_fsm->second = std::move(dfa).Unwrap();
       }
     }
   }
-  int32_t result = RegexExpression(rewritten, /*json_string=*/true);
   json_schema_pattern_expr_ids_.emplace(std::move(cache_key), result);
   return result;
 }
