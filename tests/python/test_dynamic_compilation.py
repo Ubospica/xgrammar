@@ -130,6 +130,61 @@ def test_right_recursive_rule_inside_repetition_matches_eager_masks(repeat_range
         torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
+def test_repeat_masks_preserve_unicode_character_class_ranges():
+    vocabulary = [
+        "p",
+        " ",
+        " {",
+        "->",
+        "a",
+        "aa",
+        "ab",
+        "a{",
+        "x",
+        "z",
+        "\u017b",
+        "\u0800",
+        "\u1000",
+        "\u1234",
+        "\ub91d",
+        "\ub91c",
+        "\ud000",
+        "\ud7ff",
+        "\ud558",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    grammar = (
+        'root ::= "p" unit{1,200} "z"\n' "unit ::= [a-z \\u017b \\u0800-\\u1234 \\ub91d-\\ud7ff]"
+    )
+    for enable_dynamic_compilation in (False, True):
+        compiled = xgr.GrammarCompiler(
+            tokenizer_info, max_threads=1, enable_dynamic_compilation=enable_dynamic_compilation
+        ).compile_grammar(grammar)
+        matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        assert matcher.accept_token(0)
+        bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        xgr.reset_token_bitmask(bitmask)
+        assert matcher.fill_next_token_bitmask(bitmask)
+        allowed = bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+        for token_id in range(tokenizer_info.vocab_size):
+            assert allowed[token_id].item() == matcher.fork().accept_token(token_id), (
+                vocabulary[token_id],
+                enable_dynamic_compilation,
+            )
+        for token in [
+            "\u017b",
+            "\u0800",
+            "\u1000",
+            "\u1234",
+            "\ub91d",
+            "\ud000",
+            "\ud558",
+            "\ud7ff",
+        ]:
+            assert allowed[vocabulary.index(token)]
+        assert not allowed[vocabulary.index("\ub91c")]
+
+
 @pytest.mark.parametrize("cache_enabled", [False, True], ids=["cache-off", "cache-on"])
 def test_recursive_json_string_character_class_summary_matches_eager(cache_enabled):
     vocabulary = [chr(value) for value in range(32, 127)] + [

@@ -623,6 +623,22 @@ TEST(XGrammarFSMBuilderTest, TestRegexEscapes) {
   EXPECT_FALSE(fsm_wse.AcceptString(" "));
 }
 
+TEST(XGrammarFSMBuilderTest, TestUnicodeRangeUpperPartialBranch) {
+  // A three-byte range whose upper endpoint stops inside the final leading-byte bucket must
+  // consume both continuation bytes before reaching the end state.
+  auto fsm_wse = RegexFSMBuilder::Build("[\\u{800}-\\u{1234}]").Unwrap();
+  EXPECT_TRUE(fsm_wse.AcceptString("\u0800"));
+  EXPECT_TRUE(fsm_wse.AcceptString("\u1000"));
+  EXPECT_TRUE(fsm_wse.AcceptString("\u1234"));
+  EXPECT_FALSE(fsm_wse.AcceptString("\u1235"));
+
+  fsm_wse = RegexFSMBuilder::Build("[\\u{B91D}-\\u{D7FF}]").Unwrap();
+  EXPECT_TRUE(fsm_wse.AcceptString("\uB91D"));
+  EXPECT_TRUE(fsm_wse.AcceptString("\uD000"));
+  EXPECT_TRUE(fsm_wse.AcceptString("\uD7FF"));
+  EXPECT_FALSE(fsm_wse.AcceptString("\uB91C"));
+}
+
 TEST(XGrammarFSMBuilderTest, TestRegexUnsupportedFeatures) {
   // Word boundaries, Unicode properties and backreferences raise errors.
   EXPECT_TRUE(RegexFSMBuilder::Build("a\\b").IsErr());
