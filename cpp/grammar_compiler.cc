@@ -190,6 +190,10 @@ class CharacterClassTokenSummaryCache {
     uncertain_indices.reserve(summaries->summaries.size());
     DynamicBitset accepted_prefix_tokens(vocab_size);
     for (const auto& summary : summaries->summaries) {
+      if (summary.consumed_whole_token &&
+          (max_characters < 0 || summary.locally_consumed_characters <= max_characters)) {
+        accepted_prefix_tokens.Set(sorted_vocab[summary.sorted_vocab_index].first);
+      }
       if (max_characters < 0) {
         if (summary.consumed_whole_token) {
           accepted_indices.push_back(summary.sorted_vocab_index);

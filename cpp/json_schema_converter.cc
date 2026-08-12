@@ -448,14 +448,18 @@ std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern) {
     if ((group & 2) == 0) {
       rewritten += "(?:[\\s\\S]*)";
     }
-    rewritten += "(?:";
-    for (size_t index = 0; index < grouped_bodies[group].size(); ++index) {
-      if (index != 0) {
-        rewritten.push_back('|');
+    if (grouped_bodies[group].size() == 1) {
+      rewritten += "(?:" + grouped_bodies[group][0] + ")";
+    } else {
+      rewritten += "(?:";
+      for (size_t index = 0; index < grouped_bodies[group].size(); ++index) {
+        if (index != 0) {
+          rewritten.push_back('|');
+        }
+        rewritten += "(?:" + grouped_bodies[group][index] + ")";
       }
-      rewritten += "(?:" + grouped_bodies[group][index] + ")";
+      rewritten.push_back(')');
     }
-    rewritten.push_back(')');
     if ((group & 1) == 0) {
       rewritten += "(?:[\\s\\S]*)";
     }
@@ -479,7 +483,6 @@ std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern) {
 
 struct SimpleCharacterClassRepeat {
   std::bitset<256> allowed_bytes;
-  std::string character_class_regex;
   int min_count;
   int max_count;
 };
@@ -591,9 +594,7 @@ std::optional<SimpleCharacterClassRepeat> ParseSimpleCharacterClassRepeat(const 
       return std::nullopt;
     }
   }
-  return SimpleCharacterClassRepeat{
-      allowed_bytes, pattern.substr(1, class_end), min_count, max_count
-  };
+  return SimpleCharacterClassRepeat{allowed_bytes, min_count, max_count};
 }
 
 bool IsMultipleOf(int64_t value, int64_t multiple_of) { return (value % multiple_of) == 0; }
@@ -2800,26 +2801,6 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
       }
     }
 
-    // For ordinary finite bounds and open-ended repetition, the regex FSM keeps matching fast and
-    // already counts one decoded regex character before adding its JSON escape spellings. The CFG
-    // spelling choices below are reserved for very large finite bounds, where expanding the regex
-    // NFA would create thousands of states before compilation even starts.
-    if (max_count == -1 || max_count <= 512) {
-      std::string bounded_regex = "^" + simple_repeat->character_class_regex;
-      if (min_count == 0 && max_count == -1) {
-        bounded_regex += "*";
-      } else if (min_count == 1 && max_count == -1) {
-        bounded_regex += "+";
-      } else if (max_count == -1) {
-        bounded_regex += "{" + std::to_string(min_count) + ",}";
-      } else if (min_count == max_count) {
-        bounded_regex += "{" + std::to_string(min_count) + "}";
-      } else {
-        bounded_regex += "{" + std::to_string(min_count) + "," + std::to_string(max_count) + "}";
-      }
-      bounded_regex += "$";
-      return emit_regex_pattern(bounded_regex);
-    }
     std::vector<int32_t> encoded_character_choices;
 
     std::vector<CharacterClassElement> raw_elements;

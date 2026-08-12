@@ -12,6 +12,7 @@
 #include "grammar_functor.h"
 #include "json_schema_converter.h"
 #include "regex_fsm_cache.h"
+#include "xgrammar/xgrammar.h"
 
 using namespace xgrammar;
 
@@ -113,4 +114,44 @@ TEST(XGrammarRegexFSMCacheTest, PatternLengthIntersectionUsesCachedFSM) {
       GrammarOptimizer::Apply(grammar, /*expand_repetition_ranges=*/false, &regex_fsm_cache);
   EXPECT_TRUE(optimized->optimized);
   EXPECT_GT(optimized->complete_fsm.NumStates(), 0);
+}
+
+TEST(XGrammarRegexFSMCacheTest, JSONPatternRepeatRetainsRawCharacterClassFastPath) {
+  TokenizerInfo tokenizer_info(
+      {"\"", "alpha_42", "alpha-42", "\\u0061", "!"},
+      VocabType::RAW,
+      std::nullopt,
+      std::vector<int32_t>{}
+  );
+  GrammarCompiler compiler(
+      tokenizer_info,
+      /*max_threads=*/1,
+      /*cache_enabled=*/true,
+      /*max_memory_bytes=*/-1,
+      /*enable_dynamic_compilation=*/true
+  );
+  auto compiled = compiler.CompileJSONSchema(
+      R"({"type":"string","pattern":"^[A-Za-z0-9_-]{1,255}$"})",
+      /*any_whitespace=*/false
+  );
+  GrammarMatcher matcher(
+      compiled,
+      /*override_stop_tokens=*/std::nullopt,
+      /*terminate_without_stop_token=*/true
+  );
+
+  EXPECT_TRUE(matcher.AcceptToken(0));
+  std::array<int32_t, 1> mask{-1};
+  DLTensor tensor{};
+  tensor.data = mask.data();
+  tensor.device = DLDevice{kDLCPU, 0};
+  tensor.ndim = 1;
+  tensor.dtype = DLDataType{kDLInt, 32, 1};
+  int64_t shape = 1;
+  tensor.shape = &shape;
+  EXPECT_TRUE(matcher.FillNextTokenBitmask(&tensor));
+  EXPECT_TRUE((mask[0] & (1 << 1)) != 0);
+  EXPECT_TRUE((mask[0] & (1 << 2)) != 0);
+  EXPECT_TRUE((mask[0] & (1 << 3)) != 0);
+  EXPECT_TRUE((mask[0] & (1 << 4)) == 0);
 }

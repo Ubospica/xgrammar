@@ -548,6 +548,7 @@ class GrammarMatcher::Impl : public EarleyParser {
     ParserState parent;
     int32_t lower;
     bool has_stable_upper;
+    bool has_additional_choices;
   };
 
   std::optional<CharacterClassRepeat> GetCharacterClassRepeat(const ParserState& state) const;
@@ -1186,12 +1187,19 @@ GrammarMatcher::Impl::GetCharacterClassRepeat(const ParserState& state) const {
   }
 
   const auto& body = grammar_->GetGrammarExpr(grammar_->GetRule(state.rule_id).body_expr_id);
-  if (body.type != GrammarExprType::kChoices || body.size() != 1) {
+  if (body.type != GrammarExprType::kChoices) {
     return std::nullopt;
   }
-  const auto& sequence = grammar_->GetGrammarExpr(body[0]);
-  if (sequence.type != GrammarExprType::kSequence || sequence.size() != 1 ||
-      grammar_->GetGrammarExpr(sequence[0]).type != GrammarExprType::kCharacterClass) {
+  int32_t character_class_expr_id = -1;
+  for (int32_t sequence_id : body) {
+    const auto& sequence = grammar_->GetGrammarExpr(sequence_id);
+    if (sequence.type == GrammarExprType::kSequence && sequence.size() == 1 &&
+        grammar_->GetGrammarExpr(sequence[0]).type == GrammarExprType::kCharacterClass) {
+      character_class_expr_id = sequence[0];
+      break;
+    }
+  }
+  if (character_class_expr_id == -1) {
     return std::nullopt;
   }
 
@@ -1213,11 +1221,12 @@ GrammarMatcher::Impl::GetCharacterClassRepeat(const ParserState& state) const {
           repeat.Upper() == -1 ? max_token_characters : repeat.Upper() - parent.repeat_count;
       if (remaining > 0) {
         return CharacterClassRepeat{
-            sequence[0],
+            character_class_expr_id,
             std::min(remaining, max_token_characters),
             parent,
             repeat.Lower(),
-            repeat.Upper() == -1 || remaining >= max_token_characters
+            repeat.Upper() == -1 || remaining >= max_token_characters,
+            body.size() != 1
         };
       }
     }
@@ -2428,10 +2437,11 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
                              )
                            : nullptr;
     const AdaptiveTokenMask& adaptive_token_mask =
-        repeat_token_mask != nullptr ? repeat_token_mask->adaptive_token_mask
-                                     : compiled_grammar_->GetAdaptiveTokenMask(
-                                           state, state.rule_id == grammar_->GetRootRuleId()
-                                       );
+        repeat_token_mask != nullptr && !repeat->has_additional_choices
+            ? repeat_token_mask->adaptive_token_mask
+            : compiled_grammar_->GetAdaptiveTokenMask(
+                  state, state.rule_id == grammar_->GetRootRuleId()
+              );
     if (state.char_budget_deadline >= 0) {
       int32_t remaining_chars = state.char_budget_deadline - GetCurrentCharIndex();
       if (remaining_chars <= tokenizer_info_.ImplPtr()->GetMaxTokenChars()) {

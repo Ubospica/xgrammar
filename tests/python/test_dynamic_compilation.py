@@ -411,6 +411,25 @@ def test_dynamic_single_character_class_masks_match_eager(character_class, value
         torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("repeat_range", ["+", "{1,255}"])
+def test_json_pattern_repeat_with_escape_choices_matches_eager(repeat_range):
+    vocabulary = ['"', "alpha_42", "alpha-42", r"\u0061", "!", b"\xff"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    schema = {"type": "string", "pattern": rf"^[A-Za-z0-9_-]{repeat_range}$"}
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_json_schema(schema)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(schema)
+
+    expected = _mask_trace(eager, '"alpha_42"')
+    actual = _mask_trace(dynamic, '"alpha_42"')
+    for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
+        assert actual_apply == expected_apply
+        torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
 def test_continuation_transition_cache_isolated_between_parser_states(capfd):
     left_suffixes = [
         chr(first) + chr(second)
