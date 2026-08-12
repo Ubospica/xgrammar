@@ -282,6 +282,36 @@ TEST(XGrammarFSMTest, FunctionTest) {
   std::cout << "--------- Function Test Passed! -----------" << std::endl;
 }
 
+TEST(XGrammarFSMTest, IntersectRespectsStateLimit) {
+  FSM lhs(4);
+  lhs.AddEdge(0, 1, 'a', 'a');
+  lhs.AddEdge(1, 2, 'b', 'b');
+  lhs.AddEdge(2, 3, 'c', 'c');
+  FSM rhs = lhs.Copy();
+  FSMWithStartEnd lhs_wse(lhs, 0, {3});
+  FSMWithStartEnd rhs_wse(rhs, 0, {3});
+
+  EXPECT_TRUE(FSMWithStartEnd::Intersect(lhs_wse, rhs_wse, /*max_result_num_states=*/0).IsErr());
+  EXPECT_TRUE(FSMWithStartEnd::Intersect(lhs_wse, rhs_wse, /*max_result_num_states=*/4).IsOk());
+  EXPECT_TRUE(FSMWithStartEnd::Intersect(lhs_wse, rhs_wse, /*max_result_num_states=*/3).IsErr());
+}
+
+TEST(XGrammarFSMTest, ToDFARespectsGeneratedStateLimit) {
+  // This three-state NFA has four reachable DFA subsets: {0}, {0, 1}, {0, 2}, and {0, 1, 2}.
+  FSM nfa(3);
+  nfa.AddEdge(0, 0, 'a', 'a');
+  nfa.AddEdge(0, 1, 'a', 'a');
+  nfa.AddEdge(0, 0, 'b', 'b');
+  nfa.AddEdge(0, 2, 'b', 'b');
+  nfa.AddEdge(1, 1, 'b', 'b');
+  FSMWithStartEnd nfa_wse(nfa, 0, {1, 2});
+
+  auto dfa = nfa_wse.ToDFA(/*max_num_states=*/4);
+  ASSERT_TRUE(dfa.IsOk());
+  EXPECT_EQ(dfa.ValueRef().NumStates(), 4);
+  EXPECT_TRUE(nfa_wse.ToDFA(/*max_num_states=*/3).IsErr());
+}
+
 TEST(XGrammarFSMTest, EfficiencyTest) {
   std::cout << "--------- Efficiency Test Starts! -----------" << std::endl;
   // i.e ([a-z]0123456789){10}. Use this way to test the performance.

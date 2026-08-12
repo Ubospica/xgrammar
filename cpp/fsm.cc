@@ -1184,11 +1184,14 @@ FSMWithStartEnd FSMWithStartEnd::Concat(const std::vector<FSMWithStartEnd>& fsms
 Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
     const FSMWithStartEnd& lhs, const FSMWithStartEnd& rhs, int max_result_num_states
 ) {
+  if (max_result_num_states < 1) {
+    return ResultErr("The intersection result exceeds the state limit.");
+  }
   if (!lhs.IsLeaf() || !rhs.IsLeaf()) {
     return ResultErr("Intersect only support leaf fsm!");
   }
-  auto lhs_dfa_raw = lhs.ToDFA();
-  auto rhs_dfa_raw = rhs.ToDFA();
+  auto lhs_dfa_raw = lhs.ToDFA(max_result_num_states);
+  auto rhs_dfa_raw = rhs.ToDFA(max_result_num_states);
 
   if (lhs_dfa_raw.IsErr()) {
     return lhs_dfa_raw;
@@ -1224,6 +1227,9 @@ Result<FSMWithStartEnd> FSMWithStartEnd::Intersect(
         int min_value = std::max(lhs_edge.min, rhs_edge.min);
         int max_value = std::min(lhs_edge.max, rhs_edge.max);
         if (state_map.find(std::make_pair(lhs_edge.target, rhs_edge.target)) == state_map.end()) {
+          if (result.NumStates() >= max_result_num_states) {
+            return ResultErr("The intersection result exceeds the state limit.");
+          }
           state_map[{lhs_edge.target, rhs_edge.target}] = result.AddState();
           queue.push({lhs_edge.target, rhs_edge.target});
         }
@@ -1872,6 +1878,9 @@ Result<FSMWithStartEnd> FSMWithStartEnd::ToDFA(int max_num_states) const {
         }
       }
       if (!flag) {
+        if (static_cast<int>(closures.size()) >= max_num_states) {
+          return ResultErr("The number of states exceeds the limit.");
+        }
         dfa.GetFsm().AddEdge(now_process, closures.size(), interval.first, interval.second);
         closures.push_back(next_closure);
       }
@@ -1902,6 +1911,9 @@ Result<FSMWithStartEnd> FSMWithStartEnd::ToDFA(int max_num_states) const {
         }
       }
       if (!flag) {
+        if (static_cast<int>(closures.size()) >= max_num_states) {
+          return ResultErr("The number of states exceeds the limit.");
+        }
         dfa.GetFsm().AddRuleEdge(now_process, closures.size(), rule);
         closures.push_back(next_closure);
       }
@@ -1931,6 +1943,9 @@ Result<FSMWithStartEnd> FSMWithStartEnd::ToDFA(int max_num_states) const {
         }
       }
       if (!flag) {
+        if (static_cast<int>(closures.size()) >= max_num_states) {
+          return ResultErr("The number of states exceeds the limit.");
+        }
         dfa.GetFsm().AddEdge(now_process, closures.size(), FSMEdge::EdgeType::kRepeatRef, aux_idx);
         closures.push_back(next_closure);
       }
@@ -1960,6 +1975,9 @@ Result<FSMWithStartEnd> FSMWithStartEnd::ToDFA(int max_num_states) const {
         }
       }
       if (!flag) {
+        if (static_cast<int>(closures.size()) >= max_num_states) {
+          return ResultErr("The number of states exceeds the limit.");
+        }
         dfa.GetFsm().AddEdge(now_process, closures.size(), FSMEdge::EdgeType::kToken, aux_idx);
         closures.push_back(next_closure);
       }
@@ -1989,6 +2007,9 @@ Result<FSMWithStartEnd> FSMWithStartEnd::ToDFA(int max_num_states) const {
         }
       }
       if (!flag) {
+        if (static_cast<int>(closures.size()) >= max_num_states) {
+          return ResultErr("The number of states exceeds the limit.");
+        }
         dfa.GetFsm().AddEdge(
             now_process, closures.size(), FSMEdge::EdgeType::kExcludeToken, aux_idx
         );
