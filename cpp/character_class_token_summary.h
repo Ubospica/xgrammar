@@ -31,7 +31,8 @@ std::vector<CharacterClassTokenSummary> BuildCharacterClassTokenSummaries(
 ) {
   const bool is_negative = static_cast<bool>(character_class[0]);
   const auto codepoint_is_in_ranges = [&](TCodepoint codepoint) {
-    for (int32_t range_index = 1; range_index < character_class.size(); range_index += 2) {
+    for (int32_t range_index = 1; range_index < static_cast<int32_t>(character_class.size());
+         range_index += 2) {
       if (codepoint >= character_class[range_index] &&
           codepoint <= character_class[range_index + 1]) {
         return true;
@@ -56,7 +57,8 @@ std::vector<CharacterClassTokenSummary> BuildCharacterClassTokenSummaries(
         if (min_codepoint > max_codepoint) {
           return false;
         }
-        for (int32_t range_index = 1; range_index < character_class.size(); range_index += 2) {
+        for (int32_t range_index = 1; range_index < static_cast<int32_t>(character_class.size());
+             range_index += 2) {
           if (max_codepoint >= character_class[range_index] &&
               min_codepoint <= character_class[range_index + 1]) {
             return true;
