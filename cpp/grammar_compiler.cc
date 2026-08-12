@@ -137,27 +137,8 @@ class CharacterClassTokenSummaryCache {
     DynamicBitset consumed_whole_token_bitset;
   };
 
-  void PrewarmJSONContent(
-      const std::vector<std::pair<int32_t, std::string>>& sorted_vocab, size_t vocab_size
-  ) {
-    // The JSON schema converter emits this exact negative character class for unescaped string
-    // content. It appears in nearly every schema, so build its vocabulary summary once when the
-    // compiler is initialized instead of charging the first generated string token.
-    const std::vector<int32_t> json_content = {1, 0, 0x1f, '"', '"', '\\', '\\'};
-    GetOrCreate(json_content, sorted_vocab, vocab_size);
-  }
-
   std::shared_ptr<const Result> GetOrCreate(
       const Grammar::Impl::GrammarExpr& character_class,
-      const std::vector<std::pair<int32_t, std::string>>& sorted_vocab,
-      size_t vocab_size
-  ) {
-    std::vector<int32_t> key(character_class.begin(), character_class.end());
-    return GetOrCreate(key, sorted_vocab, vocab_size);
-  }
-
-  std::shared_ptr<const Result> GetOrCreate(
-      const std::vector<int32_t>& character_class,
       const std::vector<std::pair<int32_t, std::string>>& sorted_vocab,
       size_t vocab_size
   ) {
@@ -229,14 +210,11 @@ class CharacterClassTokenSummaryCache {
             std::move(accepted_prefix_tokens)
         });
     std::lock_guard<std::mutex> lock(repeat_mutex_);
-    auto& cached = repeat_cache_[key];
+    auto& cached = repeat_cache_[std::move(key)];
     if (auto retained = cached.lock()) {
       return retained;
     }
     cached = computed;
-    if (max_characters < 0) {
-      retained_unbounded_repeat_mask_ = computed;
-    }
     return computed;
   }
 
@@ -247,7 +225,6 @@ class CharacterClassTokenSummaryCache {
     }
     std::lock_guard<std::mutex> lock(repeat_mutex_);
     repeat_cache_.clear();
-    retained_unbounded_repeat_mask_.reset();
   }
 
  private:
@@ -258,7 +235,6 @@ class CharacterClassTokenSummaryCache {
   // compiler-wide index retain their token bitmasks indefinitely.
   std::unordered_map<RepeatKey, std::weak_ptr<const CharacterClassRepeatTokenMask>, RepeatKeyHash>
       repeat_cache_;
-  std::shared_ptr<const CharacterClassRepeatTokenMask> retained_unbounded_repeat_mask_;
 };
 
 /*! \brief The concrete implementation of GrammarMatcherNode. */
@@ -1508,13 +1484,7 @@ class GrammarCompilerSub {
       : tokenizer_info_(tokenizer_info),
         max_threads_(max_threads),
         rule_level_cache_(rule_level_cache),
-        enable_dynamic_compilation_(enable_dynamic_compilation) {
-    if (enable_dynamic_compilation_ && tokenizer_info_.GetVocabSize() != 0) {
-      character_class_token_summary_cache_->PrewarmJSONContent(
-          tokenizer_info_.GetSortedDecodedVocab(), tokenizer_info_.GetVocabSize()
-      );
-    }
-  }
+        enable_dynamic_compilation_(enable_dynamic_compilation) {}
 
   CompiledGrammar CompileBuiltinJSONGrammar();
 
