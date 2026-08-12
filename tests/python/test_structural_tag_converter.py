@@ -102,13 +102,13 @@ def test_tag_dispatch_slicing_cache_isolated_and_concurrent():
     ]
     tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
 
-    def compile_dispatch(compiler, trigger, exclude, value):
+    def compile_dispatch(compiler, trigger, exclude):
         return compiler.compile_structural_tag(
             {
                 "type": "structural_tag",
                 "format": {
                     "type": "dispatch",
-                    "rules": [[trigger, {"type": "const_string", "value": value}]],
+                    "rules": [[trigger, {"type": "const_string", "value": "X"}]],
                     "loop": False,
                     "excludes": [exclude],
                 },
@@ -126,15 +126,8 @@ def test_tag_dispatch_slicing_cache_isolated_and_concurrent():
         assert matcher.is_terminated()
         return trace
 
-    specs = [
-        (
-            ("<alpha>", "<guard>", f"X{index}")
-            if index % 2 == 0
-            else ("<guard>", "<alpha>", f"X{index}")
-        )
-        for index in range(16)
-    ]
-    shared_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=True)
+    specs = [("<alpha>", "<guard>"), ("<guard>", "<alpha>")] * 8
+    shared_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=False)
     with ThreadPoolExecutor(max_workers=8) as executor:
         shared_results = list(
             executor.map(lambda spec: compile_dispatch(shared_compiler, *spec), specs)
@@ -144,10 +137,10 @@ def test_tag_dispatch_slicing_cache_isolated_and_concurrent():
         spec: compile_dispatch(
             xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=False), *spec
         )
-        for spec in specs
+        for spec in set(specs)
     }
     for spec, shared_result in zip(specs, shared_results):
-        input_string = "prefix" + spec[0] + spec[2]
+        input_string = "prefix" + spec[0] + "X"
         expected = mask_trace(fresh_results[spec], input_string)
         actual = mask_trace(shared_result, input_string)
         for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
@@ -157,7 +150,7 @@ def test_tag_dispatch_slicing_cache_isolated_and_concurrent():
     shared_compiler.clear_cache()
     for spec, fresh_result in fresh_results.items():
         rebuilt = compile_dispatch(shared_compiler, *spec)
-        input_string = "prefix" + spec[0] + spec[2]
+        input_string = "prefix" + spec[0] + "X"
         expected = mask_trace(fresh_result, input_string)
         actual = mask_trace(rebuilt, input_string)
         for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):

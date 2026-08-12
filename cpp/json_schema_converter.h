@@ -15,7 +15,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -23,6 +22,7 @@
 #include <vector>
 
 #include "grammar_builder.h"
+#include "regex_fsm_cache.h"
 #include "support/utils.h"
 
 namespace xgrammar {
@@ -186,11 +186,7 @@ struct SchemaSpec {
   static SchemaSpecPtr Make(T&& spec_value, std::string cache_key = "", std::string hint = "") {
     auto ptr = std::make_shared<SchemaSpec>();
     ptr->spec = std::forward<T>(spec_value);
-    if constexpr (std::is_same_v<std::decay_t<T>, AnySpec>) {
-      ptr->cache_key = "{}";
-    } else {
-      ptr->cache_key = std::move(cache_key);
-    }
+    ptr->cache_key = std::move(cache_key);
     ptr->rule_name_hint = std::move(hint);
     return ptr;
   }
@@ -220,17 +216,21 @@ std::optional<JSONFormat> JSONFormatFromString(const std::string& format);
 class GenerateCacheManager {
  public:
   /*! \brief Add a key-value pair to the cache. */
-  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id) {
-    cache_[key][indentation_context] = rule_id;
+  void AddCache(
+      const std::string& key, int format_context, int64_t indentation_context, int32_t rule_id
+  ) {
+    cache_[key][{format_context, indentation_context}] = rule_id;
   }
 
   /*! \brief Get cached rule id by key. Returns std::nullopt if not found. */
-  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context) const {
+  std::optional<int32_t> GetCache(
+      const std::string& key, int format_context, int64_t indentation_context
+  ) const {
     auto key_it = cache_.find(key);
     if (key_it == cache_.end()) {
       return std::nullopt;
     }
-    auto context_it = key_it->second.find(indentation_context);
+    auto context_it = key_it->second.find({format_context, indentation_context});
     if (context_it != key_it->second.end()) {
       return context_it->second;
     }
@@ -238,7 +238,23 @@ class GenerateCacheManager {
   }
 
  private:
-  std::unordered_map<std::string, std::unordered_map<int64_t, int32_t>> cache_;
+  struct Context {
+    int format;
+    int64_t indentation;
+
+    bool operator==(const Context& other) const {
+      return format == other.format && indentation == other.indentation;
+    }
+  };
+
+  struct ContextHash {
+    size_t operator()(const Context& context) const {
+      return HashCombine(context.format, context.indentation);
+    }
+  };
+
+  using ContextCache = std::unordered_map<Context, int32_t, ContextHash>;
+  std::unordered_map<std::string, ContextCache> cache_;
 };
 
 /*!
@@ -293,7 +309,8 @@ class JSONSchemaConverter {
       bool any_whitespace,
       std::optional<int> max_whitespace_cnt,
       RefResolver ref_resolver = nullptr,
-      bool any_order = false
+      bool any_order = false,
+      RegexFSMCache* regex_fsm_cache = nullptr
   );
 
   virtual ~JSONSchemaConverter() = default;
@@ -355,20 +372,25 @@ class JSONSchemaConverter {
       const std::vector<ObjectSpec::Property>& properties, const std::string& rule_name
   );
 
+  /*! \brief Get the basic any rule name. Override for different formats. */
+  virtual std::string GetBasicAnyRuleName() const;
+
   /*! \brief Add basic rules for the format. Override for different formats. */
   virtual void AddBasicRules();
   void AddBasicRules(const std::vector<std::string>& additional_rule_names);
 
-  /*! \brief Add a key-value pair to the generation cache. Subclasses can override to adjust the
-   * cache key (e.g. XML formats add their output layer to the key). */
-  virtual void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id);
+  /*! \brief Add a key-value pair to the generation cache. Override for custom cache behavior. */
+  virtual void AddCache(
+      const std::string& key, int32_t rule_id, bool indentation_sensitive = false
+  );
 
   /*! \brief Get cached value by key. Returns std::nullopt if not found. */
-  virtual std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context)
-      const;
+  virtual std::optional<int32_t> GetCache(
+      const std::string& key, bool indentation_sensitive = false
+  ) const;
 
-  /*! \brief Get the indentation context for a schema. */
-  int64_t GetCacheContext(const SchemaSpecPtr& spec) const;
+  /*! \brief Whether a schema's grammar depends on the current indentation depth. */
+  bool IsIndentationSensitive(const SchemaSpecPtr& spec) const;
 
   // ==================== Helper methods (for subclasses to use) ====================
 
@@ -451,12 +473,14 @@ class JSONSchemaConverter {
   IndentManager indent_manager_;
   int32_t colon_expr_id_;
   bool any_whitespace_;
-  bool indentation_enabled_;
   std::optional<int> max_whitespace_cnt_;
   // When true, object properties may appear in any order (see GetAnyOrderRuleForProperties).
   // Applies to all objects (including nested ones). Default false preserves the fixed-order
   // behavior.
   bool any_order_ = false;
+  // Optional cache owned by the caller. It lets grammar optimization reuse the automata built
+  // here to validate regex-backed schema constraints.
+  RegexFSMCache* regex_fsm_cache_ = nullptr;
 
  public:
   // Basic rule names
@@ -475,16 +499,11 @@ class JSONSchemaConverter {
   GenerateCacheManager rule_cache_manager_;
 
  private:
-  // Cache context for recursive rules generated with arbitrary whitespace.
-  static constexpr int64_t kAnyWhitespaceCacheContext = -1;
-
   void AddHelperRules();
-  int32_t CreateRuleWithAnyWhitespace(const SchemaSpecPtr& spec, const std::string& rule_name_hint);
-  int32_t GenerateRuleBody(const SchemaSpecPtr& spec, const std::string& rule_name);
 
+  std::unordered_map<std::string, int32_t> uri_to_rule_id_;  // For circular reference handling
   RefResolver ref_resolver_;  // Resolves $ref URI to SchemaSpecPtr at generate time
-  bool generating_any_whitespace_ = false;
-  std::unordered_map<std::string, int32_t> active_schema_keys_;
+  mutable std::unordered_map<SchemaSpecPtr, bool> indentation_sensitivity_cache_;
 
   // Trie over property names, for key patterns that exclude specific properties
   struct TrieNode {
@@ -538,7 +557,8 @@ Grammar JSONSchemaToGrammar(
     bool strict_mode = true,
     std::optional<int> max_whitespace_cnt = std::nullopt,
     bool any_order = false,
-    JSONFormat json_format = JSONFormat::kJSON
+    JSONFormat json_format = JSONFormat::kJSON,
+    RegexFSMCache* regex_fsm_cache = nullptr
 );
 
 // ==================== Public API functions (backward compatible) ====================

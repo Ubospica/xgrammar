@@ -278,6 +278,8 @@ class FSM::Impl : public FSMImplBase<std::vector<std::vector<FSMEdge>>> {
   void AddEOSEdge(int from, int to) { AddEdge(from, to, FSMEdge::EdgeType::kEOS, 0); }
 
   void AddRepeatEdge(int from, int to, int32_t rule_id, int32_t lower, int32_t upper) {
+    XGRAMMAR_DCHECK(edges_[from].empty())
+        << "A state with a kRepeatRef edge must have no other outgoing edges.";
     XGRAMMAR_DCHECK(edge_aux_data_.size() <= INT32_MAX);
     int32_t aux_index = static_cast<int32_t>(edge_aux_data_.size());
     edge_aux_data_.reserve(edge_aux_data_.size() + 3);
