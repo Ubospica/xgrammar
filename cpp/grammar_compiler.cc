@@ -22,7 +22,6 @@
 #include "compiled_grammar_impl.h"
 #include "earley_parser.h"
 #include "fsm.h"
-#include "fsm_builder.h"
 #include "grammar_functor.h"
 #include "grammar_impl.h"
 #include "json_schema_converter.h"
@@ -1877,41 +1876,17 @@ std::shared_ptr<const DynamicBitset> GrammarCompilerSub::GetTagDispatchSecondSli
 
   const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
   auto computed = std::make_shared<DynamicBitset>(sorted_decoded_vocab.size());
-  if (patterns.empty()) {
-    computed->Set();
-  } else if (std::any_of(patterns.begin(), patterns.end(), [](const std::string& pattern) {
-               return pattern.empty();
-             })) {
-    for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
-      if (sorted_decoded_vocab[index].second.empty()) {
-        computed->Set(index);
-      }
+  for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
+    const auto& token = sorted_decoded_vocab[index].second;
+    bool definitely_accepted = token.empty();
+    if (!definitely_accepted) {
+      definitely_accepted =
+          std::none_of(patterns.begin(), patterns.end(), [&](const std::string& pattern) {
+            return token.find(pattern, 1) != std::string::npos;
+          });
     }
-  } else {
-    auto pattern_matcher = TrieFSMBuilder::Build(
-        patterns,
-        /*excluded_patterns=*/{},
-        /*end_states=*/nullptr,
-        /*allow_overlap=*/true,
-        /*add_back_edges=*/true
-    );
-    XGRAMMAR_DCHECK(pattern_matcher.has_value());
-    const auto& matcher = pattern_matcher.value();
-    for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
-      const auto& token = sorted_decoded_vocab[index].second;
-      int32_t state = matcher.GetStart();
-      bool contains_pattern = false;
-      for (size_t byte_index = 1; byte_index < token.size(); ++byte_index) {
-        state = matcher.GetFsm().GetNextState(state, static_cast<uint8_t>(token[byte_index]));
-        XGRAMMAR_DCHECK(state != FSM::kNoNextState);
-        if (matcher.IsEndState(state)) {
-          contains_pattern = true;
-          break;
-        }
-      }
-      if (!contains_pattern) {
-        computed->Set(index);
-      }
+    if (definitely_accepted) {
+      computed->Set(index);
     }
   }
 
