@@ -43,15 +43,23 @@ namespace xgrammar {
 std::vector<uint8_t> GetRuleLevelCacheableRules(const Grammar& grammar) {
   const int32_t num_rules = grammar->NumRules();
   std::vector<uint8_t> context_dependent(num_rules, 0);
-  std::vector<std::vector<int32_t>> referenced_rules(num_rules);
-  std::vector<uint32_t> state_epochs(grammar->complete_fsm.NumStates(), 0);
-  uint32_t state_epoch = 0;
-  std::vector<int32_t> reachable_states;
+  bool has_context_dependent_rule = false;
   for (int32_t rule_id = 0; rule_id < num_rules; ++rule_id) {
     const auto& rule = grammar->GetRule(rule_id);
     context_dependent[rule_id] = rule.max_tokens >= 0 || rule.max_chars >= 0 || rule.is_lazy ||
                                  rule.temperature.has_value() ||
                                  grammar->GetSuffixStopInfo(rule_id) != nullptr;
+    has_context_dependent_rule = has_context_dependent_rule || context_dependent[rule_id];
+  }
+  if (!has_context_dependent_rule) {
+    return std::vector<uint8_t>(num_rules, 1);
+  }
+
+  std::vector<std::vector<int32_t>> referenced_rules(num_rules);
+  std::vector<uint32_t> state_epochs(grammar->complete_fsm.NumStates(), 0);
+  uint32_t state_epoch = 0;
+  std::vector<int32_t> reachable_states;
+  for (int32_t rule_id = 0; rule_id < num_rules; ++rule_id) {
     const auto& fsm = grammar->per_rule_fsms[rule_id]->GetFsm();
     ++state_epoch;
     if (state_epoch == 0) {
@@ -1817,13 +1825,24 @@ std::shared_ptr<const DynamicBitset> GrammarCompilerSub::GetTagDispatchSecondSli
 
   const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
   auto computed = std::make_shared<DynamicBitset>(sorted_decoded_vocab.size());
+  const size_t minimum_pattern_size = patterns.empty()
+                                          ? 0
+                                          : std::min_element(
+                                                patterns.begin(),
+                                                patterns.end(),
+                                                [](const std::string& left, const std::string& right
+                                                ) { return left.size() < right.size(); }
+                                            )->size();
   for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
     const auto& token = sorted_decoded_vocab[index].second;
-    bool definitely_accepted = token.empty();
+    // Searching starts at byte one. A token no longer than the shortest pattern cannot contain
+    // any pattern in that suffix, which is the overwhelmingly common case for model vocabularies.
+    bool definitely_accepted =
+        patterns.empty() || token.empty() || token.size() <= minimum_pattern_size;
     if (!definitely_accepted) {
       definitely_accepted =
           std::none_of(patterns.begin(), patterns.end(), [&](const std::string& pattern) {
-            return token.find(pattern, 1) != std::string::npos;
+            return token.size() > pattern.size() && token.find(pattern, 1) != std::string::npos;
           });
     }
     if (definitely_accepted) {
