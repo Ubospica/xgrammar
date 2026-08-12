@@ -23,6 +23,34 @@ def _mask_trace(compiled_grammar: xgr.CompiledGrammar, input_string: str):
     return trace
 
 
+def _next_token_mask(matcher: xgr.GrammarMatcher, vocabulary_size: int) -> torch.Tensor:
+    bitmask = xgr.allocate_token_bitmask(1, vocabulary_size)
+    matcher.fill_next_token_bitmask(bitmask)
+    return bitmask_to_bool_mask(bitmask, vocabulary_size)
+
+
+def _assert_mask_matches_token_acceptance(
+    compiled_grammar: xgr.CompiledGrammar, prefix: str
+) -> None:
+    matcher = xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True)
+    assert matcher.accept_string(prefix)
+    bitmask = xgr.allocate_token_bitmask(1, compiled_grammar.tokenizer_info.vocab_size)
+    xgr.reset_token_bitmask(bitmask)
+    need_apply = matcher.fill_next_token_bitmask(bitmask)
+    allowed_tokens = (
+        bitmask_to_bool_mask(bitmask, compiled_grammar.tokenizer_info.vocab_size)[0]
+        if need_apply
+        else None
+    )
+
+    for token_id in range(compiled_grammar.tokenizer_info.vocab_size):
+        oracle = xgr.GrammarMatcher(compiled_grammar, terminate_without_stop_token=True)
+        assert oracle.accept_string(prefix)
+        expected = oracle.accept_token(token_id)
+        actual = bool(allowed_tokens[token_id]) if allowed_tokens is not None else True
+        assert actual == expected, (prefix, token_id)
+
+
 def _compile_ebnf(compiler: xgr.GrammarCompiler) -> xgr.CompiledGrammar:
     return compiler.compile_grammar(
         """
@@ -105,6 +133,65 @@ def test_dynamic_compilation_matches_eager_masks(compile_grammar, input_string):
     for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(expected, actual):
         assert actual_apply == expected_apply
         torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
+def test_tag_dispatch_direct_start_mask_matches_eager_and_token_parser_after_roundtrip():
+    vocabulary = [
+        "a",
+        "X",
+        "plain",
+        "<call>",
+        "before<call>",
+        "before<call>X",
+        "<call>Y",
+        "before<call>Y",
+        "<ca",
+        "ll>",
+        "ll>X",
+        "<blocked>",
+        "<blocked>x",
+        "before<blocked>",
+        "abce",
+        "abcd",
+    ]
+    structural_tag = {
+        "type": "structural_tag",
+        "format": {
+            "type": "dispatch",
+            "rules": [["<call>", {"type": "const_string", "value": "X"}]],
+            "loop": False,
+            "excludes": ["<blocked>", "bcd", "abce"],
+        },
+    }
+
+    original_tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    recovered_tokenizer_info = xgr.TokenizerInfo.deserialize_json(
+        original_tokenizer_info.serialize_json()
+    )
+    for tokenizer_info in [original_tokenizer_info, recovered_tokenizer_info]:
+        dynamic = xgr.GrammarCompiler(
+            tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+        ).compile_structural_tag(structural_tag)
+        eager = xgr.GrammarCompiler(
+            tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+        ).compile_structural_tag(structural_tag)
+
+        # Empty and plain-text prefixes leave TagDispatch at its start state. Partial trigger
+        # prefixes exercise the conservative non-start path. Every generated mask is also checked
+        # against accept_token(), which uses the grammar parser rather than the direct mask.
+        for prefix in ["", "plain", "<ca", "before<ca"]:
+            dynamic_matcher = xgr.GrammarMatcher(dynamic, terminate_without_stop_token=True)
+            eager_matcher = xgr.GrammarMatcher(eager, terminate_without_stop_token=True)
+            assert dynamic_matcher.accept_string(prefix)
+            assert eager_matcher.accept_string(prefix)
+            torch.testing.assert_close(
+                _next_token_mask(dynamic_matcher, len(vocabulary)),
+                _next_token_mask(eager_matcher, len(vocabulary)),
+                rtol=0,
+                atol=0,
+            )
+            _assert_mask_matches_token_acceptance(dynamic, prefix)
+            _assert_mask_matches_token_acceptance(eager, prefix)
 
 
 @pytest.mark.parametrize("repeat_range", ["{3,}", "{3,5}"])

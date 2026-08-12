@@ -519,6 +519,17 @@ TEST(XGrammarSerializationTest, TestDynamicBitset) {
     auto json_value2 = AutoSerializeJSONValue(deserialized);
     ASSERT_EQ(json_value.serialize(), json_value2.serialize());
   }
+
+  // Padding bits in the final storage block are not part of the bitset. In particular, a bitset
+  // whose valid bits are all set has no zero bit even when its size is not a multiple of 32.
+  {
+    DynamicBitset bitset(99);
+    bitset.Set();
+    ASSERT_EQ(bitset.FindFirstZero(), -1);
+    bitset.Reset(98);
+    ASSERT_EQ(bitset.FindFirstZero(), 98);
+    ASSERT_EQ(bitset.FindNextZero(98), -1);
+  }
 }
 
 TEST(XGrammarSerializationTest, TestCompactFSM) {

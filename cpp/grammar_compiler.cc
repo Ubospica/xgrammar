@@ -22,9 +22,11 @@
 #include "compiled_grammar_impl.h"
 #include "earley_parser.h"
 #include "fsm.h"
+#include "fsm_builder.h"
 #include "grammar_functor.h"
 #include "grammar_impl.h"
 #include "json_schema_converter.h"
+#include "structural_tag.h"
 #include "support/dynamic_bitset.h"
 #include "support/int_set.h"
 #include "support/logging.h"
@@ -290,6 +292,13 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
  private:
   /*! \brief Build a token mask directly for a context-independent single character class. */
   std::optional<AdaptiveTokenMask> GetSingleCharacterClassDirectMask(bool is_root_rule) const;
+
+  /*! \brief Build a TagDispatch start mask by parsing only tokens that may contain a pattern. */
+  std::optional<AdaptiveTokenMask> GetTagDispatchStartDirectMask(
+      const std::bitset<256>& first_character_mask,
+      const std::vector<int32_t>& token_edge_accepted,
+      bool is_root_rule
+  );
 
   AdaptiveTokenMask BuildAdaptiveTokenMask(
       bool rejected_filled,
@@ -1130,6 +1139,107 @@ std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetSingleChara
   );
 }
 
+std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetTagDispatchStartDirectMask(
+    const std::bitset<256>& first_character_mask,
+    const std::vector<int32_t>& token_edge_accepted,
+    bool is_root_rule
+) {
+  using GrammarExprType = Grammar::Impl::GrammarExprType;
+  constexpr int32_t kMaxPatternContainingTokens = 256;
+  const auto& rule = grammar_->GetRule(init_rule_id_);
+  if (rule.lookahead_assertion_id != -1 || rule.is_lazy || rule.temperature.has_value() ||
+      grammar_->GetGrammarExpr(rule.body_expr_id).type != GrammarExprType::kTagDispatch ||
+      has_budget_rules_ || has_char_budget_rules_ || initial_state_.sub_element_id != 0 ||
+      initial_state_.partial_codepoint != 0 || initial_state_.repeat_count != 0 ||
+      initial_state_.budget_deadline != -1 || initial_state_.char_budget_deadline != -1 ||
+      initial_state_.active_temperature_rule_id != -1) {
+    return std::nullopt;
+  }
+
+  const auto& rule_fsm = grammar_->per_rule_fsms[init_rule_id_]->GetFsm();
+  const auto [speculative_calculation, speculative_mask] = GetSpeculativeCalculation();
+  if (initial_state_.element_id != rule_fsm.GetStart() || !speculative_calculation) {
+    return std::nullopt;
+  }
+
+  const auto slicing_it = tag_dispatch_rule_id_to_second_slicing_bitset_.find(init_rule_id_);
+  XGRAMMAR_DCHECK(slicing_it != tag_dispatch_rule_id_to_second_slicing_bitset_.end());
+  const auto& slicing_bitset = slicing_it->second;
+
+  // The slicing bitset proves that tokens with a set bit cannot contain a trigger or exclusion
+  // after their first byte. At the TagDispatch start state they are accepted without parsing.
+  // Parse the few remaining tokens exactly and represent the result as the complement of the
+  // rejected set.
+  std::vector<int32_t> tokens_to_check;
+  const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
+  std::vector<std::pair<int32_t, int32_t>> possible_intervals;
+  GetPossibleTokenIntervals(sorted_decoded_vocab, speculative_mask, possible_intervals);
+  int32_t previous_interval_end = 0;
+  for (const auto& interval : possible_intervals) {
+    for (int32_t index = previous_interval_end; index < interval.first; ++index) {
+      tokens_to_check.push_back(index);
+    }
+    previous_interval_end = interval.second;
+  }
+  for (int32_t index = previous_interval_end;
+       index < static_cast<int32_t>(sorted_decoded_vocab.size());
+       ++index) {
+    tokens_to_check.push_back(index);
+  }
+  for (int32_t index = slicing_bitset.FindFirstZero(); index != -1;
+       index = slicing_bitset.FindNextZero(index)) {
+    tokens_to_check.push_back(index);
+  }
+  std::sort(tokens_to_check.begin(), tokens_to_check.end());
+  tokens_to_check.erase(
+      std::unique(tokens_to_check.begin(), tokens_to_check.end()), tokens_to_check.end()
+  );
+  if (tokens_to_check.size() > kMaxPatternContainingTokens) {
+    return std::nullopt;
+  }
+
+  AdaptiveTokenMask result;
+  result.store_type = AdaptiveTokenMask::StoreType::kRejected;
+  result.rejected_indices.reserve(tokens_to_check.size());
+  for (int32_t index : tokens_to_check) {
+    if (std::binary_search(token_edge_accepted.begin(), token_edge_accepted.end(), index)) {
+      continue;
+    }
+    const auto& token = sorted_decoded_vocab[index].second;
+    if (token.empty()) {
+      continue;
+    }
+    const bool has_possible_first_byte = first_character_mask[static_cast<uint8_t>(token[0])];
+    if (!has_possible_first_byte) {
+      result.rejected_indices.push_back(index);
+      continue;
+    }
+    if (speculative_mask[static_cast<uint8_t>(token[0])] && slicing_bitset[index]) {
+      continue;
+    }
+    int32_t matched_size = 0;
+    bool accepted = true;
+    bool can_reach_end = false;
+    for (uint8_t byte : token) {
+      if (!Advance(byte)) {
+        accepted = false;
+        break;
+      }
+      ++matched_size;
+      can_reach_end = can_reach_end || IsCompleted();
+    }
+    PopLastStates(matched_size);
+    if (!accepted) {
+      if (!is_root_rule && can_reach_end && matched_size > 0) {
+        result.uncertain_indices.push_back(index);
+      } else {
+        result.rejected_indices.push_back(index);
+      }
+    }
+  }
+  return result;
+}
+
 AdaptiveTokenMask GrammarMatcherForTokenMaskCache::BuildAdaptiveTokenMask(
     bool rejected_filled,
     const std::vector<int32_t>& accepted_indices,
@@ -1236,6 +1346,12 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
 
   // Token edge accepted indices (for byte path skip + merge).
   const auto& token_edge_accepted = GetTokenEdgeAcceptedIndices();
+
+  if (auto tag_dispatch_start_mask =
+          GetTagDispatchStartDirectMask(first_character_mask, token_edge_accepted, is_root_rule);
+      tag_dispatch_start_mask.has_value()) {
+    return std::move(*tag_dispatch_start_mask);
+  }
 
   // Byte path: skip tokens already accepted by token edges.
   bool rejected_filled;
@@ -1697,10 +1813,11 @@ CompiledGrammar GrammarCompilerSub::CompileJSONSchema(
 }
 
 CompiledGrammar GrammarCompilerSub::CompileStructuralTag(const std::string& structural_tag_json) {
-  auto result = Grammar::FromStructuralTag(structural_tag_json, tokenizer_info_);
+  auto result =
+      StructuralTagToGrammar(structural_tag_json, tokenizer_info_, /*normalize=*/false).ToVariant();
   XGRAMMAR_CHECK(std::holds_alternative<Grammar>(result))
       << GetMessageFromVariantError(std::get<1>(result));
-  return MultiThreadCompileGrammar(std::get<0>(result));
+  return MultiThreadCompileGrammar(RootRuleRenamer::Apply(std::get<0>(result)));
 }
 
 CompiledGrammar GrammarCompilerSub::CompileRegex(const std::string& regex) {
@@ -1760,17 +1877,41 @@ std::shared_ptr<const DynamicBitset> GrammarCompilerSub::GetTagDispatchSecondSli
 
   const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
   auto computed = std::make_shared<DynamicBitset>(sorted_decoded_vocab.size());
-  for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
-    const auto& token = sorted_decoded_vocab[index].second;
-    bool definitely_accepted = token.empty();
-    if (!definitely_accepted) {
-      definitely_accepted =
-          std::none_of(patterns.begin(), patterns.end(), [&](const std::string& pattern) {
-            return token.find(pattern, 1) != std::string::npos;
-          });
+  if (patterns.empty()) {
+    computed->Set();
+  } else if (std::any_of(patterns.begin(), patterns.end(), [](const std::string& pattern) {
+               return pattern.empty();
+             })) {
+    for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
+      if (sorted_decoded_vocab[index].second.empty()) {
+        computed->Set(index);
+      }
     }
-    if (definitely_accepted) {
-      computed->Set(index);
+  } else {
+    auto pattern_matcher = TrieFSMBuilder::Build(
+        patterns,
+        /*excluded_patterns=*/{},
+        /*end_states=*/nullptr,
+        /*allow_overlap=*/true,
+        /*add_back_edges=*/true
+    );
+    XGRAMMAR_DCHECK(pattern_matcher.has_value());
+    const auto& matcher = pattern_matcher.value();
+    for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab.size()); ++index) {
+      const auto& token = sorted_decoded_vocab[index].second;
+      int32_t state = matcher.GetStart();
+      bool contains_pattern = false;
+      for (size_t byte_index = 1; byte_index < token.size(); ++byte_index) {
+        state = matcher.GetFsm().GetNextState(state, static_cast<uint8_t>(token[byte_index]));
+        XGRAMMAR_DCHECK(state != FSM::kNoNextState);
+        if (matcher.IsEndState(state)) {
+          contains_pattern = true;
+          break;
+        }
+      }
+      if (!contains_pattern) {
+        computed->Set(index);
+      }
     }
   }
 
