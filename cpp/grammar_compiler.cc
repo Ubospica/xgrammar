@@ -133,15 +133,33 @@ class CharacterClassTokenSummaryCache {
 
  public:
   struct Result {
+    explicit Result(std::vector<CharacterClassTokenSummary> summaries)
+        : summaries(std::move(summaries)) {}
+
+    const DynamicBitset& GetOrCreateConsumedWholeTokenBitset(
+        const std::vector<std::pair<int32_t, std::string>>& sorted_vocab, size_t vocab_size
+    ) const {
+      std::lock_guard<std::mutex> lock(consumed_whole_token_bitset_mutex);
+      if (!consumed_whole_token_bitset.has_value()) {
+        consumed_whole_token_bitset.emplace(vocab_size);
+        for (const auto& summary : summaries) {
+          if (summary.consumed_whole_token) {
+            consumed_whole_token_bitset->Set(sorted_vocab[summary.sorted_vocab_index].first, true);
+          }
+        }
+      }
+      return *consumed_whole_token_bitset;
+    }
+
     std::vector<CharacterClassTokenSummary> summaries;
-    DynamicBitset consumed_whole_token_bitset;
+    mutable std::mutex consumed_whole_token_bitset_mutex;
+    mutable std::optional<DynamicBitset> consumed_whole_token_bitset;
   };
 
   std::shared_ptr<const Result> GetOrCreate(
       const Grammar::Impl::GrammarExpr& character_class,
       const std::vector<std::pair<int32_t, std::string>>& sorted_vocab,
-      const std::vector<int32_t>& ascii_string_safe_indices,
-      size_t vocab_size
+      const std::vector<int32_t>& ascii_string_safe_indices
   ) {
     std::vector<int32_t> key(character_class.begin(), character_class.end());
     {
@@ -154,15 +172,7 @@ class CharacterClassTokenSummaryCache {
 
     auto summaries =
         BuildCharacterClassTokenSummaries(character_class, sorted_vocab, ascii_string_safe_indices);
-    DynamicBitset consumed_whole_token_bitset(vocab_size);
-    for (const auto& summary : summaries) {
-      if (summary.consumed_whole_token) {
-        consumed_whole_token_bitset.Set(sorted_vocab[summary.sorted_vocab_index].first, true);
-      }
-    }
-    auto computed = std::make_shared<const Result>(
-        Result{std::move(summaries), std::move(consumed_whole_token_bitset)}
-    );
+    auto computed = std::make_shared<const Result>(std::move(summaries));
     std::lock_guard<std::mutex> lock(mutex_);
     return cache_.emplace(std::move(key), computed).first->second;
   }
@@ -187,13 +197,13 @@ class CharacterClassTokenSummaryCache {
       }
     }
 
-    const auto summaries =
-        GetOrCreate(character_class, sorted_vocab, ascii_string_safe_indices, vocab_size);
+    const auto summaries = GetOrCreate(character_class, sorted_vocab, ascii_string_safe_indices);
     if (max_characters < 0) {
       std::vector<int32_t> accepted_indices;
       std::vector<int32_t> uncertain_indices;
       accepted_indices.reserve(AdaptiveTokenMask::USE_BITSET_THRESHOLD);
       uncertain_indices.reserve(summaries->summaries.size());
+      const DynamicBitset* accepted_bitset = nullptr;
       bool use_accepted_bitset = false;
       for (const auto& summary : summaries->summaries) {
         if (summary.consumed_whole_token) {
@@ -201,6 +211,8 @@ class CharacterClassTokenSummaryCache {
             accepted_indices.push_back(summary.sorted_vocab_index);
             if (accepted_indices.size() >= AdaptiveTokenMask::USE_BITSET_THRESHOLD) {
               use_accepted_bitset = true;
+              accepted_bitset =
+                  &summaries->GetOrCreateConsumedWholeTokenBitset(sorted_vocab, vocab_size);
               accepted_indices.clear();
             }
           }
@@ -211,7 +223,7 @@ class CharacterClassTokenSummaryCache {
       AdaptiveTokenMask adaptive_token_mask =
           use_accepted_bitset
               ? AdaptiveTokenMask(
-                    summaries->consumed_whole_token_bitset,
+                    *accepted_bitset,
                     sorted_vocab,
                     /*additional_accepted_indices=*/{},
                     uncertain_indices
@@ -407,6 +419,7 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
   std::vector<bool> tmp_can_reach_end_prefix_or_stack_;
   std::shared_ptr<const CharacterClassTokenSummaryCache::Result>
       speculative_character_class_summary_;
+  const DynamicBitset* speculative_character_class_consumed_whole_token_bitset_{nullptr};
   // Temporary data for GetTokenEdgeAcceptedIndices.
   std::vector<int32_t> tmp_token_edge_accepted_;
   std::vector<int32_t> tmp_token_edge_excluded_;
@@ -842,9 +855,12 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
       speculative_character_class_summary_ = character_class_token_summary_cache_->GetOrCreate(
           grammar_->GetGrammarExpr(*character_class_expr_id),
           sorted_decoded_vocab,
-          tokenizer_info_.ImplPtr()->GetAsciiStringSafeIndices(),
-          tokenizer_info_.GetVocabSize()
+          tokenizer_info_.ImplPtr()->GetAsciiStringSafeIndices()
       );
+      speculative_character_class_consumed_whole_token_bitset_ =
+          &speculative_character_class_summary_->GetOrCreateConsumedWholeTokenBitset(
+              sorted_decoded_vocab, tokenizer_info_.GetVocabSize()
+          );
     }
   }
 
@@ -886,9 +902,9 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
         continue;
       }
       const auto& token = sorted_decoded_vocab[i].second;
-      if (speculative_character_class_summary_ &&
-          speculative_character_class_summary_
-              ->consumed_whole_token_bitset[sorted_decoded_vocab[i].first]) {
+      if (speculative_character_class_consumed_whole_token_bitset_ &&
+          (*speculative_character_class_consumed_whole_token_bitset_
+          )[sorted_decoded_vocab[i].first]) {
         continue;
       }
       if (accepts_ascii_string_safe_slice) {
@@ -1154,10 +1170,7 @@ std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetSingleChara
   XGRAMMAR_DCHECK(character_class_token_summary_cache_ != nullptr);
   const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
   const auto summaries = character_class_token_summary_cache_->GetOrCreate(
-      character_class,
-      sorted_vocab,
-      tokenizer_info_.ImplPtr()->GetAsciiStringSafeIndices(),
-      tokenizer_info_.GetVocabSize()
+      character_class, sorted_vocab, tokenizer_info_.ImplPtr()->GetAsciiStringSafeIndices()
   );
   std::vector<int32_t> accepted_indices;
   std::vector<int32_t> uncertain_indices;
@@ -1295,9 +1308,9 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::BuildAdaptiveTokenMask(
     const std::vector<int32_t>& uncertain_indices
 ) const {
   const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
-  if (speculative_character_class_summary_) {
+  if (speculative_character_class_consumed_whole_token_bitset_) {
     return AdaptiveTokenMask(
-        speculative_character_class_summary_->consumed_whole_token_bitset,
+        *speculative_character_class_consumed_whole_token_bitset_,
         sorted_vocab,
         accepted_indices,
         uncertain_indices
@@ -1326,6 +1339,7 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   tmp_can_reach_end_prefix_or_stack_.clear();
   tmp_can_reach_end_stack_.clear();
   speculative_character_class_summary_.reset();
+  speculative_character_class_consumed_whole_token_bitset_ = nullptr;
   // For every character in the current token, stores whether it is possible to reach the end of
   // the rule when matching until this character. Store it in a stack for later rollback.
   tmp_can_reach_end_stack_.push_back(false);
