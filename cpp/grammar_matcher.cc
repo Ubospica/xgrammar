@@ -936,6 +936,10 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
     int32_t partial_codepoint;
     int32_t active_temperature_rule_id;
     int32_t char_budget_deadline;
+    int32_t json_string_char_count;
+    int32_t json_string_decode_state;
+    int32_t json_string_pending_high_surrogate;
+    int32_t json_string_length_rule_id;
 
     bool operator==(const CachedState& other) const {
       return rule_id == other.rule_id && sequence_id == other.sequence_id &&
@@ -944,7 +948,11 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
              sub_element_id == other.sub_element_id && repeat_count == other.repeat_count &&
              partial_codepoint == other.partial_codepoint &&
              active_temperature_rule_id == other.active_temperature_rule_id &&
-             char_budget_deadline == other.char_budget_deadline;
+             char_budget_deadline == other.char_budget_deadline &&
+             json_string_char_count == other.json_string_char_count &&
+             json_string_decode_state == other.json_string_decode_state &&
+             json_string_pending_high_surrogate == other.json_string_pending_high_surrogate &&
+             json_string_length_rule_id == other.json_string_length_rule_id;
     }
   };
 
@@ -1016,7 +1024,11 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
         state.repeat_count,
         state.partial_codepoint,
         state.active_temperature_rule_id,
-        state.char_budget_deadline
+        state.char_budget_deadline,
+        state.json_string_char_count,
+        state.json_string_decode_state,
+        state.json_string_pending_high_surrogate,
+        state.json_string_length_rule_id
     };
   }
 
@@ -1046,7 +1058,11 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
         state.repeat_count,
         state.partial_codepoint,
         state.active_temperature_rule_id,
-        state.char_budget_deadline
+        state.char_budget_deadline,
+        state.json_string_char_count,
+        state.json_string_decode_state,
+        state.json_string_pending_high_surrogate,
+        state.json_string_length_rule_id
     };
   }
 
@@ -2449,7 +2465,13 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
         continue;
       }
     }
+    const bool runtime_json_length = state.json_string_length_rule_id >= 0;
     latest_states_with_masks.emplace_back(state, &adaptive_token_mask);
+    if (runtime_json_length) {
+      // Static masks do not include the parser state's decoded count/escape phase. Recheck every
+      // otherwise viable token below with the concrete state instead of accepting it eagerly.
+      continue;
+    }
     if (adaptive_token_mask.store_type == StoreType::kAcceptedBitset) {
       tmp_accepted_bitset_ |= adaptive_token_mask.accepted_bitset;
     } else if (adaptive_token_mask.store_type == StoreType::kAccepted) {
@@ -2478,15 +2500,16 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
 
     // Examine only the current one ParserState
     std::optional<Impl> atomic_trial_base;
-    if (has_char_budget_rules_ && !adaptive_token_mask.uncertain_indices.empty()) {
+    if ((has_char_budget_rules_ || has_json_string_length_rules_) &&
+        !adaptive_token_mask.uncertain_indices.empty()) {
       atomic_trial_base.emplace(*this);
       atomic_trial_base->capture_recording_ = false;
     }
     PushOneStateToCheck(state);
     std::optional<ContinuationTransitionCache> continuation_cache;
     constexpr size_t kMinUncertainTokensForContinuationCache = 128;
-    if (!has_budget_rules_ && !has_char_budget_rules_ && !capture_tracking_ &&
-        adaptive_token_mask.store_type != StoreType::kRejected &&
+    if (!has_budget_rules_ && !has_char_budget_rules_ && !has_json_string_length_rules_ &&
+        !capture_tracking_ && adaptive_token_mask.store_type != StoreType::kRejected &&
         adaptive_token_mask.uncertain_indices.size() >= kMinUncertainTokensForContinuationCache) {
       continuation_cache.emplace(this);
     }
@@ -2523,7 +2546,8 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
       }
 
       const auto& cur_token = sorted_decoded_vocab[cur_token_idx].second;
-      bool accepted = !cur_token.empty() || !has_char_budget_rules_;
+      bool accepted =
+          !cur_token.empty() || (!has_char_budget_rules_ && !has_json_string_length_rules_);
 
       // Step 2.1. Find the longest common prefix with the accepted part of the previous token.
       // We can reuse the previous matched size to avoid unnecessary matching.

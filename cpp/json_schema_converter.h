@@ -434,10 +434,6 @@ class JSONSchemaConverter {
       std::optional<std::pair<int32_t, int32_t>> decoded_length_bounds = std::nullopt
   );
 
-  int32_t FSMExpression(FSMWithStartEnd fsm, const std::string& rule_name_hint);
-  int32_t CachedFSMExpression(FSMWithStartEnd fsm, const std::string& rule_name_hint);
-  int32_t ByteRangeExpression(int32_t lower, int32_t upper);
-
   /*! \brief Helper to create rule with repetition constraints. */
   int32_t GetPropertyWithNumberConstraints(
       int32_t pattern,
@@ -530,8 +526,6 @@ class JSONSchemaConverter {
   std::unordered_map<int32_t, int32_t> rule_ref_expr_ids_;
   std::unordered_map<std::string, int32_t> regex_expr_ids_;
   std::unordered_map<std::string, int32_t> json_schema_pattern_expr_ids_;
-  uint64_t internal_fsm_cache_id_ = 0;
-  std::map<std::pair<int32_t, int32_t>, int32_t> byte_range_expr_ids_;
   std::optional<int32_t> whitespace_expr_id_;
 
   // Helper for integer/number range regex generation

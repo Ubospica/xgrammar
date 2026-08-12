@@ -90,7 +90,7 @@ TEST(XGrammarRegexFSMCacheTest, JSONSchemaAlternativesShareSearchWildcards) {
   EXPECT_TRUE(regex_fsm_cache.begin()->second.IsDFA());
 }
 
-TEST(XGrammarRegexFSMCacheTest, PatternLengthIntersectionUsesCachedFSM) {
+TEST(XGrammarRegexFSMCacheTest, PatternLengthAvoidsProductFSM) {
   RegexFSMCache regex_fsm_cache;
   auto grammar = GrammarNormalizer::Apply(JSONSchemaToGrammar(
       R"({"type":"string","pattern":"[0-9]+","minLength":10,"maxLength":10})",
@@ -107,8 +107,19 @@ TEST(XGrammarRegexFSMCacheTest, PatternLengthIntersectionUsesCachedFSM) {
   ASSERT_EQ(regex_fsm_cache.size(), 1);
   auto& entry = *regex_fsm_cache.begin();
   ASSERT_FALSE(entry.first.empty());
-  EXPECT_TRUE(IsInternalRegexFSMCachePattern(entry.first.substr(1)));
+  EXPECT_FALSE(IsInternalRegexFSMCachePattern(entry.first.substr(1)));
   EXPECT_TRUE(entry.second.IsDFA());
+
+  int32_t runtime_length_rule_count = 0;
+  for (int32_t rule_id = 0; rule_id < grammar->NumRules(); ++rule_id) {
+    const auto& rule = grammar->GetRule(rule_id);
+    if (rule.json_string_min_chars >= 0) {
+      ++runtime_length_rule_count;
+      EXPECT_EQ(rule.json_string_min_chars, 10);
+      EXPECT_EQ(rule.json_string_max_chars, 10);
+    }
+  }
+  EXPECT_EQ(runtime_length_rule_count, 1);
 
   auto optimized =
       GrammarOptimizer::Apply(grammar, /*expand_repetition_ranges=*/false, &regex_fsm_cache);

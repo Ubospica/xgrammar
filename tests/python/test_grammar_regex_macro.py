@@ -231,11 +231,13 @@ def test_json_schema_pattern_json_string_encoding_and_fallback():
     assert not _is_grammar_accept_string(grammar, '"ab"')
 
 
-def test_json_schema_pattern_properties():
+def test_json_schema_pattern_properties_preserve_json_encoding():
     schema = json.dumps({"type": "object", "patternProperties": {"^[a-z]+$": {"type": "integer"}}})
     grammar = xgr.Grammar.from_json_schema(schema, any_whitespace=False)
-    assert "json_string=true" in str(grammar)
+    # Simple character-class repeats use the compact JSON-encoding path instead of Regex(...).
+    assert "json_schema_pattern_character" in str(grammar)
     assert _is_grammar_accept_string(grammar, '{"ab": 1}')
+    assert _is_grammar_accept_string(grammar, r'{"\u0061b": 1}')
     assert not _is_grammar_accept_string(grammar, '{"AB": 1}')
 
 

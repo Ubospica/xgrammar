@@ -157,135 +157,7 @@ using SchemaError = TypedError<SchemaErrorType>;
 // Fail closed above the cap to keep generated grammars bounded.
 constexpr int64_t kIntegerMultipleOfMax = 1024;
 constexpr int64_t kIntegerMultipleOfRangeWidthMax = 10000;
-constexpr int kStringConstraintStateLimit = 100000;
 constexpr int kJSONSchemaPatternDFAStateLimit = 4096;
-
-void AddByteRangeSequence(
-    FSM* fsm, int32_t from, int32_t to, const std::vector<std::pair<int32_t, int32_t>>& ranges
-) {
-  int32_t current = from;
-  for (size_t index = 0; index < ranges.size(); ++index) {
-    int32_t next = index + 1 == ranges.size() ? to : fsm->AddState();
-    fsm->AddEdge(current, next, ranges[index].first, ranges[index].second);
-    current = next;
-  }
-}
-
-void AddHexDigitRange(FSM* fsm, int32_t from, int32_t to, int32_t lower, int32_t upper) {
-  XGRAMMAR_DCHECK(0 <= lower && lower <= upper && upper <= 15);
-  if (lower <= 9) {
-    fsm->AddEdge(from, to, '0' + lower, '0' + std::min(upper, 9));
-  }
-  if (upper >= 10) {
-    int32_t letter_lower = std::max(lower, 10) - 10;
-    int32_t letter_upper = upper - 10;
-    fsm->AddEdge(from, to, 'A' + letter_lower, 'A' + letter_upper);
-    fsm->AddEdge(from, to, 'a' + letter_lower, 'a' + letter_upper);
-  }
-}
-
-void AddJSONUnicodeEscapePath(
-    FSM* fsm,
-    int32_t from,
-    int32_t to,
-    const std::vector<std::pair<int32_t, int32_t>>& nibble_ranges
-) {
-  int32_t after_slash = fsm->AddState();
-  int32_t after_u = fsm->AddState();
-  fsm->AddEdge(from, after_slash, '\\', '\\');
-  fsm->AddEdge(after_slash, after_u, 'u', 'u');
-  int32_t current = after_u;
-  for (size_t index = 0; index < nibble_ranges.size(); ++index) {
-    int32_t next = index + 1 == nibble_ranges.size() ? to : fsm->AddState();
-    AddHexDigitRange(fsm, current, next, nibble_ranges[index].first, nibble_ranges[index].second);
-    current = next;
-  }
-}
-
-/*! \brief Return the JSON source-byte language for one decoded Unicode code point. */
-FSMWithStartEnd BuildJSONStringCodePointFSM() {
-  FSM fsm(2);
-  constexpr int32_t start = 0;
-  constexpr int32_t end = 1;
-
-  // Raw JSON string characters. The multi-byte branches enforce shortest-form UTF-8, exclude
-  // surrogate code points, and stop at U+10FFFF.
-  fsm.AddEdge(start, end, 0x20, 0x21);
-  fsm.AddEdge(start, end, 0x23, 0x5B);
-  fsm.AddEdge(start, end, 0x5D, 0x7F);
-  AddByteRangeSequence(&fsm, start, end, {{0xC2, 0xDF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xE0, 0xE0}, {0xA0, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xE1, 0xEC}, {0x80, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xED, 0xED}, {0x80, 0x9F}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xEE, 0xEF}, {0x80, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xF0, 0xF0}, {0x90, 0xBF}, {0x80, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xF1, 0xF3}, {0x80, 0xBF}, {0x80, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xF4, 0xF4}, {0x80, 0x8F}, {0x80, 0xBF}, {0x80, 0xBF}});
-
-  int32_t after_short_escape_slash = fsm.AddState();
-  fsm.AddEdge(start, after_short_escape_slash, '\\', '\\');
-  for (char escaped : std::string("\"\\/bfnrt")) {
-    fsm.AddEdge(after_short_escape_slash, end, escaped, escaped);
-  }
-
-  // One non-surrogate \uXXXX escape. Hex digits are case-insensitive.
-  const std::pair<int32_t, int32_t> any_hex{0, 15};
-  AddJSONUnicodeEscapePath(&fsm, start, end, {{0, 12}, any_hex, any_hex, any_hex});
-  AddJSONUnicodeEscapePath(&fsm, start, end, {{13, 13}, {0, 7}, any_hex, any_hex});
-  AddJSONUnicodeEscapePath(&fsm, start, end, {{14, 15}, any_hex, any_hex, any_hex});
-
-  // A high/low surrogate pair is one decoded code point.
-  int32_t after_high_surrogate = fsm.AddState();
-  AddJSONUnicodeEscapePath(
-      &fsm, start, after_high_surrogate, {{13, 13}, {8, 11}, any_hex, any_hex}
-  );
-  AddJSONUnicodeEscapePath(&fsm, after_high_surrogate, end, {{13, 13}, {12, 15}, any_hex, any_hex});
-  return FSMWithStartEnd(std::move(fsm), start, {end});
-}
-
-/*! \brief Return the JSON source-byte language whose decoded length is within the bounds. */
-FSMWithStartEnd BuildJSONStringLengthFSM(int32_t min_length, int32_t max_length) {
-  static const FSMWithStartEnd code_point_dfa = []() {
-    auto dfa = BuildJSONStringCodePointFSM().ToDFA(/*max_num_states=*/1000);
-    XGRAMMAR_CHECK(dfa.IsOk()) << "Internal JSON code-point FSM must be determinizable";
-    return std::move(dfa).Unwrap();
-  }();
-
-  const int32_t copies = max_length == -1 ? std::max(min_length, 1) : max_length;
-  // Boundary state N means exactly N decoded code points have been consumed. Each copy of the
-  // code-point DFA maps its start/end directly onto adjacent boundaries, so no epsilon
-  // determinization is needed even for large finite limits.
-  FSM result(copies + 1);
-  std::vector<int32_t> ends;
-  for (int32_t count = min_length; count <= copies; ++count) {
-    ends.push_back(count);
-  }
-
-  auto add_code_point_copy = [&](int32_t from_boundary, int32_t to_boundary) {
-    std::vector<int32_t> state_mapping(code_point_dfa.NumStates(), -1);
-    state_mapping[code_point_dfa.GetStart()] = from_boundary;
-    for (int32_t state = 0; state < code_point_dfa.NumStates(); ++state) {
-      if (code_point_dfa.IsEndState(state)) {
-        state_mapping[state] = to_boundary;
-      } else if (state != code_point_dfa.GetStart()) {
-        state_mapping[state] = result.AddState();
-      }
-    }
-    for (int32_t state = 0; state < code_point_dfa.NumStates(); ++state) {
-      for (const auto& edge : code_point_dfa.GetFsm().GetEdges(state)) {
-        XGRAMMAR_DCHECK(edge.IsCharRange());
-        result.AddEdge(state_mapping[state], state_mapping[edge.target], edge.min, edge.max);
-      }
-    }
-  };
-  for (int32_t count = 0; count < copies; ++count) {
-    add_code_point_copy(count, count + 1);
-  }
-  if (max_length == -1) {
-    add_code_point_copy(copies, copies);
-  }
-  return FSMWithStartEnd(std::move(result), /*start=*/0, std::move(ends), /*is_dfa=*/true);
-}
 
 struct RegexScanState {
   int group_depth = 0;
@@ -2893,61 +2765,6 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
   return emit_regex_pattern(regex);
 }
 
-int32_t JSONSchemaConverter::ByteRangeExpression(int32_t lower, int32_t upper) {
-  auto range = std::make_pair(lower, upper);
-  const auto cached = byte_range_expr_ids_.find(range);
-  if (cached != byte_range_expr_ids_.end()) {
-    return cached->second;
-  }
-  std::vector<int32_t> choices;
-  choices.reserve(upper - lower + 1);
-  for (int32_t byte = lower; byte <= upper; ++byte) {
-    choices.push_back(ByteString(std::string(1, static_cast<char>(byte))));
-  }
-  int32_t result = Choice(choices);
-  byte_range_expr_ids_.emplace(range, result);
-  return result;
-}
-
-int32_t JSONSchemaConverter::FSMExpression(FSMWithStartEnd fsm, const std::string& rule_name_hint) {
-  std::vector<int32_t> state_rules;
-  state_rules.reserve(fsm.NumStates());
-  for (int32_t state = 0; state < fsm.NumStates(); ++state) {
-    state_rules.push_back(
-        builder_.AddEmptyRuleWithHint(rule_name_hint + "_state_" + std::to_string(state))
-    );
-  }
-  for (int32_t state = 0; state < fsm.NumStates(); ++state) {
-    std::vector<int32_t> choices;
-    if (fsm.IsEndState(state)) {
-      choices.push_back(Empty());
-    }
-    for (const auto& edge : fsm.GetFsm().GetEdges(state)) {
-      XGRAMMAR_CHECK(edge.IsCharRange()) << "String constraint FSM must contain only byte edges";
-      choices.push_back(
-          Sequence({ByteRangeExpression(edge.min, edge.max), RuleRef(state_rules[edge.target])})
-      );
-    }
-    builder_.UpdateRuleBody(state_rules[state], choices.empty() ? Impossible() : Choice(choices));
-    builder_.UpdateLookaheadExact(state_rules[state], true);
-  }
-  return RuleRef(state_rules[fsm.GetStart()]);
-}
-
-int32_t JSONSchemaConverter::CachedFSMExpression(
-    FSMWithStartEnd fsm, const std::string& rule_name_hint
-) {
-  if (regex_fsm_cache_ == nullptr) {
-    return FSMExpression(std::move(fsm), rule_name_hint);
-  }
-  std::string pattern(kInternalRegexFSMCachePrefix);
-  pattern += rule_name_hint + ":" + std::to_string(internal_fsm_cache_id_++);
-  auto cache_key = MakeRegexFSMCacheKey(pattern, /*json_string=*/false);
-  const auto inserted = regex_fsm_cache_->emplace(std::move(cache_key), std::move(fsm));
-  XGRAMMAR_CHECK(inserted.second) << "Internal JSON Schema FSM cache key collision";
-  return builder_.AddRegex(pattern, /*json_string=*/false);
-}
-
 // ==================== Generate Methods ====================
 
 int32_t JSONSchemaConverter::GenerateInteger(
@@ -3095,39 +2912,15 @@ int32_t JSONSchemaConverter::GenerateString(const StringSpec& spec, const std::s
          ByteString("\"")}
     );
   }
-  // The general product construction is intentionally limited to short finite strings. Longer
-  // anchored character-class patterns use the compact repetition path above; other large regex
-  // products would inflate conversion time by hundreds of milliseconds.
-  if (!spec.format.has_value() && spec.pattern.has_value() && has_length && spec.max_length != -1 &&
-      spec.max_length <= 32) {
-    auto pattern_result = GrammarFSMBuilder::Regex(
-        RewriteJSONSchemaPatternForFullMatch(*spec.pattern), /*json_string=*/true
+  // General patterns keep their ordinary automaton and validate decoded JSON length in the
+  // helper rule at runtime. This avoids a pattern-by-length product and also covers one-sided or
+  // large bounds; unbounded minimum-only counts saturate after reaching their minimum.
+  if (!spec.format.has_value() && spec.pattern.has_value() && has_length) {
+    int32_t pattern_rule_id = builder_.AddRuleWithHint(
+        rule_name + "_string_constraint", JSONSchemaPatternExpression(*spec.pattern)
     );
-    if (pattern_result.IsOk()) {
-      auto pattern_dfa = std::move(pattern_result).Unwrap().ToDFA(kStringConstraintStateLimit);
-      auto length_dfa = BuildJSONStringLengthFSM(spec.min_length, spec.max_length)
-                            .ToDFA(kStringConstraintStateLimit);
-      if (pattern_dfa.IsOk() && length_dfa.IsOk() &&
-          static_cast<int64_t>(pattern_dfa.ValueRef().NumStates()) *
-                  length_dfa.ValueRef().NumStates() <=
-              kStringConstraintStateLimit) {
-        auto intersection = FSMWithStartEnd::Intersect(
-            std::move(pattern_dfa).Unwrap(),
-            std::move(length_dfa).Unwrap(),
-            kStringConstraintStateLimit
-        );
-        if (intersection.IsOk() &&
-            intersection.ValueRef().NumStates() <= kStringConstraintStateLimit) {
-          return Sequence(
-              {ByteString("\""),
-               CachedFSMExpression(
-                   std::move(intersection).Unwrap(), rule_name + "_string_constraint"
-               ),
-               ByteString("\"")}
-          );
-        }
-      }
-    }
+    builder_.UpdateJSONStringLengthBounds(pattern_rule_id, spec.min_length, spec.max_length);
+    return Sequence({ByteString("\""), RuleRef(pattern_rule_id), ByteString("\"")});
   }
   // Check for format
   if (spec.format.has_value()) {

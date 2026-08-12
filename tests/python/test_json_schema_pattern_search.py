@@ -134,6 +134,46 @@ def test_pattern_and_length_count_unicode_code_points():
     assert not _is_grammar_accept_string(grammar, '"aaa"')
 
 
+@pytest.mark.parametrize("encoded_value", ['"aa"', '"éa"', '"€a"', '"😀a"', r'"\na"', r'"\u0061a"'])
+def test_runtime_pattern_length_decodes_json_source(encoded_value: str):
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "a", "minLength": 2, "maxLength": 2})
+    )
+    assert _is_grammar_accept_string(grammar, encoded_value)
+
+
+@pytest.mark.parametrize("encoded_value", [r'"\ud83d"', r'"\ude00"', r'"\ud83d\u0061"'])
+def test_runtime_pattern_length_rejects_unpaired_surrogates(encoded_value: str):
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": ".*", "minLength": 1, "maxLength": 1})
+    )
+    assert not _is_grammar_accept_string(grammar, encoded_value)
+
+
+def test_runtime_pattern_length_follows_cfg_subrules():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "^(?:éa){1,3}$", "minLength": 4, "maxLength": 4})
+    )
+    assert _is_grammar_accept_string(grammar, '"éaéa"')
+    assert not _is_grammar_accept_string(grammar, '"éa"')
+    assert not _is_grammar_accept_string(grammar, '"éaéaéa"')
+
+
+@pytest.mark.parametrize(
+    "bounds,accepted,rejected",
+    [
+        ({"minLength": 2}, '"aa"', '"a"'),
+        ({"maxLength": 2}, '"aa"', '"aaa"'),
+        ({"minLength": 2, "maxLength": 2}, '"aa"', '"aaa"'),
+    ],
+)
+def test_runtime_pattern_one_sided_and_exact_length_bounds(bounds, accepted, rejected):
+    schema = {"type": "string", "pattern": "a", **bounds}
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema))
+    assert _is_grammar_accept_string(grammar, accepted)
+    assert not _is_grammar_accept_string(grammar, rejected)
+
+
 def test_open_ended_simple_repeat_is_tightened_by_length():
     grammar = xgr.Grammar.from_json_schema(
         json.dumps({"type": "string", "pattern": "^[a-z]{2,}$", "minLength": 4, "maxLength": 5})
@@ -210,15 +250,65 @@ def test_pattern_escaped_json_mask_modes(enable_dynamic_compilation: bool, cache
 
 @pytest.mark.parametrize("enable_dynamic_compilation", [False, True])
 def test_pattern_length_compiled_grammar_serialization(enable_dynamic_compilation: bool):
-    tokenizer_info = xgr.TokenizerInfo(['"', "1234567890", '"'], stop_token_ids=[])
+    tokenizer_info = xgr.TokenizerInfo(['"', "01aF", "5", '"'], stop_token_ids=[])
     compiler = xgr.GrammarCompiler(
         tokenizer_info, enable_dynamic_compilation=enable_dynamic_compilation
     )
     compiled = compiler.compile_json_schema(
-        json.dumps({"type": "string", "pattern": "[0-9]{10,10}", "minLength": 10, "maxLength": 10})
+        json.dumps({"type": "string", "pattern": "[0-9a-fA-F]+", "minLength": 4, "maxLength": 4})
     )
     restored = xgr.CompiledGrammar.deserialize_json(compiled.serialize_json(), tokenizer_info)
     matcher = xgr.GrammarMatcher(restored, terminate_without_stop_token=True)
-    for token_id in range(3):
+    for token_id in [0, 1, 3]:
         assert matcher.accept_token(token_id)
     assert matcher.is_terminated()
+
+    matcher = xgr.GrammarMatcher(restored, terminate_without_stop_token=True)
+    for token_id in [0, 1]:
+        assert matcher.accept_token(token_id)
+    assert not matcher.accept_token(2)
+
+
+@pytest.mark.parametrize("enable_dynamic_compilation", [False, True])
+def test_runtime_pattern_length_mask_matches_acceptance(enable_dynamic_compilation: bool):
+    vocabulary = ['"', "01aF", "01aF5", "5", '"']
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=enable_dynamic_compilation
+    ).compile_json_schema(
+        json.dumps({"type": "string", "pattern": "[0-9a-fA-F]+", "minLength": 4, "maxLength": 4})
+    )
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    assert matcher.accept_token(0)
+    bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    matcher.fill_next_token_bitmask(bitmask)
+    rejected = set(xgr.testing._get_masked_tokens_from_bitmask(bitmask, tokenizer_info.vocab_size))
+    assert 1 not in rejected
+    assert 2 in rejected
+
+
+@pytest.mark.parametrize("enable_dynamic_compilation", [False, True])
+def test_runtime_pattern_length_cfg_mask_matches_acceptance(enable_dynamic_compilation: bool):
+    vocabulary = ['"', "éaéa", "éa", "éaéaéa", '"']
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=enable_dynamic_compilation
+    ).compile_json_schema(
+        json.dumps({"type": "string", "pattern": "^(?:éa){1,3}$", "minLength": 4, "maxLength": 4})
+    )
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    assert matcher.accept_token(0)
+    bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    matcher.fill_next_token_bitmask(bitmask)
+    rejected = set(xgr.testing._get_masked_tokens_from_bitmask(bitmask, tokenizer_info.vocab_size))
+    assert 1 not in rejected
+    assert 2 not in rejected
+    assert 3 in rejected
+
+    assert matcher.accept_token(2)
+    matcher.fill_next_token_bitmask(bitmask)
+    rejected = set(xgr.testing._get_masked_tokens_from_bitmask(bitmask, tokenizer_info.vocab_size))
+    assert 1 in rejected
+    assert 2 not in rejected
+    assert 3 in rejected
+    assert 4 in rejected

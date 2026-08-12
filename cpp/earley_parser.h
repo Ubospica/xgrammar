@@ -77,7 +77,11 @@ struct ParserState {
       const int32_t& repeat_count = 0,
       const int32_t& partial_codepoint = 0,
       const int32_t& active_temperature_rule_id = -1,
-      const int32_t& char_budget_deadline = -1
+      const int32_t& char_budget_deadline = -1,
+      const int32_t& json_string_char_count = 0,
+      const int32_t& json_string_decode_state = 0,
+      const int32_t& json_string_pending_high_surrogate = 0,
+      const int32_t& json_string_length_rule_id = -1
   )
       : rule_id(rule_id),
         sequence_id(sequence_id),
@@ -88,7 +92,11 @@ struct ParserState {
         repeat_count(repeat_count),
         partial_codepoint(partial_codepoint),
         active_temperature_rule_id(active_temperature_rule_id),
-        char_budget_deadline(char_budget_deadline) {}
+        char_budget_deadline(char_budget_deadline),
+        json_string_char_count(json_string_char_count),
+        json_string_decode_state(json_string_decode_state),
+        json_string_pending_high_surrogate(json_string_pending_high_surrogate),
+        json_string_length_rule_id(json_string_length_rule_id) {}
 
   /*!
    * \brief A rule_start_pos value of kNoPrevInputPos means this ParserState is the root of the
@@ -132,6 +140,14 @@ struct ParserState {
    * character budget expires; -1 means unlimited. Stored as an absolute input position. */
   int32_t char_budget_deadline = -1;
 
+  /*! \brief Runtime state for hard decoded JSON-string length constraints. Decode state 0 is a
+   * code-point boundary; positive values represent an in-progress raw UTF-8 or JSON escape. */
+  int32_t json_string_char_count = 0;
+  int32_t json_string_decode_state = 0;
+  int32_t json_string_pending_high_surrogate = 0;
+  /*! \brief Rule whose decoded JSON-string bounds own the active decoder, or -1 when inactive. */
+  int32_t json_string_length_rule_id = -1;
+
   /*!
    * \brief Lexicographic order over all fields. It is only used to sort the states for
    * deterministic serialization, and is not needed during parsing.
@@ -150,7 +166,19 @@ struct ParserState {
     if (active_temperature_rule_id != other.active_temperature_rule_id) {
       return active_temperature_rule_id < other.active_temperature_rule_id;
     }
-    return char_budget_deadline < other.char_budget_deadline;
+    if (char_budget_deadline != other.char_budget_deadline) {
+      return char_budget_deadline < other.char_budget_deadline;
+    }
+    if (json_string_char_count != other.json_string_char_count) {
+      return json_string_char_count < other.json_string_char_count;
+    }
+    if (json_string_decode_state != other.json_string_decode_state) {
+      return json_string_decode_state < other.json_string_decode_state;
+    }
+    if (json_string_pending_high_surrogate != other.json_string_pending_high_surrogate) {
+      return json_string_pending_high_surrogate < other.json_string_pending_high_surrogate;
+    }
+    return json_string_length_rule_id < other.json_string_length_rule_id;
   }
 
   friend std::ostream& operator<<(std::ostream& os, const ParserState& state) {
@@ -179,6 +207,14 @@ struct ParserState {
     if (char_budget_deadline != -1) {
       result += ", char_budget_deadline=" + std::to_string(char_budget_deadline);
     }
+    if (json_string_length_rule_id >= 0 || json_string_char_count != 0 ||
+        json_string_decode_state != 0 || json_string_pending_high_surrogate != 0) {
+      result += ", json_string_char_count=" + std::to_string(json_string_char_count) +
+                ", json_string_decode_state=" + std::to_string(json_string_decode_state) +
+                ", json_string_pending_high_surrogate=" +
+                std::to_string(json_string_pending_high_surrogate) +
+                ", json_string_length_rule_id=" + std::to_string(json_string_length_rule_id);
+    }
     result += ")";
     return result;
   }
@@ -195,18 +231,34 @@ XGRAMMAR_MEMBER_ARRAY(
     &ParserState::repeat_count,
     &ParserState::partial_codepoint,
     &ParserState::active_temperature_rule_id,
-    &ParserState::char_budget_deadline
+    &ParserState::char_budget_deadline,
+    &ParserState::json_string_char_count,
+    &ParserState::json_string_decode_state,
+    &ParserState::json_string_pending_high_surrogate,
+    &ParserState::json_string_length_rule_id
 );
 
 /*!
  * \brief Hash of a state used as the key of the adaptive token mask cache. The token mask of a
- * state does not depend on rule_start_pos, repeat_count or partial_codepoint, so they are
- * ignored. Pairs with StateEqualForCache.
+ * state does not depend on parent position or repetition counters. Runtime JSON-string decoder
+ * fields are included because they change the remaining hard length language.
  */
 class StateHashForCache {
  public:
   size_t operator()(const ParserState& state) const {
-    return HashCombine(state.rule_id, state.sequence_id, state.element_id, state.sub_element_id);
+    if (state.json_string_length_rule_id < 0) {
+      return HashCombine(state.rule_id, state.sequence_id, state.element_id, state.sub_element_id);
+    }
+    return HashCombine(
+        state.rule_id,
+        state.sequence_id,
+        state.element_id,
+        state.sub_element_id,
+        state.json_string_char_count,
+        state.json_string_decode_state,
+        state.json_string_pending_high_surrogate,
+        state.json_string_length_rule_id
+    );
   }
 };
 
@@ -218,7 +270,11 @@ class StateEqualForCache {
  public:
   bool operator()(const ParserState& lhs, const ParserState& rhs) const {
     return lhs.rule_id == rhs.rule_id && lhs.sequence_id == rhs.sequence_id &&
-           lhs.element_id == rhs.element_id && lhs.sub_element_id == rhs.sub_element_id;
+           lhs.element_id == rhs.element_id && lhs.sub_element_id == rhs.sub_element_id &&
+           lhs.json_string_char_count == rhs.json_string_char_count &&
+           lhs.json_string_decode_state == rhs.json_string_decode_state &&
+           lhs.json_string_pending_high_surrogate == rhs.json_string_pending_high_surrogate &&
+           lhs.json_string_length_rule_id == rhs.json_string_length_rule_id;
   }
 };
 
@@ -235,7 +291,11 @@ class StateEqualForParsing {
            lhs.partial_codepoint == rhs.partial_codepoint &&
            lhs.budget_deadline == rhs.budget_deadline &&
            lhs.active_temperature_rule_id == rhs.active_temperature_rule_id &&
-           lhs.char_budget_deadline == rhs.char_budget_deadline;
+           lhs.char_budget_deadline == rhs.char_budget_deadline &&
+           lhs.json_string_char_count == rhs.json_string_char_count &&
+           lhs.json_string_decode_state == rhs.json_string_decode_state &&
+           lhs.json_string_pending_high_surrogate == rhs.json_string_pending_high_surrogate &&
+           lhs.json_string_length_rule_id == rhs.json_string_length_rule_id;
   }
 };
 
@@ -246,6 +306,20 @@ class StateEqualForParsing {
 class StateHashForParsing {
  public:
   size_t operator()(const ParserState& state) const {
+    if (state.json_string_length_rule_id < 0) {
+      return HashCombine(
+          state.rule_id,
+          state.sequence_id,
+          state.element_id,
+          state.rule_start_pos,
+          state.sub_element_id,
+          state.repeat_count,
+          state.partial_codepoint,
+          state.budget_deadline,
+          state.active_temperature_rule_id,
+          state.char_budget_deadline
+      );
+    }
     return HashCombine(
         state.rule_id,
         state.sequence_id,
@@ -256,7 +330,11 @@ class StateHashForParsing {
         state.partial_codepoint,
         state.budget_deadline,
         state.active_temperature_rule_id,
-        state.char_budget_deadline
+        state.char_budget_deadline,
+        state.json_string_char_count,
+        state.json_string_decode_state,
+        state.json_string_pending_high_surrogate,
+        state.json_string_length_rule_id
     );
   }
 };
@@ -312,7 +390,12 @@ class RepeatDetector {
             existing.repeat_count == state.repeat_count &&
             existing.partial_codepoint == state.partial_codepoint &&
             existing.active_temperature_rule_id == state.active_temperature_rule_id &&
-            existing.char_budget_deadline == state.char_budget_deadline) {
+            existing.char_budget_deadline == state.char_budget_deadline &&
+            existing.json_string_char_count == state.json_string_char_count &&
+            existing.json_string_decode_state == state.json_string_decode_state &&
+            existing.json_string_pending_high_surrogate ==
+                state.json_string_pending_high_surrogate &&
+            existing.json_string_length_rule_id == state.json_string_length_rule_id) {
           return nullptr;
         }
       }
@@ -386,6 +469,7 @@ struct EarleyParserGrammarFeatures {
   std::vector<uint8_t> rule_is_nullable;
   bool has_budget_rules = false;
   bool has_char_budget_rules = false;
+  bool has_json_string_length_rules = false;
   bool capture_tracking = false;
   bool has_hidden_capture_rules = false;
 
@@ -490,6 +574,9 @@ class EarleyParser {
 
   /*! \brief Whether any rule of the grammar has a character budget. */
   bool has_char_budget_rules_ = false;
+
+  /*! \brief Whether any rule validates decoded JSON-string length at runtime. */
+  bool has_json_string_length_rules_ = false;
 
   /*! \brief Whether a character-budgeted occurrence was entered since the initial parser row. */
   std::vector<bool> char_budget_entry_history_;
@@ -697,6 +784,10 @@ class EarleyParser {
    * \note The advanced states are enqueued; nothing is enqueued if the character is not accepted.
    */
   void AdvanceFsm(const ParserState& state, const uint8_t ch);
+
+  /*! \brief Advance one JSON source byte for a rule carrying decoded-string length bounds.
+   * Returns false when the source prefix is invalid or already exceeds the upper bound. */
+  bool AdvanceJSONStringLength(ParserState* state, uint8_t ch) const;
 
   /*!
    * \brief Scan a token edge: check if token_id matches any kToken or kExcludeToken edge from

@@ -48,7 +48,8 @@ std::vector<uint8_t> GetRuleLevelCacheableRules(const Grammar& grammar) {
   std::vector<int32_t> reachable_states;
   for (int32_t rule_id = 0; rule_id < num_rules; ++rule_id) {
     const auto& rule = grammar->GetRule(rule_id);
-    context_dependent[rule_id] = rule.max_tokens >= 0 || rule.max_chars >= 0 || rule.is_lazy ||
+    context_dependent[rule_id] = rule.max_tokens >= 0 || rule.max_chars >= 0 ||
+                                 rule.json_string_min_chars >= 0 || rule.is_lazy ||
                                  rule.temperature.has_value() ||
                                  grammar->GetSuffixStopInfo(rule_id) != nullptr;
     const auto& fsm = grammar->per_rule_fsms[rule_id]->GetFsm();
@@ -788,6 +789,9 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
   if (has_char_budget_rules_) {
     speculative_calculation = false;
   }
+  if (has_json_string_length_rules_) {
+    speculative_calculation = false;
+  }
 
   int prev_matched_size = 0;
   int last_rejected_range = 0;
@@ -947,7 +951,7 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
       bool can_reach_end = tmp_can_reach_end_prefix_or_stack_.back();
 
       if (accepted) {
-        if (HasEnteredCharBudget()) {
+        if (HasEnteredCharBudget() || has_json_string_length_rules_) {
           tmp_uncertain_indices_.push_back(i);
         } else {
           tmp_accepted_indices_.push_back(i);
@@ -1146,6 +1150,22 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::BuildAdaptiveTokenMask(
     const std::vector<int32_t>& uncertain_indices
 ) const {
   const auto& sorted_vocab = tokenizer_info_.GetSortedDecodedVocab();
+  if (initial_state_.json_string_length_rule_id >= 0) {
+    std::vector<int32_t> runtime_checked = accepted_indices;
+    runtime_checked.insert(
+        runtime_checked.end(), uncertain_indices.begin(), uncertain_indices.end()
+    );
+    std::sort(runtime_checked.begin(), runtime_checked.end());
+    runtime_checked.erase(
+        std::unique(runtime_checked.begin(), runtime_checked.end()), runtime_checked.end()
+    );
+    if (rejected_filled) {
+      return AdaptiveTokenMask(
+          tokenizer_info_.GetVocabSize(), sorted_vocab, {}, rejected_indices, runtime_checked
+      );
+    }
+    return AdaptiveTokenMask(tokenizer_info_.GetVocabSize(), sorted_vocab, {}, runtime_checked);
+  }
   if (speculative_character_class_summary_) {
     return AdaptiveTokenMask(
         speculative_character_class_summary_->consumed_whole_token_bitset,
@@ -1183,7 +1203,8 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   tmp_can_reach_end_prefix_or_stack_.push_back(false);
 
   // Try to get the crossing cache.
-  bool rule_level_cache_is_available = !has_char_budget_rules_ && rule_level_cache_.has_value() &&
+  bool rule_level_cache_is_available = !has_char_budget_rules_ && !has_json_string_length_rules_ &&
+                                       rule_level_cache_.has_value() &&
                                        grammar_->per_rule_fsm_hashes[init_rule_id_].has_value();
   std::optional<uint64_t> fsm_hash = std::nullopt;
   int32_t new_state_id = -1;
@@ -1259,7 +1280,7 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   // Token edges are rechecked at runtime when a character budget is present because accepting
   // one can enter a budgeted rule within the same token.
   if (!token_edge_accepted.empty()) {
-    if (has_char_budget_rules_) {
+    if (has_char_budget_rules_ || has_json_string_length_rules_) {
       IntsetUnion(&tmp_uncertain_indices_, token_edge_accepted);
     } else {
       IntsetUnion(&tmp_accepted_indices_, token_edge_accepted);
@@ -1390,9 +1411,11 @@ const AdaptiveTokenMask& CompiledGrammar::Impl::GetAdaptiveTokenMask(
 ) {
   if (!enable_dynamic_compilation) {
     const auto it = adaptive_token_mask_cache.find(state);
-    XGRAMMAR_CHECK(it != adaptive_token_mask_cache.end())
+    if (it != adaptive_token_mask_cache.end()) {
+      return it->second;
+    }
+    XGRAMMAR_CHECK(state.json_string_length_rule_id >= 0)
         << "The token mask cache is incomplete while dynamic compilation is disabled: " << state;
-    return it->second;
   }
 
   std::lock_guard<std::mutex> lock(adaptive_token_mask_cache_mutex);
@@ -1407,7 +1430,15 @@ const AdaptiveTokenMask& CompiledGrammar::Impl::GetAdaptiveTokenMask(
       state.element_id,
       ParserState::kNoPrevInputPos,
       -1,
-      state.sub_element_id
+      state.sub_element_id,
+      0,
+      0,
+      -1,
+      -1,
+      state.json_string_char_count,
+      state.json_string_decode_state,
+      state.json_string_pending_high_surrogate,
+      state.json_string_length_rule_id
   );
   std::optional<RuleLevelCache> retained_rule_level_cache;
   const bool is_context_independent =
@@ -1459,6 +1490,12 @@ void CompiledGrammar::Impl::MaterializeAdaptiveTokenMaskCache() {
   }
   const int32_t root_rule_id = grammar->GetRootRuleId();
   for (int32_t rule_id = 0; rule_id < static_cast<int32_t>(grammar->NumRules()); ++rule_id) {
+    if (grammar->GetRule(rule_id).json_string_min_chars >= 0) {
+      // A bounded JSON-string rule has parser states for every decoded length and in-progress
+      // escape phase. Those masks are generated from their concrete runtime states on demand;
+      // enumerating only zero-count FSM positions would be incomplete and potentially enormous.
+      continue;
+    }
     const auto& rule_fsm = grammar->per_rule_fsms[rule_id];
     XGRAMMAR_DCHECK(rule_fsm.has_value());
     ParserState state(
@@ -1655,6 +1692,11 @@ CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(
   for (int32_t rule_id = 0; rule_id < static_cast<int>(compiled_grammar_impl->grammar->NumRules());
        ++rule_id) {
     auto rule = compiled_grammar_impl->grammar->GetRule(rule_id);
+    if (rule.json_string_min_chars >= 0) {
+      // The eager cache cannot finitely enumerate every decoded-count/escape-phase state. Missing
+      // entries for these rules are generated by GetAdaptiveTokenMask from the concrete state.
+      continue;
+    }
     const auto& rule_fsm = compiled_grammar_impl->grammar->per_rule_fsms[rule_id];
     XGRAMMAR_DCHECK(rule_fsm.has_value());
     auto cur_stack_element =

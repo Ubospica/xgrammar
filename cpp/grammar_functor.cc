@@ -71,6 +71,9 @@ class SubGrammarAdderImpl : public GrammarMutator {
       builder_->UpdateLookaheadAssertion(new_rule_ids_names[i].first, new_lookahead_assertion_id);
       builder_->UpdateMaxTokens(new_rule_ids_names[i].first, rule.max_tokens);
       builder_->UpdateMaxChars(new_rule_ids_names[i].first, rule.max_chars);
+      builder_->UpdateJSONStringLengthBounds(
+          new_rule_ids_names[i].first, rule.json_string_min_chars, rule.json_string_max_chars
+      );
       builder_->UpdateCaptureName(new_rule_ids_names[i].first, rule.capture_name);
       if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
         auto remapped_info = *suffix_stop_info;
@@ -288,6 +291,9 @@ class StructureNormalizerImpl : public GrammarMutator {
       builder_->UpdateLookaheadAssertion(i, VisitLookaheadAssertion(rule.lookahead_assertion_id));
       builder_->UpdateMaxTokens(i, rule.max_tokens);
       builder_->UpdateMaxChars(i, rule.max_chars);
+      builder_->UpdateJSONStringLengthBounds(
+          i, rule.json_string_min_chars, rule.json_string_max_chars
+      );
       builder_->UpdateCaptureName(i, rule.capture_name);
       if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
         builder_->UpdateSuffixStopInfo(i, *suffix_stop_info);
@@ -798,9 +804,9 @@ class RuleInlinerImpl : public InPlaceGrammarRewriter {
     // capture-relevant rule would eliminate its completion events, so its capture or hidden span
     // would never be recorded. Inlining a lazy rule would erase its committed-shortest semantics.
     // Inlining a temperature rule would erase the rule its sampling temperature applies to.
-    if (rule.max_tokens >= 0 || rule.max_chars >= 0 || !rule.capture_name.empty() ||
-        (*grammar_)->GetSuffixStopInfo(rule_id) != nullptr || rule.is_lazy ||
-        rule.temperature.has_value()) {
+    if (rule.max_tokens >= 0 || rule.max_chars >= 0 || rule.json_string_min_chars >= 0 ||
+        !rule.capture_name.empty() || (*grammar_)->GetSuffixStopInfo(rule_id) != nullptr ||
+        rule.is_lazy || rule.temperature.has_value()) {
       can_rule_be_inlined_[rule_id] = false;
       return false;
     }
@@ -921,6 +927,9 @@ class DeadCodeEliminatorImpl : public GrammarMutator {
       );
       builder_->UpdateMaxTokens(rule_id_map_[rule_id], rule.max_tokens);
       builder_->UpdateMaxChars(rule_id_map_[rule_id], rule.max_chars);
+      builder_->UpdateJSONStringLengthBounds(
+          rule_id_map_[rule_id], rule.json_string_min_chars, rule.json_string_max_chars
+      );
       builder_->UpdateCaptureName(rule_id_map_[rule_id], rule.capture_name);
       if (const auto* suffix_stop_info = grammar->GetSuffixStopInfo(rule_id)) {
         auto remapped_info = *suffix_stop_info;
@@ -1218,7 +1227,7 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
             return regex_fsm.IsEndState(state);
           });
         }
-        if (allows_empty) {
+        if (allows_empty && rule.json_string_min_chars <= 0) {
           empty_rule_id_set->insert(i);
         }
         continue;
@@ -2480,7 +2489,7 @@ int32_t RepetitionRangeExpanderImpl::HandleRepetitionRange(
   const auto& ref_rule_body = base_grammar_->GetGrammarExpr(ref_rule.body_expr_id);
   // Keep the reference to budgeted, suffix/stop, lazy, and temperature rules: replacing it with
   // the rule's content would erase the rule that the runtime semantics apply to.
-  if (ref_rule.max_tokens < 0 && ref_rule.max_chars < 0 &&
+  if (ref_rule.max_tokens < 0 && ref_rule.max_chars < 0 && ref_rule.json_string_min_chars < 0 &&
       base_grammar_->GetSuffixStopInfo(rule_id) == nullptr && !ref_rule.is_lazy &&
       !ref_rule.temperature.has_value() &&
       ref_rule_body.type == GrammarBuilder::GrammarExprType::kChoices &&
@@ -2652,6 +2661,9 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
       builder_->UpdateLookaheadAssertion(i, VisitLookaheadAssertion(rule.lookahead_assertion_id));
       builder_->UpdateMaxTokens(i, rule.max_tokens);
       builder_->UpdateMaxChars(i, rule.max_chars);
+      builder_->UpdateJSONStringLengthBounds(
+          i, rule.json_string_min_chars, rule.json_string_max_chars
+      );
       builder_->UpdateCaptureName(i, rule.capture_name);
       if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
         builder_->UpdateSuffixStopInfo(i, *suffix_stop_info);
