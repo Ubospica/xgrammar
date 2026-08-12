@@ -562,7 +562,7 @@ Grammar JSONSchemaToGrammar(
 );
 
 /*! \brief Convert an already parsed JSON Schema directly to an unnormalized grammar AST. */
-Grammar JSONSchemaToGrammar(
+Grammar JSONSchemaValueToGrammar(
     const picojson::value& schema,
     bool any_whitespace = true,
     std::optional<int> indent = std::nullopt,

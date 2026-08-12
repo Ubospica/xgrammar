@@ -4150,7 +4150,7 @@ Grammar JSONSchemaToGrammar(
   std::string error = picojson::parse(schema_value, schema);
   XGRAMMAR_CHECK(error.empty()) << "Failed to parse JSON: " << error
                                 << ". The JSON string is:" << schema;
-  return JSONSchemaToGrammar(
+  return JSONSchemaValueToGrammar(
       schema_value,
       any_whitespace,
       indent,
@@ -4163,7 +4163,7 @@ Grammar JSONSchemaToGrammar(
   );
 }
 
-Grammar JSONSchemaToGrammar(
+Grammar JSONSchemaValueToGrammar(
     const picojson::value& schema_value,
     bool any_whitespace,
     std::optional<int> indent,

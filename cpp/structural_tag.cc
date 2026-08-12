@@ -1881,7 +1881,7 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const JSONSchemaFo
     return ResultErr<ISTError>("Unsupported parsing type: " + format.style);
   }
   // The whitespace cap comes from the JSONSchemaFormat node (per-tag).
-  auto sub_grammar = GrammarNormalizer::Apply(JSONSchemaToGrammar(
+  auto sub_grammar = GrammarNormalizer::Apply(JSONSchemaValueToGrammar(
       *format.json_schema,
       /*any_whitespace=*/true,
       /*indent=*/std::nullopt,
