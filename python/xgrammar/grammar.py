@@ -117,31 +117,39 @@ def _get_structural_tag_str_from_args(args: List[Any], kwargs: Dict[str, Any]) -
     def legacy_to_json(tags: List[StructuralTagItem], triggers: List[str]) -> str:
         # The legacy API is still used by serving benchmarks with hundreds of tools. Building a
         # full nested Pydantic object graph here only to serialize it immediately adds noticeable
-        # fixed cost to every compile. StructuralTagItem has already validated each tag; construct
-        # the equivalent JSON payload directly and leave the authoritative format validation to
-        # the C++ structural-tag parser used by both paths.
+        # fixed cost to every compile. StructuralTagItem has already validated each tag. Preserve
+        # string schemas as JSON fragments instead of parsing and immediately serializing them
+        # again, and leave the authoritative format validation to the C++ structural-tag parser
+        # used by both paths.
         serialized_tags = []
         for tag in tags:
             schema = tag.schema_
             if isinstance(schema, str):
-                schema = json.loads(schema)
+                # Preserve the legacy API's rejection of trailing data and prevent a raw JSON
+                # fragment from escaping its enclosing content object.
+                json.loads(schema)
             elif isinstance(schema, type) and issubclass(schema, BaseModel):
                 schema = schema.model_json_schema()
-            serialized_tags.append(
-                {
-                    "type": "tag",
-                    "begin": tag.begin,
-                    "content": {"type": "json_schema", "json_schema": schema},
-                    "end": tag.end,
-                }
+            schema_json = (
+                schema
+                if isinstance(schema, str)
+                else json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
             )
-        return json.dumps(
-            {
-                "type": "structural_tag",
-                "format": {"type": "triggered_tags", "triggers": triggers, "tags": serialized_tags},
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
+            serialized_tags.append(
+                '{"type":"tag","begin":'
+                + json.dumps(tag.begin, ensure_ascii=False)
+                + ',"content":{"type":"json_schema","json_schema":'
+                + schema_json
+                + '},"end":'
+                + json.dumps(tag.end, ensure_ascii=False)
+                + "}"
+            )
+        return (
+            '{"type":"structural_tag","format":{"type":"triggered_tags","triggers":'
+            + json.dumps(triggers, ensure_ascii=False, separators=(",", ":"))
+            + ',"tags":['
+            + ",".join(serialized_tags)
+            + "]}}"
         )
 
     if len(args) == 1:

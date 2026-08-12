@@ -199,8 +199,9 @@ def test_structural_tag_compiler():
     [
         {"type": "object", "properties": {"value": {"type": "integer"}}},
         '{"type":"object","properties":{"value":{"type":"integer"}}}',
+        '  { "type": "object", "properties": { "value": { "type": "integer" } } }\n',
     ],
-    ids=["dict", "json-string"],
+    ids=["dict", "json-string", "json-string-with-whitespace"],
 )
 def test_legacy_structural_tag_payload_matches_modern_entry(schema):
     tags = [xgr.StructuralTagItem(begin="<call>", schema=schema, end="</call>")]
