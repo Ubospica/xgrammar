@@ -49,7 +49,7 @@ TEST(XGrammarRegexFSMCacheTest, JSONSchemaConversionCacheSurvivesOptimization) {
   EXPECT_EQ(cached->second.GetFsm().ImplPtr(), cached_fsm_impl);
 }
 
-TEST(XGrammarRegexFSMCacheTest, JSONSchemaSearchPatternIsDeterminized) {
+TEST(XGrammarRegexFSMCacheTest, JSONSchemaSearchPatternHasDeterministicRawTransitions) {
   RegexFSMCache regex_fsm_cache;
   JSONSchemaToGrammar(
       R"({"type":"string","pattern":"abc"})",
@@ -64,7 +64,10 @@ TEST(XGrammarRegexFSMCacheTest, JSONSchemaSearchPatternIsDeterminized) {
   );
 
   ASSERT_EQ(regex_fsm_cache.size(), 1);
-  EXPECT_TRUE(regex_fsm_cache.begin()->second.IsDFA());
+  const auto& fsm = regex_fsm_cache.begin()->second;
+  std::unordered_set<int> next_states;
+  fsm.GetFsm().Advance({fsm.GetStart()}, 'a', &next_states);
+  EXPECT_EQ(next_states.size(), 1);
 }
 
 TEST(XGrammarRegexFSMCacheTest, PatternLengthIntersectionUsesCachedFSM) {

@@ -2791,16 +2791,18 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
   }
 
   const std::string rewritten = RewriteJSONSchemaPatternForFullMatch(regex);
-  int32_t result = RegexExpression(rewritten, /*json_string=*/true);
   if (regex_fsm_cache_ != nullptr) {
-    auto cached_fsm = regex_fsm_cache_->find(MakeRegexFSMCacheKey(rewritten, /*json_string=*/true));
-    if (cached_fsm != regex_fsm_cache_->end() && !cached_fsm->second.IsDFA()) {
-      auto dfa = cached_fsm->second.ToDFA(kJSONSchemaPatternDFAStateLimit);
-      if (dfa.IsOk()) {
-        cached_fsm->second = std::move(dfa).Unwrap();
+    std::string fsm_cache_key = MakeRegexFSMCacheKey(rewritten, /*json_string=*/true);
+    if (regex_fsm_cache_->count(fsm_cache_key) == 0) {
+      auto optimized_fsm = RegexFSMBuilder::BuildForJSONStringWithDecodedDFA(
+          rewritten, kJSONSchemaPatternDFAStateLimit
+      );
+      if (optimized_fsm.IsOk()) {
+        regex_fsm_cache_->emplace(std::move(fsm_cache_key), std::move(optimized_fsm).Unwrap());
       }
     }
   }
+  int32_t result = RegexExpression(rewritten, /*json_string=*/true);
   json_schema_pattern_expr_ids_.emplace(std::move(cache_key), result);
   return result;
 }
@@ -3005,9 +3007,14 @@ int32_t JSONSchemaConverter::GenerateString(const StringSpec& spec, const std::s
   // products would inflate conversion time by hundreds of milliseconds.
   if (!spec.format.has_value() && spec.pattern.has_value() && has_length && spec.max_length != -1 &&
       spec.max_length <= 32) {
-    auto pattern_result = GrammarFSMBuilder::Regex(
-        RewriteJSONSchemaPatternForFullMatch(*spec.pattern), /*json_string=*/true
+    auto pattern_result = RegexFSMBuilder::BuildForJSONStringWithDecodedDFA(
+        RewriteJSONSchemaPatternForFullMatch(*spec.pattern), kStringConstraintStateLimit
     );
+    if (pattern_result.IsErr()) {
+      pattern_result = GrammarFSMBuilder::Regex(
+          RewriteJSONSchemaPatternForFullMatch(*spec.pattern), /*json_string=*/true
+      );
+    }
     if (pattern_result.IsOk()) {
       auto pattern_dfa = std::move(pattern_result).Unwrap().ToDFA(kStringConstraintStateLimit);
       auto length_dfa = BuildJSONStringLengthFSM(spec.min_length, spec.max_length)
