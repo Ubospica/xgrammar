@@ -1201,7 +1201,7 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
         std::string cache_key = MakeRegexFSMCacheKey(regex, json_string);
         auto cached = regex_fsm_cache_->find(cache_key);
         bool allows_empty = false;
-        if (cached == regex_fsm_cache_->end()) {
+        if (cached == regex_fsm_cache_->end() && !IsInternalRegexFSMCachePattern(regex)) {
           auto regex_fsm_result = json_string ? RegexFSMBuilder::BuildForJSONString(regex)
                                               : RegexFSMBuilder::Build(regex);
           if (regex_fsm_result.IsOk()) {
@@ -2192,6 +2192,9 @@ void GrammarFSMBuilderImpl::BuildRegex(
       return;
     }
   }
+  XGRAMMAR_CHECK(!IsInternalRegexFSMCachePattern(regex))
+      << "Internal cached automaton is unavailable while compiling rule "
+      << (rule_name_ != nullptr ? *rule_name_ : std::string("<unknown>"));
   auto build_result =
       json_string ? RegexFSMBuilder::BuildForJSONString(regex) : RegexFSMBuilder::Build(regex);
   if (build_result.IsErr()) {

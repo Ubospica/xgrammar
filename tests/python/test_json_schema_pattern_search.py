@@ -192,3 +192,19 @@ def test_pattern_escaped_json_mask_modes(enable_dynamic_compilation: bool, cache
     for token_id in range(5):
         assert matcher.accept_token(token_id)
     assert matcher.is_terminated()
+
+
+@pytest.mark.parametrize("enable_dynamic_compilation", [False, True])
+def test_pattern_length_compiled_grammar_serialization(enable_dynamic_compilation: bool):
+    tokenizer_info = xgr.TokenizerInfo(['"', "1234567890", '"'], stop_token_ids=[])
+    compiler = xgr.GrammarCompiler(
+        tokenizer_info, enable_dynamic_compilation=enable_dynamic_compilation
+    )
+    compiled = compiler.compile_json_schema(
+        json.dumps({"type": "string", "pattern": "[0-9]{10,10}", "minLength": 10, "maxLength": 10})
+    )
+    restored = xgr.CompiledGrammar.deserialize_json(compiled.serialize_json(), tokenizer_info)
+    matcher = xgr.GrammarMatcher(restored, terminate_without_stop_token=True)
+    for token_id in range(3):
+        assert matcher.accept_token(token_id)
+    assert matcher.is_terminated()

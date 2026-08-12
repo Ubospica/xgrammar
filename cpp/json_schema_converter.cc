@@ -158,6 +158,7 @@ using SchemaError = TypedError<SchemaErrorType>;
 constexpr int64_t kIntegerMultipleOfMax = 1024;
 constexpr int64_t kIntegerMultipleOfRangeWidthMax = 10000;
 constexpr int kStringConstraintStateLimit = 100000;
+constexpr int kJSONSchemaPatternDFAStateLimit = 4096;
 
 void AddByteRangeSequence(
     FSM* fsm, int32_t from, int32_t to, const std::vector<std::pair<int32_t, int32_t>>& ranges
@@ -2789,8 +2790,17 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
     return result;
   }
 
-  int32_t result =
-      RegexExpression(RewriteJSONSchemaPatternForFullMatch(regex), /*json_string=*/true);
+  const std::string rewritten = RewriteJSONSchemaPatternForFullMatch(regex);
+  int32_t result = RegexExpression(rewritten, /*json_string=*/true);
+  if (regex_fsm_cache_ != nullptr) {
+    auto cached_fsm = regex_fsm_cache_->find(MakeRegexFSMCacheKey(rewritten, /*json_string=*/true));
+    if (cached_fsm != regex_fsm_cache_->end() && !cached_fsm->second.IsDFA()) {
+      auto dfa = cached_fsm->second.ToDFA(kJSONSchemaPatternDFAStateLimit);
+      if (dfa.IsOk()) {
+        cached_fsm->second = std::move(dfa).Unwrap();
+      }
+    }
+  }
   json_schema_pattern_expr_ids_.emplace(std::move(cache_key), result);
   return result;
 }
@@ -2834,6 +2844,20 @@ int32_t JSONSchemaConverter::FSMExpression(FSMWithStartEnd fsm, const std::strin
     builder_.UpdateLookaheadExact(state_rules[state], true);
   }
   return RuleRef(state_rules[fsm.GetStart()]);
+}
+
+int32_t JSONSchemaConverter::CachedFSMExpression(
+    FSMWithStartEnd fsm, const std::string& rule_name_hint
+) {
+  if (regex_fsm_cache_ == nullptr) {
+    return FSMExpression(std::move(fsm), rule_name_hint);
+  }
+  std::string pattern(kInternalRegexFSMCachePrefix);
+  pattern += rule_name_hint + ":" + std::to_string(internal_fsm_cache_id_++);
+  auto cache_key = MakeRegexFSMCacheKey(pattern, /*json_string=*/false);
+  const auto inserted = regex_fsm_cache_->emplace(std::move(cache_key), std::move(fsm));
+  XGRAMMAR_CHECK(inserted.second) << "Internal JSON Schema FSM cache key collision";
+  return builder_.AddRegex(pattern, /*json_string=*/false);
 }
 
 // ==================== Generate Methods ====================
@@ -3001,7 +3025,9 @@ int32_t JSONSchemaConverter::GenerateString(const StringSpec& spec, const std::s
             intersection.ValueRef().NumStates() <= kStringConstraintStateLimit) {
           return Sequence(
               {ByteString("\""),
-               FSMExpression(std::move(intersection).Unwrap(), rule_name + "_string_constraint"),
+               CachedFSMExpression(
+                   std::move(intersection).Unwrap(), rule_name + "_string_constraint"
+               ),
                ByteString("\"")}
           );
         }

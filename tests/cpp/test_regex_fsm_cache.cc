@@ -48,3 +48,47 @@ TEST(XGrammarRegexFSMCacheTest, JSONSchemaConversionCacheSurvivesOptimization) {
   ASSERT_NE(cached, regex_fsm_cache.end());
   EXPECT_EQ(cached->second.GetFsm().ImplPtr(), cached_fsm_impl);
 }
+
+TEST(XGrammarRegexFSMCacheTest, JSONSchemaSearchPatternIsDeterminized) {
+  RegexFSMCache regex_fsm_cache;
+  JSONSchemaToGrammar(
+      R"({"type":"string","pattern":"abc"})",
+      /*any_whitespace=*/false,
+      /*indent=*/std::nullopt,
+      /*separators=*/std::nullopt,
+      /*strict_mode=*/true,
+      /*max_whitespace_cnt=*/std::nullopt,
+      /*any_order=*/false,
+      JSONFormat::kJSON,
+      &regex_fsm_cache
+  );
+
+  ASSERT_EQ(regex_fsm_cache.size(), 1);
+  EXPECT_TRUE(regex_fsm_cache.begin()->second.IsDFA());
+}
+
+TEST(XGrammarRegexFSMCacheTest, PatternLengthIntersectionUsesCachedFSM) {
+  RegexFSMCache regex_fsm_cache;
+  auto grammar = GrammarNormalizer::Apply(JSONSchemaToGrammar(
+      R"({"type":"string","pattern":"[0-9]{10,10}","minLength":10,"maxLength":10})",
+      /*any_whitespace=*/false,
+      /*indent=*/std::nullopt,
+      /*separators=*/std::nullopt,
+      /*strict_mode=*/true,
+      /*max_whitespace_cnt=*/std::nullopt,
+      /*any_order=*/false,
+      JSONFormat::kJSON,
+      &regex_fsm_cache
+  ));
+
+  ASSERT_EQ(regex_fsm_cache.size(), 1);
+  auto& entry = *regex_fsm_cache.begin();
+  ASSERT_FALSE(entry.first.empty());
+  EXPECT_TRUE(IsInternalRegexFSMCachePattern(entry.first.substr(1)));
+  EXPECT_TRUE(entry.second.IsDFA());
+
+  auto optimized =
+      GrammarOptimizer::Apply(grammar, /*expand_repetition_ranges=*/false, &regex_fsm_cache);
+  EXPECT_TRUE(optimized->optimized);
+  EXPECT_GT(optimized->complete_fsm.NumStates(), 0);
+}
