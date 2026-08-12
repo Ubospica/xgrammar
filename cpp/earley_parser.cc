@@ -1033,8 +1033,7 @@ void EarleyParser::AdvanceCharacterClass(
 
   // ASCII handling (unchanged)
   for (int i = 1; i < sub_sequence.size(); i += 2) {
-    if (static_cast<uint8_t>(sub_sequence[i]) <= ch &&
-        ch <= static_cast<uint8_t>(sub_sequence[i + 1])) {
+    if (sub_sequence[i] <= ch && ch <= sub_sequence[i + 1]) {
       if (!is_negative) {
         auto new_state = state;
         new_state.element_id++;
@@ -1166,8 +1165,7 @@ void EarleyParser::AdvanceCharacterClassStar(
 
   // ASCII handling (unchanged)
   for (int i = 1; i < sub_sequence.size(); i += 2) {
-    if (static_cast<uint8_t>(sub_sequence[i]) <= ch &&
-        ch <= static_cast<uint8_t>(sub_sequence[i + 1])) {
+    if (sub_sequence[i] <= ch && ch <= sub_sequence[i + 1]) {
       if (!is_negative) {
         Enqueue(state);
       }
