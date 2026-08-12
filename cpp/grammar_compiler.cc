@@ -1155,6 +1155,15 @@ std::optional<AdaptiveTokenMask> GrammarMatcherForTokenMaskCache::GetTagDispatch
     return std::nullopt;
   }
 
+  // The direct path has fixed setup costs for collecting and sorting the exceptional tokens.
+  // A small dispatch is faster through the regular slicing path, while a large dispatch
+  // amortizes those costs by avoiding many exact token simulations.
+  constexpr size_t kMinDirectTagDispatchBranches = 8;
+  if (grammar_->GetTagDispatch(rule.body_expr_id).tag_rule_pairs.size() <
+      kMinDirectTagDispatchBranches) {
+    return std::nullopt;
+  }
+
   const auto& rule_fsm = grammar_->per_rule_fsms[init_rule_id_]->GetFsm();
   const auto [speculative_calculation, speculative_mask] = GetSpeculativeCalculation();
   if (initial_state_.element_id != rule_fsm.GetStart() || !speculative_calculation) {

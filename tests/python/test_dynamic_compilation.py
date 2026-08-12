@@ -135,7 +135,10 @@ def test_dynamic_compilation_matches_eager_masks(compile_grammar, input_string):
         torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
-def test_tag_dispatch_direct_start_mask_matches_eager_and_token_parser_after_roundtrip():
+@pytest.mark.parametrize("branch_count", [1, 8])
+def test_tag_dispatch_direct_start_mask_matches_eager_and_token_parser_after_roundtrip(
+    branch_count: int,
+):
     vocabulary = [
         "a",
         "X",
@@ -154,11 +157,14 @@ def test_tag_dispatch_direct_start_mask_matches_eager_and_token_parser_after_rou
         "abce",
         "abcd",
     ]
+    dispatch_rules = [
+        [f"<call{i}>", {"type": "const_string", "value": f"X{i}"}] for i in range(branch_count)
+    ]
     structural_tag = {
         "type": "structural_tag",
         "format": {
             "type": "dispatch",
-            "rules": [["<call>", {"type": "const_string", "value": "X"}]],
+            "rules": dispatch_rules,
             "loop": False,
             "excludes": ["<blocked>", "bcd", "abce"],
         },
