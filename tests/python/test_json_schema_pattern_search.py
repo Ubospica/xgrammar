@@ -113,6 +113,17 @@ def test_pattern_and_length_constraints_are_conjoined():
     assert not _is_grammar_accept_string(grammar, '"wxyz"')
 
 
+def test_exact_length_character_class_search_uses_whole_string_equivalence():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "[0-9]{10,10}", "minLength": 10, "maxLength": 10})
+    )
+    assert _is_grammar_accept_string(grammar, '"0123456789"')
+    assert _is_grammar_accept_string(grammar, r'"01234\u00356789"')
+    assert not _is_grammar_accept_string(grammar, '"01234x6789"')
+    assert not _is_grammar_accept_string(grammar, '"012345678"')
+    assert not _is_grammar_accept_string(grammar, '"01234567890"')
+
+
 def test_pattern_and_length_count_unicode_code_points():
     grammar = xgr.Grammar.from_json_schema(
         json.dumps({"type": "string", "pattern": "a", "minLength": 2, "maxLength": 2})
