@@ -169,21 +169,6 @@ void AddJSONStringByteRange(FSM* fsm, int from, int to, int low, int high) {
   }
 }
 
-FSMWithStartEnd EncodeFSMForJSONString(FSMWithStartEnd decoded_fsm) {
-  const auto& fsm = decoded_fsm.GetFsm();
-  FSM encoded_fsm(decoded_fsm.NumStates());
-  for (int state = 0; state < decoded_fsm.NumStates(); ++state) {
-    for (const auto& edge : fsm.GetEdges(state)) {
-      if (edge.IsCharRange()) {
-        AddJSONStringByteRange(&encoded_fsm, state, edge.target, edge.min, edge.max);
-      } else {
-        encoded_fsm.AddEdge(state, edge.target, edge.min, edge.max);
-      }
-    }
-  }
-  return FSMWithStartEnd(std::move(encoded_fsm), decoded_fsm.GetStart(), decoded_fsm.GetEnds());
-}
-
 }  // namespace
 
 class RegexIR {
@@ -1006,21 +991,19 @@ Result<FSMWithStartEnd> RegexFSMBuilder::BuildForJSONString(const std::string& r
   if (build_result.IsErr()) {
     return build_result;
   }
-  return ResultOk(EncodeFSMForJSONString(std::move(build_result).Unwrap()));
-}
-
-Result<FSMWithStartEnd> RegexFSMBuilder::BuildForJSONStringWithDecodedDFA(
-    const std::string& regex, int max_num_states
-) {
-  auto build_result = Build(regex);
-  if (build_result.IsErr()) {
-    return build_result;
+  auto fsm_wse = std::move(build_result).Unwrap();
+  const auto& fsm = fsm_wse.GetFsm();
+  FSM new_fsm(fsm_wse.NumStates());
+  for (int state = 0; state < fsm_wse.NumStates(); ++state) {
+    for (const auto& edge : fsm.GetEdges(state)) {
+      if (edge.IsCharRange()) {
+        AddJSONStringByteRange(&new_fsm, state, edge.target, edge.min, edge.max);
+      } else {
+        new_fsm.AddEdge(state, edge.target, edge.min, edge.max);
+      }
+    }
   }
-  auto dfa_result = std::move(build_result).Unwrap().ToDFA(max_num_states);
-  if (dfa_result.IsErr()) {
-    return dfa_result;
-  }
-  return ResultOk(EncodeFSMForJSONString(std::move(dfa_result).Unwrap()));
+  return ResultOk(FSMWithStartEnd(new_fsm, fsm_wse.GetStart(), fsm_wse.GetEnds()));
 }
 
 class TrieFSMBuilderImpl {
