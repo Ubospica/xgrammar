@@ -97,6 +97,56 @@ def test_bounded_character_class_repeat_counts_decoded_characters():
     assert not _is_grammar_accept_string(grammar, r'"A\u0061"')
 
 
+def test_pattern_and_length_constraints_are_conjoined():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "[0-9a-fA-F]+", "minLength": 4, "maxLength": 4})
+    )
+    assert _is_grammar_accept_string(grammar, '"01aF"')
+    assert _is_grammar_accept_string(grammar, r'"0\u0031aF"')
+    assert not _is_grammar_accept_string(grammar, '"01a"')
+    assert not _is_grammar_accept_string(grammar, '"01aF5"')
+    # JSON Schema patterns use search semantics, so every four-character value containing at
+    # least one hexadecimal run is valid. A value with no matching substring is rejected.
+    assert not _is_grammar_accept_string(grammar, '"wxyz"')
+
+
+def test_pattern_and_length_count_unicode_code_points():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "a", "minLength": 2, "maxLength": 2})
+    )
+    assert _is_grammar_accept_string(grammar, '"éa"')
+    assert _is_grammar_accept_string(grammar, '"😀a"')
+    assert not _is_grammar_accept_string(grammar, '"a"')
+    assert not _is_grammar_accept_string(grammar, '"aaa"')
+
+
+def test_open_ended_simple_repeat_is_tightened_by_length():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "^[a-z]{2,}$", "minLength": 4, "maxLength": 5})
+    )
+    assert _is_grammar_accept_string(grammar, '"abcd"')
+    assert _is_grammar_accept_string(grammar, '"abcde"')
+    assert not _is_grammar_accept_string(grammar, '"abc"')
+    assert not _is_grammar_accept_string(grammar, '"abcdef"')
+
+
+def test_disjoint_simple_pattern_and_length_constraints_are_unsatisfiable():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "^[a-z]{1,2}$", "minLength": 3, "maxLength": 4})
+    )
+    assert not _is_grammar_accept_string(grammar, '"ab"')
+    assert not _is_grammar_accept_string(grammar, '"abc"')
+
+
+def test_unbounded_simple_pattern_repeat_is_tightened_by_length():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "^[0-9a-z-]*$", "minLength": 4, "maxLength": 63})
+    )
+    assert _is_grammar_accept_string(grammar, '"a-b9"')
+    assert not _is_grammar_accept_string(grammar, '"abc"')
+    assert not _is_grammar_accept_string(grammar, '"aBcd"')
+
+
 def test_bounded_character_class_repeat_handles_json_escape_forms():
     grammar = xgr.Grammar.from_json_schema(
         json.dumps({"type": "string", "pattern": r'^["\\/\n]{4}$'})

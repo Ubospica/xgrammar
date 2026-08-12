@@ -407,6 +407,7 @@ class JSONSchemaConverter {
   std::string GetWhitespacePattern() const;
 
   int32_t Empty();
+  int32_t Impossible();
   int32_t ByteString(const std::string& value);
   int32_t TagDispatch(bool loop_after_dispatch, std::vector<std::string> excludes);
   int32_t RuleRef(int32_t rule_id);
@@ -428,7 +429,13 @@ class JSONSchemaConverter {
   );
 
   /*! \brief Compile a JSON Schema pattern with search and branch-local anchor semantics. */
-  int32_t JSONSchemaPatternExpression(const std::string& regex);
+  int32_t JSONSchemaPatternExpression(
+      const std::string& regex,
+      std::optional<std::pair<int32_t, int32_t>> decoded_length_bounds = std::nullopt
+  );
+
+  int32_t FSMExpression(FSMWithStartEnd fsm, const std::string& rule_name_hint);
+  int32_t ByteRangeExpression(int32_t lower, int32_t upper);
 
   /*! \brief Helper to create rule with repetition constraints. */
   int32_t GetPropertyWithNumberConstraints(
@@ -517,10 +524,12 @@ class JSONSchemaConverter {
 
   // Reused grammar expression ids
   std::optional<int32_t> empty_expr_id_;
+  std::optional<int32_t> impossible_expr_id_;
   std::unordered_map<std::string, int32_t> byte_string_expr_ids_;
   std::unordered_map<int32_t, int32_t> rule_ref_expr_ids_;
   std::unordered_map<std::string, int32_t> regex_expr_ids_;
   std::unordered_map<std::string, int32_t> json_schema_pattern_expr_ids_;
+  std::map<std::pair<int32_t, int32_t>, int32_t> byte_range_expr_ids_;
   std::optional<int32_t> whitespace_expr_id_;
 
   // Helper for integer/number range regex generation
