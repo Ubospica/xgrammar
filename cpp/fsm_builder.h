@@ -47,11 +47,6 @@ class RegexFSMBuilder {
    * \return The FSM with start and end states.
    */
   static Result<FSMWithStartEnd> BuildForJSONString(const std::string& regex);
-
-  /*! \brief Encode a deterministic byte FSM over decoded JSON-string contents as an FSM over
-   * JSON source bytes. Raw JSON spellings, short escapes, and \u00XX spellings are preserved in
-   * the same way as BuildForJSONString. */
-  static Result<FSMWithStartEnd> EncodeDFAForJSONString(FSMWithStartEnd decoded_dfa);
 };
 
 /*!

@@ -243,27 +243,18 @@ FSMWithStartEnd BuildJSONStringCodePointFSM() {
   return FSMWithStartEnd(std::move(fsm), start, {end});
 }
 
-/*! \brief Return the decoded UTF-8 byte language for one Unicode scalar value. */
-FSMWithStartEnd BuildUTF8CodePointFSM() {
-  FSM fsm(2);
-  constexpr int32_t start = 0;
-  constexpr int32_t end = 1;
-  fsm.AddEdge(start, end, 0x00, 0x7F);
-  AddByteRangeSequence(&fsm, start, end, {{0xC2, 0xDF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xE0, 0xE0}, {0xA0, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xE1, 0xEC}, {0x80, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xED, 0xED}, {0x80, 0x9F}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xEE, 0xEF}, {0x80, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xF0, 0xF0}, {0x90, 0xBF}, {0x80, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xF1, 0xF3}, {0x80, 0xBF}, {0x80, 0xBF}, {0x80, 0xBF}});
-  AddByteRangeSequence(&fsm, start, end, {{0xF4, 0xF4}, {0x80, 0x8F}, {0x80, 0xBF}, {0x80, 0xBF}});
-  return FSMWithStartEnd(std::move(fsm), start, {end});
-}
+/*! \brief Return the JSON source-byte language whose decoded length is within the bounds. */
+FSMWithStartEnd BuildJSONStringLengthFSM(int32_t min_length, int32_t max_length) {
+  static const FSMWithStartEnd code_point_dfa = []() {
+    auto dfa = BuildJSONStringCodePointFSM().ToDFA(/*max_num_states=*/1000);
+    XGRAMMAR_CHECK(dfa.IsOk()) << "Internal JSON code-point FSM must be determinizable";
+    return std::move(dfa).Unwrap();
+  }();
 
-FSMWithStartEnd BuildRepeatedCodePointFSM(
-    const FSMWithStartEnd& code_point_dfa, int32_t min_length, int32_t max_length
-) {
   const int32_t copies = max_length == -1 ? std::max(min_length, 1) : max_length;
+  // Boundary state N means exactly N decoded code points have been consumed. Each copy of the
+  // code-point DFA maps its start/end directly onto adjacent boundaries, so no epsilon
+  // determinization is needed even for large finite limits.
   FSM result(copies + 1);
   std::vector<int32_t> ends;
   for (int32_t count = min_length; count <= copies; ++count) {
@@ -294,26 +285,6 @@ FSMWithStartEnd BuildRepeatedCodePointFSM(
     add_code_point_copy(copies, copies);
   }
   return FSMWithStartEnd(std::move(result), /*start=*/0, std::move(ends), /*is_dfa=*/true);
-}
-
-/*! \brief Return the JSON source-byte language whose decoded length is within the bounds. */
-FSMWithStartEnd BuildJSONStringLengthFSM(int32_t min_length, int32_t max_length) {
-  static const FSMWithStartEnd code_point_dfa = []() {
-    auto dfa = BuildJSONStringCodePointFSM().ToDFA(/*max_num_states=*/1000);
-    XGRAMMAR_CHECK(dfa.IsOk()) << "Internal JSON code-point FSM must be determinizable";
-    return std::move(dfa).Unwrap();
-  }();
-
-  return BuildRepeatedCodePointFSM(code_point_dfa, min_length, max_length);
-}
-
-FSMWithStartEnd BuildUTF8LengthFSM(int32_t min_length, int32_t max_length) {
-  static const FSMWithStartEnd code_point_dfa = []() {
-    auto dfa = BuildUTF8CodePointFSM().ToDFA(/*max_num_states=*/1000);
-    XGRAMMAR_CHECK(dfa.IsOk()) << "Internal UTF-8 code-point FSM must be determinizable";
-    return std::move(dfa).Unwrap();
-  }();
-  return BuildRepeatedCodePointFSM(code_point_dfa, min_length, max_length);
 }
 
 struct RegexScanState {
@@ -3129,47 +3100,9 @@ int32_t JSONSchemaConverter::GenerateString(const StringSpec& spec, const std::s
   // products would inflate conversion time by hundreds of milliseconds.
   if (!spec.format.has_value() && spec.pattern.has_value() && has_length && spec.max_length != -1 &&
       spec.max_length <= 32) {
-    // Intersect before JSON encoding when the decoded pattern is small. This keeps one length
-    // counter per decoded UTF-8 code point instead of multiplying every JSON escape decoder state
-    // by every pattern state. The encoder deliberately preserves the same source spellings as the
-    // legacy BuildForJSONString path; if any budget or structural check fails, retain the source-
-    // byte product below as the semantic fallback.
-    const std::string rewritten_pattern = RewriteJSONSchemaPatternForFullMatch(*spec.pattern);
-    auto decoded_pattern = RegexFSMBuilder::Build(rewritten_pattern);
-    if (decoded_pattern.IsOk()) {
-      auto decoded_pattern_dfa =
-          std::move(decoded_pattern).Unwrap().ToDFA(kJSONSchemaPatternDFAStateLimit);
-      auto decoded_length_dfa = BuildUTF8LengthFSM(spec.min_length, spec.max_length)
-                                    .ToDFA(kJSONSchemaPatternDFAStateLimit);
-      if (decoded_pattern_dfa.IsOk() && decoded_length_dfa.IsOk() &&
-          static_cast<int64_t>(decoded_pattern_dfa.ValueRef().NumStates()) *
-                  decoded_length_dfa.ValueRef().NumStates() <=
-              kStringConstraintStateLimit) {
-        auto decoded_intersection = FSMWithStartEnd::Intersect(
-            std::move(decoded_pattern_dfa).Unwrap(),
-            std::move(decoded_length_dfa).Unwrap(),
-            kStringConstraintStateLimit
-        );
-        if (decoded_intersection.IsOk()) {
-          auto minimized =
-              std::move(decoded_intersection).Unwrap().MinimizeDFA(kStringConstraintStateLimit);
-          if (minimized.IsOk()) {
-            auto encoded = RegexFSMBuilder::EncodeDFAForJSONString(std::move(minimized).Unwrap());
-            if (encoded.IsOk() && encoded.ValueRef().NumStates() <= kStringConstraintStateLimit) {
-              return Sequence(
-                  {ByteString("\""),
-                   CachedFSMExpression(
-                       std::move(encoded).Unwrap(), rule_name + "_string_constraint"
-                   ),
-                   ByteString("\"")}
-              );
-            }
-          }
-        }
-      }
-    }
-
-    auto pattern_result = GrammarFSMBuilder::Regex(rewritten_pattern, /*json_string=*/true);
+    auto pattern_result = GrammarFSMBuilder::Regex(
+        RewriteJSONSchemaPatternForFullMatch(*spec.pattern), /*json_string=*/true
+    );
     if (pattern_result.IsOk()) {
       auto pattern_dfa = std::move(pattern_result).Unwrap().ToDFA(kStringConstraintStateLimit);
       auto length_dfa = BuildJSONStringLengthFSM(spec.min_length, spec.max_length)

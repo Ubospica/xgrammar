@@ -436,22 +436,6 @@ TEST(XGrammarFSMBuilderTest, TestRegexBuildForJSONString) {
   EXPECT_FALSE(fsm_wse.AcceptString("\\q"));
 }
 
-TEST(XGrammarFSMBuilderTest, TestEncodeDFAForJSONString) {
-  auto decoded = RegexFSMBuilder::Build("a|[0-9]").Unwrap().ToDFA(100).Unwrap();
-  auto encoded = RegexFSMBuilder::EncodeDFAForJSONString(std::move(decoded)).Unwrap();
-  EXPECT_TRUE(encoded.IsDFA());
-  EXPECT_TRUE(encoded.AcceptString("a"));
-  EXPECT_TRUE(encoded.AcceptString("7"));
-  EXPECT_TRUE(encoded.AcceptString("\\u0061"));
-  EXPECT_TRUE(encoded.AcceptString("\\u0037"));
-  EXPECT_FALSE(encoded.AcceptString("b"));
-  EXPECT_FALSE(encoded.AcceptString("\\u0062"));
-  EXPECT_FALSE(encoded.AcceptString("\\q"));
-
-  auto nondeterministic = RegexFSMBuilder::Build("a|a").Unwrap();
-  EXPECT_TRUE(RegexFSMBuilder::EncodeDFAForJSONString(std::move(nondeterministic)).IsErr());
-}
-
 TEST(XGrammarFSMBuilderTest, TestGrammarFSMBuilderRegex) {
   // The compiled regex automaton must preserve the language after simplification.
   auto fsm_wse = GrammarFSMBuilder::Regex("(ab)+").Unwrap();

@@ -169,115 +169,6 @@ void AddJSONStringByteRange(FSM* fsm, int from, int to, int low, int high) {
   }
 }
 
-Result<FSMWithStartEnd> EncodeDFAForJSONStringImpl(FSMWithStartEnd decoded_dfa) {
-  if (!decoded_dfa.IsLeaf() || !decoded_dfa.IsDFA()) {
-    return ResultErr("EncodeDFAForJSONString requires a deterministic byte FSM");
-  }
-  const auto& decoded_fsm = decoded_dfa.GetFsm();
-  FSM encoded_fsm(decoded_dfa.NumStates());
-
-  static constexpr std::array<std::pair<int, char>, 8> kShortEscapes = {
-      std::pair<int, char>{'"', '"'},
-      {'\\', '\\'},
-      {'/', '/'},
-      {'\b', 'b'},
-      {'\f', 'f'},
-      {'\n', 'n'},
-      {'\r', 'r'},
-      {'\t', 't'},
-  };
-  for (int state = 0; state < decoded_dfa.NumStates(); ++state) {
-    std::array<int, 128> ascii_targets;
-    ascii_targets.fill(FSM::kNoNextState);
-    for (const auto& edge : decoded_fsm.GetEdges(state)) {
-      if (!edge.IsCharRange()) {
-        return ResultErr("EncodeDFAForJSONString requires character-only transitions");
-      }
-      for (int byte = std::max(edge.min, 0); byte <= std::min(edge.max, 0x7F); ++byte) {
-        if (ascii_targets[byte] != FSM::kNoNextState && ascii_targets[byte] != edge.target) {
-          return ResultErr("EncodeDFAForJSONString received overlapping transitions");
-        }
-        ascii_targets[byte] = edge.target;
-      }
-      static constexpr std::array<std::pair<int, int>, 3> kRawAllowed = {
-          std::pair<int, int>{0x20, 0x21}, {0x23, 0x5B}, {0x5D, 0xFF}
-      };
-      for (const auto& allowed : kRawAllowed) {
-        int low = std::max(edge.min, allowed.first);
-        int high = std::min(edge.max, allowed.second);
-        if (low <= high) {
-          encoded_fsm.AddEdge(state, edge.target, low, high);
-        }
-      }
-    }
-
-    if (std::all_of(ascii_targets.begin(), ascii_targets.end(), [](int target) {
-          return target == FSM::kNoNextState;
-        })) {
-      continue;
-    }
-
-    int after_slash = encoded_fsm.AddState();
-    int after_u = encoded_fsm.AddState();
-    int after_u0 = encoded_fsm.AddState();
-    int after_u00 = encoded_fsm.AddState();
-    encoded_fsm.AddEdge(state, after_slash, '\\', '\\');
-    encoded_fsm.AddEdge(after_slash, after_u, 'u', 'u');
-    encoded_fsm.AddEdge(after_u, after_u0, '0', '0');
-    encoded_fsm.AddEdge(after_u0, after_u00, '0', '0');
-
-    for (const auto& escaped : kShortEscapes) {
-      int target = ascii_targets[escaped.first];
-      if (target != FSM::kNoNextState) {
-        encoded_fsm.AddEdge(after_slash, target, escaped.second, escaped.second);
-      }
-    }
-
-    using LowNibbleTargets = std::array<int, 16>;
-    std::vector<std::pair<LowNibbleTargets, int>> profile_states;
-    for (int high = 0; high <= 7; ++high) {
-      LowNibbleTargets profile;
-      for (int low = 0; low <= 15; ++low) {
-        profile[low] = ascii_targets[(high << 4) | low];
-      }
-      if (std::all_of(profile.begin(), profile.end(), [](int target) {
-            return target == FSM::kNoNextState;
-          })) {
-        continue;
-      }
-
-      auto existing =
-          std::find_if(profile_states.begin(), profile_states.end(), [&](const auto& item) {
-            return item.first == profile;
-          });
-      if (existing != profile_states.end()) {
-        AddHexDigitRange(&encoded_fsm, after_u00, existing->second, high, high);
-        continue;
-      }
-
-      int after_high = encoded_fsm.AddState();
-      profile_states.emplace_back(profile, after_high);
-      AddHexDigitRange(&encoded_fsm, after_u00, after_high, high, high);
-      for (int low = 0; low <= 15;) {
-        int target = profile[low];
-        if (target == FSM::kNoNextState) {
-          ++low;
-          continue;
-        }
-        int last = low;
-        while (last + 1 <= 15 && profile[last + 1] == target) {
-          ++last;
-        }
-        AddHexDigitRange(&encoded_fsm, after_high, target, low, last);
-        low = last + 1;
-      }
-    }
-  }
-  return ResultOk(FSMWithStartEnd(
-      std::move(encoded_fsm), decoded_dfa.GetStart(), decoded_dfa.GetEnds(), /*is_dfa=*/true
-  ));
-}
-
 }  // namespace
 
 class RegexIR {
@@ -1113,10 +1004,6 @@ Result<FSMWithStartEnd> RegexFSMBuilder::BuildForJSONString(const std::string& r
     }
   }
   return ResultOk(FSMWithStartEnd(new_fsm, fsm_wse.GetStart(), fsm_wse.GetEnds()));
-}
-
-Result<FSMWithStartEnd> RegexFSMBuilder::EncodeDFAForJSONString(FSMWithStartEnd decoded_dfa) {
-  return EncodeDFAForJSONStringImpl(std::move(decoded_dfa));
 }
 
 class TrieFSMBuilderImpl {
