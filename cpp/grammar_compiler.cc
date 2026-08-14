@@ -1505,6 +1505,7 @@ const RuntimeJSONStringTokenSummary& CompiledGrammar::Impl::GetRuntimeJSONString
   DynamicBitset structurally_accepted_bitset(tokenizer_info.GetVocabSize());
   std::vector<int32_t> boundary_accepted_indices;
   std::vector<int32_t> uncertain_indices;
+  int32_t max_uncertain_token_chars = 0;
   boundary_accepted_indices.reserve(adaptive_token_mask.uncertain_indices.size());
   uncertain_indices.reserve(adaptive_token_mask.uncertain_indices.size());
 
@@ -1558,6 +1559,7 @@ const RuntimeJSONStringTokenSummary& CompiledGrammar::Impl::GetRuntimeJSONString
     }
     if (uncertain) {
       uncertain_indices.push_back(index);
+      max_uncertain_token_chars = std::max(max_uncertain_token_chars, token_char_counts[index]);
     }
   }
 
@@ -1565,7 +1567,8 @@ const RuntimeJSONStringTokenSummary& CompiledGrammar::Impl::GetRuntimeJSONString
       std::make_shared<const RuntimeJSONStringTokenSummary>(RuntimeJSONStringTokenSummary{
           std::move(structurally_accepted_bitset),
           std::move(boundary_accepted_indices),
-          std::move(uncertain_indices)
+          std::move(uncertain_indices),
+          max_uncertain_token_chars
       });
   std::lock_guard<std::mutex> lock(runtime_json_string_token_summaries_mutex);
   return *runtime_json_string_token_summaries.emplace(key, std::move(computed)).first->second;

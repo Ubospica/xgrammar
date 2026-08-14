@@ -1539,6 +1539,41 @@ def test_untyped_object_combinator_preserves_non_objects_and_constrains_objects(
         assert not _is_grammar_accept_string(grammar, json.dumps(instance)), instance
 
 
+def test_strict_anyof_sibling_object_type_preserves_closed_branch_constraints():
+    schema = {
+        "type": "object",
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"error": {"type": "string"}},
+                "required": ["error"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "expectation": {"type": "string"},
+                    "payloadField": {"type": "string"},
+                    "value": {"type": ["string", "null"]},
+                },
+                "required": ["expectation", "payloadField"],
+                "additionalProperties": False,
+            },
+        ],
+    }
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps(schema), any_whitespace=False, strict_mode=True
+    )
+    for instance in ({"error": "bad input"}, {"expectation": "text", "payloadField": "body"}):
+        assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+    for instance in (
+        {"error": "bad input", "expectation": "text"},
+        {"value": 123},
+        {"expectation": "text", "payloadField": "body", "value": 123},
+    ):
+        assert not _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+
+
 def test_object_allof_preserves_single_pattern_properties_set():
     schema = {
         "$defs": {
@@ -1658,6 +1693,27 @@ def test_allof_pattern_properties_can_supply_exact_required_names():
     wrong_value = dict(valid)
     wrong_value["bridge_start"] = "not a number"
     assert not _is_grammar_accept_string(grammar, json.dumps(wrong_value))
+
+
+def test_pattern_properties_required_names_preserve_schema_order():
+    schema = {
+        "type": "object",
+        "patternProperties": {"Normal|Fighting": {"type": "number", "minimum": 0, "maximum": 2}},
+        "required": ["Normal", "Fighting"],
+        "additionalProperties": False,
+    }
+    ordered = xgr.Grammar.from_json_schema(
+        json.dumps(schema), any_whitespace=False, strict_mode=True
+    )
+    assert _is_grammar_accept_string(ordered, '{"Normal": 1, "Fighting": 1}')
+    assert not _is_grammar_accept_string(ordered, '{"Fighting": 1, "Normal": 1}')
+
+    any_order = xgr.Grammar.from_json_schema(
+        json.dumps(schema), any_whitespace=False, strict_mode=True, any_order=True
+    )
+    assert _is_grammar_accept_string(any_order, '{"Fighting": 1, "Normal": 1}')
+    assert not _is_grammar_accept_string(any_order, '{"Normal": 3, "Fighting": 1}')
+    assert not _is_grammar_accept_string(any_order, '{"Normal": 1}')
 
 
 def test_unsatisfiable_items_schema_does_not_make_array_schema_uncompilable():

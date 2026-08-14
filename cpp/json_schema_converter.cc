@@ -4323,10 +4323,16 @@ Result<ObjectSpec, SchemaError> SchemaParser::ParseObject(const picojson::object
     std::unordered_set<std::string> named_properties;
     for (const auto& property : spec.properties) named_properties.insert(property.name);
     std::vector<std::string> undeclared_required;
-    for (const auto& required_name : spec.required) {
-      if (!named_properties.count(required_name)) undeclared_required.push_back(required_name);
+    std::unordered_set<std::string> seen_undeclared_required;
+    if (schema.count("required")) {
+      for (const auto& required_value : schema.at("required").get<picojson::array>()) {
+        const auto& required_name = required_value.get<std::string>();
+        if (!named_properties.count(required_name) &&
+            seen_undeclared_required.insert(required_name).second) {
+          undeclared_required.push_back(required_name);
+        }
+      }
     }
-    std::sort(undeclared_required.begin(), undeclared_required.end());
     for (const auto& required_name : undeclared_required) {
       SchemaSpecPtr value_schema;
       std::vector<std::string> matching_patterns;
@@ -4480,6 +4486,27 @@ picojson::value SchemaParser::ConjoinWithSiblingAssertions(
     resolved = target;
   }
 
+  picojson::object remaining_sibling_assertions = sibling_assertions;
+  if (resolved->is<picojson::object>()) {
+    const auto& object = resolved->get<picojson::object>();
+    for (auto it = remaining_sibling_assertions.begin();
+         it != remaining_sibling_assertions.end();) {
+      auto option_it = object.find(it->first);
+      if (option_it != object.end() &&
+          option_it->second.serialize(false) == it->second.serialize(false)) {
+        it = remaining_sibling_assertions.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    // Avoid manufacturing an allOf for an assertion the option already enforces. In strict mode,
+    // a synthetic duplicate {"type":"object"} conjunct would otherwise be narrowed to an empty
+    // closed object and make exact object merging fail.
+    if (remaining_sibling_assertions.empty()) {
+      return option;
+    }
+  }
+
   if (resolved->is<picojson::object>()) {
     const auto& object = resolved->get<picojson::object>();
     // Match Parse()'s keyword precedence. const/enum remain terminal even if a lower-precedence
@@ -4508,13 +4535,13 @@ picojson::value SchemaParser::ConjoinWithSiblingAssertions(
       if (!nested_sibling_assertions.empty()) {
         common_assertions.emplace_back(std::move(nested_sibling_assertions));
       }
-      common_assertions.emplace_back(sibling_assertions);
+      common_assertions.emplace_back(remaining_sibling_assertions);
       distributed["allOf"] = picojson::value(std::move(common_assertions));
       return picojson::value(std::move(distributed));
     }
   }
 
-  picojson::array conjunction{option, picojson::value(sibling_assertions)};
+  picojson::array conjunction{option, picojson::value(std::move(remaining_sibling_assertions))};
   picojson::object wrapped;
   wrapped["allOf"] = picojson::value(std::move(conjunction));
   return picojson::value(std::move(wrapped));

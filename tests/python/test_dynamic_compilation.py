@@ -269,6 +269,83 @@ def test_shared_repeat_masks_preserve_runtime_json_length_states_concurrently():
             torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
+def test_runtime_json_string_mask_cache_matches_fresh_replay_across_contexts():
+    vocabulary = [
+        '{"x": "',
+        "a",
+        "aa",
+        r"\u0061",
+        '", "y": "',
+        "b",
+        "bb",
+        '"}',
+        'a"}',
+        'aa", "y": "',
+        r"\"",
+        "\\",
+        b"\xc3",
+        b"\xff",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(
+        {
+            "type": "object",
+            "properties": {
+                "x": {"type": "string", "minLength": 2, "maxLength": 64},
+                "y": {"type": "string", "minLength": 2, "maxLength": 64},
+            },
+            "required": ["x", "y"],
+            "additionalProperties": False,
+        },
+        any_whitespace=False,
+        strict_mode=True,
+    )
+    sequences = [
+        [0, 1, 2, 3, 4, 5, 6, 7],
+        [0, 2, 1, 2, 4, 6, 5, 6, 7],
+        [0, *([2] * 31), 1, 4, 5, 6, 7],
+    ]
+
+    cached = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    cached_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    fresh_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    for sequence in sequences:
+        cached.reset()
+        prefix = []
+        for token_id in sequence:
+            xgr.reset_token_bitmask(cached_mask)
+            cached.fill_next_token_bitmask(cached_mask)
+
+            fresh = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+            assert all(fresh.accept_token(previous) for previous in prefix)
+            xgr.reset_token_bitmask(fresh_mask)
+            fresh.fill_next_token_bitmask(fresh_mask)
+            torch.testing.assert_close(cached_mask, fresh_mask, rtol=0, atol=0)
+
+            assert cached.accept_token(token_id)
+            prefix.append(token_id)
+        assert cached.is_terminated()
+
+    cached.reset()
+    rollback_prefix = [0, 2, 1, 2]
+    for token_id in rollback_prefix:
+        xgr.reset_token_bitmask(cached_mask)
+        cached.fill_next_token_bitmask(cached_mask)
+        assert cached.accept_token(token_id)
+    cached.rollback(2)
+    rollback_prefix = rollback_prefix[:-2]
+    fresh = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    assert all(fresh.accept_token(token_id) for token_id in rollback_prefix)
+    xgr.reset_token_bitmask(fresh_mask)
+    fresh.fill_next_token_bitmask(fresh_mask)
+    for restored in (cached, cached.fork()):
+        xgr.reset_token_bitmask(cached_mask)
+        restored.fill_next_token_bitmask(cached_mask)
+        torch.testing.assert_close(cached_mask, fresh_mask, rtol=0, atol=0)
+
+
 def test_streaming_literal_pattern_masks_are_shared_concurrently():
     alternatives = ["bcd", "abce", "he", "she", "his", "hers"] + [
         f"region-{index:03d}" for index in range(96)

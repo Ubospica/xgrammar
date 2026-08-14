@@ -528,6 +528,7 @@ class GrammarMatcher::Impl : public EarleyParser {
     temporary_input_bytes_.clear();
     accepted_bytes_.clear();
     row_byte_end_.assign(1, 0);
+    runtime_json_string_mask_cache_.clear();
     EarleyParser::Reset();
   }
 
@@ -555,6 +556,14 @@ class GrammarMatcher::Impl : public EarleyParser {
 
   std::optional<std::vector<int32_t>> GetStableCharacterClassRepeatMaskKey(
       const std::vector<ParserState>& states
+  ) const;
+
+  /*! \brief Return a cache key for a runtime-constrained JSON string whose one-token language is
+   * invariant across interior decoded-character counts. */
+  std::optional<std::vector<int32_t>> GetStableRuntimeJSONStringMaskKey(
+      const std::vector<ParserState>& states,
+      const ParserState& target_state,
+      int32_t max_uncertain_token_chars
   ) const;
 
   /*!
@@ -768,12 +777,18 @@ class GrammarMatcher::Impl : public EarleyParser {
   };
   std::vector<StateWithTokenMask> tmp_latest_states_with_masks_;
   std::vector<int32_t> tmp_runtime_constraint_indices_;
+  DynamicBitset tmp_runtime_uncertain_accepted_bitset_{tokenizer_info_.GetVocabSize()};
   bool repeat_mask_cache_enabled_{false};
   struct RepeatMaskCacheEntry {
     std::vector<int32_t> key;
     DynamicBitset mask;
   };
   std::vector<RepeatMaskCacheEntry> repeat_mask_cache_;
+  struct RuntimeJSONStringUncertainCacheEntry {
+    std::vector<int32_t> key;
+    DynamicBitset mask;
+  };
+  std::vector<RuntimeJSONStringUncertainCacheEntry> runtime_json_string_mask_cache_;
 
   class ContinuationTransitionCache;
 };
@@ -1327,6 +1342,117 @@ std::optional<std::vector<int32_t>> GrammarMatcher::Impl::GetStableCharacterClas
     }
   }
   return found_repeat ? std::optional<std::vector<int32_t>>(std::move(key)) : std::nullopt;
+}
+
+std::optional<std::vector<int32_t>> GrammarMatcher::Impl::GetStableRuntimeJSONStringMaskKey(
+    const std::vector<ParserState>& states,
+    const ParserState& target_state,
+    int32_t max_uncertain_token_chars
+) const {
+  if (!repeat_mask_cache_enabled_ || has_budget_rules_ || has_char_budget_rules_ ||
+      capture_tracking_ || states.empty() || max_uncertain_token_chars < 0) {
+    return std::nullopt;
+  }
+  const int32_t current_row = rule_id_to_completable_states_.size() - 1;
+  if (current_row <= 0) {
+    return std::nullopt;
+  }
+
+  constexpr int32_t kCurrentRow = -2;
+  constexpr int32_t kPreviousRow = -3;
+  constexpr int32_t kEquivalentCharacterCount = -2;
+  constexpr size_t kParserStateFieldCount = 17;
+  std::vector<int32_t> key;
+  key.reserve(
+      3 + (states.size() + rule_id_to_completable_states_[current_row].size() + 1) *
+              (kParserStateFieldCount + 1)
+  );
+  key.push_back(static_cast<int32_t>(states.size()));
+  key.push_back(IsCompleted());
+
+  auto is_stable_runtime_state = [&](const ParserState& state) {
+    if (state.json_string_length_rule_id < 0 || state.GetJSONStringDecodeState() != 0 ||
+        state.json_string_pending_high_surrogate != 0 || state.GetJSONStringPatternState() != -1) {
+      return false;
+    }
+    const auto& rule = grammar_->GetRule(state.json_string_length_rule_id);
+    if (rule.HasJSONNumberConstraint() ||
+        grammar_features_->GetJSONStringPatternDFA(state.json_string_length_rule_id) != nullptr ||
+        state.json_string_char_count < rule.json_string_min_chars) {
+      return false;
+    }
+    return rule.json_string_max_chars < 0 ||
+           rule.json_string_max_chars - state.json_string_char_count >= max_uncertain_token_chars;
+  };
+  auto append_state = [&](const ParserState& state, int32_t normalized_rule_start_pos) {
+    const bool normalize_runtime = is_stable_runtime_state(state);
+    key.insert(
+        key.end(),
+        {state.rule_id,
+         state.sequence_id,
+         state.element_id,
+         normalized_rule_start_pos,
+         state.budget_deadline,
+         state.sub_element_id,
+         state.repeat_count,
+         state.partial_codepoint,
+         state.active_temperature_rule_id,
+         state.char_budget_deadline,
+         normalize_runtime ? kEquivalentCharacterCount : state.json_string_char_count,
+         state.json_string_decode_state,
+         state.json_string_pending_high_surrogate,
+         state.json_string_length_rule_id,
+         state.json_string_pattern_state,
+         state.json_object_required_rule_id,
+         state.json_object_required_state_id}
+    );
+  };
+
+  if (!is_stable_runtime_state(target_state) || target_state.rule_start_pos != current_row) {
+    return std::nullopt;
+  }
+  // The full normalized target state disambiguates structurally identical runtime states that
+  // carry different parent-independent parser metadata.
+  append_state(target_state, kCurrentRow);
+
+  int32_t runtime_state_count = 0;
+  for (const auto& state : states) {
+    if (state.json_string_length_rule_id >= 0) {
+      if (!is_stable_runtime_state(state) || state.rule_start_pos != current_row ||
+          state.json_object_required_rule_id >= 0) {
+        return std::nullopt;
+      }
+      ++runtime_state_count;
+      append_state(state, kCurrentRow);
+      continue;
+    }
+    if (state.rule_id < 0 ||
+        state.rule_id >= static_cast<int32_t>(compiled_grammar_->rule_level_cacheable.size()) ||
+        !compiled_grammar_->rule_level_cacheable[state.rule_id] ||
+        state.json_object_required_rule_id >= 0) {
+      return std::nullopt;
+    }
+    append_state(state, state.rule_start_pos);
+  }
+  if (runtime_state_count == 0) {
+    return std::nullopt;
+  }
+
+  const auto& completable_states = rule_id_to_completable_states_[current_row];
+  if (static_cast<int32_t>(completable_states.size()) != runtime_state_count) {
+    return std::nullopt;
+  }
+  key.push_back(static_cast<int32_t>(completable_states.size()));
+  for (const auto& [completed_rule_id, parent] : completable_states) {
+    if (completed_rule_id != parent.json_string_length_rule_id ||
+        !is_stable_runtime_state(parent) || parent.rule_start_pos != current_row - 1 ||
+        parent.json_object_required_rule_id >= 0) {
+      return std::nullopt;
+    }
+    key.push_back(completed_rule_id);
+    append_state(parent, kPreviousRow);
+  }
+  return key;
 }
 
 class BatchGrammarMatcher::Impl {
@@ -2450,7 +2576,6 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
       return;
     }
   }
-
   // We check all the latest states of the earley parser, and check all the masks of the leaf
   // states. The final accepted token set is the union of the accepted token sets of all leaf
   // states. The final rejected token set is the intersection of the rejected token sets of all leaf
@@ -2529,6 +2654,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     tmp_rejected_indices_delta_.clear();
     const bool runtime_json_length = state_with_mask.requires_runtime_json_filter;
     const std::vector<int32_t>* indices_to_check = &adaptive_token_mask.uncertain_indices;
+    std::optional<std::vector<int32_t>> runtime_json_string_mask_key;
     if (runtime_json_length) {
       const auto& runtime_summary = compiled_grammar_->GetRuntimeJSONStringTokenSummary(
           adaptive_token_mask, state_with_mask.additional_accepted_bitset
@@ -2590,6 +2716,23 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
           }
         }
         indices_to_check = &runtime_summary.uncertain_indices;
+        runtime_json_string_mask_key = GetStableRuntimeJSONStringMaskKey(
+            latest_states, state, runtime_summary.max_uncertain_token_chars
+        );
+        if (runtime_json_string_mask_key.has_value()) {
+          const auto cached = std::find_if(
+              runtime_json_string_mask_cache_.begin(),
+              runtime_json_string_mask_cache_.end(),
+              [&](const RuntimeJSONStringUncertainCacheEntry& entry) {
+                return entry.key == *runtime_json_string_mask_key;
+              }
+          );
+          if (cached != runtime_json_string_mask_cache_.end()) {
+            tmp_accepted_bitset_ |= cached->mask;
+            continue;
+          }
+          tmp_runtime_uncertain_accepted_bitset_.Reset();
+        }
       }
     }
 
@@ -2635,7 +2778,10 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     int last_rejected_uncertain_range = 0;
     for (const auto& cur_token_idx : *indices_to_check) {
       // Check if the current token is already accepted. If it is, we can skip it.
-      if (tmp_accepted_bitset_[sorted_decoded_vocab[cur_token_idx].first]) {
+      // A runtime-string cache entry must remain a self-contained contribution from this state,
+      // even when another state already accepted the same token during this particular fill.
+      if (!runtime_json_string_mask_key.has_value() &&
+          tmp_accepted_bitset_[sorted_decoded_vocab[cur_token_idx].first]) {
         continue;
       }
 
@@ -2716,6 +2862,11 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
           adaptive_token_mask.store_type == StoreType::kAccepted) {
         if (accepted) {
           tmp_accepted_bitset_.Set(sorted_decoded_vocab[cur_token_idx].first, true);
+          if (runtime_json_string_mask_key.has_value()) {
+            tmp_runtime_uncertain_accepted_bitset_.Set(
+                sorted_decoded_vocab[cur_token_idx].first, true
+            );
+          }
         }
       } else {
         if (!accepted) {
@@ -2753,6 +2904,15 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
                          << ", rows=" << continuation_cache->CanonicalRows()
                          << ", configurations=" << continuation_cache->CanonicalConfigurations()
                          << ", enabled=" << continuation_cache->IsEnabled() << ")";
+    }
+    constexpr size_t kMaxRuntimeJSONStringMaskCacheEntries = 32;
+    if (runtime_json_string_mask_key.has_value() &&
+        runtime_json_string_mask_cache_.size() < kMaxRuntimeJSONStringMaskCacheEntries) {
+      DynamicBitset owned_mask(tokenizer_info_.GetVocabSize());
+      owned_mask = tmp_runtime_uncertain_accepted_bitset_;
+      runtime_json_string_mask_cache_.push_back(
+          RuntimeJSONStringUncertainCacheEntry{*runtime_json_string_mask_key, std::move(owned_mask)}
+      );
     }
   }
 

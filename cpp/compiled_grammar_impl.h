@@ -134,6 +134,7 @@ struct RuntimeJSONStringTokenSummary {
   DynamicBitset structurally_accepted_bitset;
   std::vector<int32_t> boundary_accepted_indices;
   std::vector<int32_t> uncertain_indices;
+  int32_t max_uncertain_token_chars;
 };
 
 /*!
