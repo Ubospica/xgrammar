@@ -2991,15 +2991,13 @@ basic_string_sub_4 ::= ((basic_string_sub_2))
 
 
 def test_limited_whitespace_compile():
-    expected_grammar = r"""whitespace ::= (([ \n\t]))
-whitespace_1 ::= (([ \n\t]))
-basic_escape ::= (([\"\\/bfnrt]) | ("u" [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9])) (=(basic_string_sub))
-basic_string_sub ::= (("\"") | ([^\0-\x1f\"\\\r\n] basic_string_sub) | ("\\" basic_escape basic_string_sub)) (=(whitespace_2{0, 2} [,}\]:]))
-basic_string ::= (("\"" basic_string_sub)) (=(whitespace_16{0, 2} "}"))
-whitespace_2 ::= (([ \n\t]))
-root ::= (("{" whitespace_13{0, 2} "\"key\"" whitespace{0, 2} ":" whitespace_1{0, 2} basic_string whitespace_16{0, 2} "}"))
-whitespace_13 ::= (([ \n\t]))
-whitespace_16 ::= (([ \n\t]))
+    expected_grammar = r"""basic_escape ::= (([\"\\/bfnrt]) | ("u" [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9])) (=(basic_string_sub))
+basic_string_sub ::= (("\"") | ([^\0-\x1f\"\\\r\n] basic_string_sub) | ("\\" basic_escape basic_string_sub)) (=(basic_string_sub_4 [,}\]:]))
+basic_string ::= (("\"" basic_string_sub)) (=(basic_string_sub_4 "}"))
+root ::= (("{" basic_string_sub_4 "\"key\"" basic_string_sub_4 ":" basic_string_sub_4 basic_string basic_string_sub_4 "}"))
+basic_string_sub_2 ::= ("" | ([ \n\t] basic_string_sub_3))
+basic_string_sub_3 ::= ("" | ([ \n\t]))
+basic_string_sub_4 ::= ((basic_string_sub_2))
 """
     schema = {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}
     tokenizer_info = xgr.TokenizerInfo([])

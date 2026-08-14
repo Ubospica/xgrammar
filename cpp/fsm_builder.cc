@@ -136,7 +136,10 @@ static void AddSameLengthCharacterRange(FSM& fsm, int from, int to, uint32_t min
     if ((max & 0x00FFFF) != 0xBFBF) {
       int tmp_state_max = fsm.AddState();
       fsm.AddEdge(from, tmp_state_max, byte_max[2], byte_max[2]);
-      AddSameLengthCharacterRange(fsm, tmp_state_max, to, 0x0080, (max & 0x00FFFF));
+      // The leading byte was consumed above, so recurse over the two remaining bytes. A
+      // one-byte lower bound would incorrectly make this upper partial branch accept only the
+      // second byte and enter the target state before the UTF-8 character is complete.
+      AddSameLengthCharacterRange(fsm, tmp_state_max, to, 0x8080, (max & 0x00FFFF));
     } else {
       byte_max[2]++;
     }

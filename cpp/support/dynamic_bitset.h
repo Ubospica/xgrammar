@@ -175,7 +175,10 @@ class DynamicBitset {
     return result < size_ ? result : -1;
   }
 
-  int FindFirstZero() const { return DoFindZeroFrom(0); }
+  int FindFirstZero() const {
+    int result = DoFindZeroFrom(0);
+    return result < size_ ? result : -1;
+  }
 
   int FindNextZero(int pos) const {
     if (pos >= size_ - 1 || size_ == 0) return -1;

@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "grammar_builder.h"
@@ -93,11 +94,7 @@ picojson::value ConstStringFormat::ToJSON() const {
 picojson::value JSONSchemaFormat::ToJSON() const {
   picojson::object obj;
   obj["type"] = picojson::value(type);
-  // Embed the schema text as a string. ToJSON is only consumed by the converter's
-  // deduplication fingerprint, so reparsing the schema into a JSON value is unnecessary
-  // and would cost a full JSON parse of potentially large schemas at every fingerprinted
-  // ancestor format.
-  obj["json_schema"] = picojson::value(json_schema);
+  obj["json_schema"] = *json_schema;
   obj["style"] = picojson::value(style);
   obj["any_order"] = picojson::value(any_order);
   if (max_whitespace_cnt.has_value()) {
@@ -317,6 +314,9 @@ class StructuralTagParser {
   static Result<StructuralTag, StructuralTagError> FromJSON(const std::string& json);
 
  private:
+  explicit StructuralTagParser(std::shared_ptr<const picojson::value> root_value)
+      : root_value_(std::move(root_value)) {}
+
   Result<StructuralTag, ISTError> ParseStructuralTag(const picojson::value& value);
 
   /*!
@@ -356,17 +356,18 @@ class StructuralTagParser {
   Result<DispatchFormat, ISTError> ParseDispatchFormat(const picojson::object& value);
   Result<TokenDispatchFormat, ISTError> ParseTokenDispatchFormat(const picojson::object& value);
 
+  std::shared_ptr<const picojson::value> root_value_;
   int parse_format_recursion_depth_ = 0;
 };
 
 Result<StructuralTag, StructuralTagError> StructuralTagParser::FromJSON(const std::string& json) {
-  picojson::value value;
-  std::string err = picojson::parse(value, json);
+  auto value = std::make_shared<picojson::value>();
+  std::string err = picojson::parse(*value, json);
   if (!err.empty()) {
     return ResultErr<InvalidJSONError>("Failed to parse JSON: " + err);
   }
   return Result<StructuralTag, StructuralTagError>::Convert(
-      StructuralTagParser().ParseStructuralTag(value)
+      StructuralTagParser(value).ParseStructuralTag(*value)
   );
 }
 
@@ -542,10 +543,10 @@ Result<JSONSchemaFormat, ISTError> StructuralTagParser::ParseJSONSchemaFormat(
     if (it != obj.end() && it->second.is<std::string>()) {
       style = it->second.get<std::string>();
       if (style != "json" && style != "qwen_xml" && style != "minimax_xml" &&
-          style != "deepseek_xml" && style != "glm_xml") {
+          style != "deepseek_xml" && style != "glm_xml" && style != "kimi_k3_xml") {
         return ResultErr<ISTError>(
-            "style must be \"json\", \"qwen_xml\", \"minimax_xml\", \"deepseek_xml\", or "
-            "\"glm_xml\""
+            "style must be \"json\", \"qwen_xml\", \"minimax_xml\", \"deepseek_xml\", "
+            "\"glm_xml\", or \"kimi_k3_xml\""
         );
       }
     }
@@ -566,10 +567,11 @@ Result<JSONSchemaFormat, ISTError> StructuralTagParser::ParseJSONSchemaFormat(
     }
     max_whitespace_cnt = static_cast<int>(max_whitespace_cnt_it->second.get<int64_t>());
   }
-  // here introduces a serialization/deserialization overhead; try to avoid it in the future.
-  return ResultOk<JSONSchemaFormat>(
-      json_schema_it->second.serialize(false), style, any_order, max_whitespace_cnt
-  );
+  // Keep an alias to the already parsed schema. root_value_ owns the full document, so the nested
+  // value remains valid after this parser returns and can be consumed without another JSON parse.
+  auto json_schema =
+      std::shared_ptr<const picojson::value>(root_value_, std::addressof(json_schema_it->second));
+  return ResultOk<JSONSchemaFormat>(std::move(json_schema), style, any_order, max_whitespace_cnt);
 }
 
 Result<AnyTextFormat, ISTError> StructuralTagParser::ParseAnyTextFormat(const picojson::object& obj
@@ -1746,10 +1748,13 @@ std::optional<ISTError> StructuralTagAnalyzer::VisitSub(RepeatFormat* format) {
 
 class StructuralTagGrammarConverter {
  public:
-  static Result<Grammar, ISTError> Convert(const StructuralTag& structural_tag);
+  static Result<Grammar, ISTError> Convert(
+      const StructuralTag& structural_tag, bool normalize_json_schema_subgrammars
+  );
 
  private:
-  StructuralTagGrammarConverter() = default;
+  explicit StructuralTagGrammarConverter(bool normalize_json_schema_subgrammars)
+      : normalize_json_schema_subgrammars_(normalize_json_schema_subgrammars) {}
 
   /*!
    * \brief Visit a Format and return the rule id of the added rule.
@@ -1758,11 +1763,6 @@ class StructuralTagGrammarConverter {
    * \note This method uses serialization to deduplicate identical formats.
    */
   Result<int, ISTError> Visit(const Format& format);
-
-  /*!
-   * \brief Dispatch a Format to the matching VisitSub overload, without fingerprinting.
-   */
-  Result<int, ISTError> VisitDispatch(const Format& format);
   Result<int, ISTError> VisitSub(const ConstStringFormat& format);
   Result<int, ISTError> VisitSub(const JSONSchemaFormat& format);
   Result<int, ISTError> VisitSub(const AnyTextFormat& format);
@@ -1790,6 +1790,7 @@ class StructuralTagGrammarConverter {
   int BuildEndExpr(const TagFormat& tag);
 
   GrammarBuilder grammar_builder_;
+  bool normalize_json_schema_subgrammars_;
 
   /*!
    * \brief Cache from format serialization to rule id.
@@ -1805,13 +1806,16 @@ bool StructuralTagGrammarConverter::IsPrefix(
          std::string_view(full_str).substr(0, prefix.size()) == prefix;
 }
 
-Result<Grammar, ISTError> StructuralTagGrammarConverter::Convert(const StructuralTag& structural_tag
+Result<Grammar, ISTError> StructuralTagGrammarConverter::Convert(
+    const StructuralTag& structural_tag, bool normalize_json_schema_subgrammars
 ) {
-  StructuralTagGrammarConverter converter;
+  StructuralTagGrammarConverter converter(normalize_json_schema_subgrammars);
   // The root format is visited exactly once, so fingerprinting the entire format tree cannot
-  // produce a cache hit. Dispatch directly; nested formats still go through Visit() and retain
-  // deduplication.
-  auto result = converter.VisitDispatch(structural_tag.format);
+  // produce a cache hit. Nested formats still go through Visit() and retain deduplication.
+  auto result = std::visit(
+      [&](const auto& format) -> Result<int, ISTError> { return converter.VisitSub(format); },
+      structural_tag.format
+  );
   if (result.IsErr()) {
     return ResultErr(std::move(result).UnwrapErr());
   }
@@ -1828,14 +1832,28 @@ Grammar StructuralTagGrammarConverter::AddRootRuleAndGetGrammar(int ref_rule_id)
   return grammar_builder_.Get(root_rule_id);
 }
 
-Result<int, ISTError> StructuralTagGrammarConverter::VisitDispatch(const Format& format) {
-  return std::visit(
-      [&](const auto& arg) -> Result<int, ISTError> { return VisitSub(arg); }, format
-  );
-}
-
 Result<int, ISTError> StructuralTagGrammarConverter::Visit(const Format& format) {
-  std::string fingerprint = FormatToJSONValue(format).serialize();
+  std::string fingerprint = std::visit(
+      [](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, JSONSchemaFormat>) {
+          // Reuse the parsed schema both for this fingerprint and for grammar conversion.
+          std::string result = "json_schema\n" + value.style + "\n";
+          result.push_back(value.any_order ? '1' : '0');
+          result.push_back('\n');
+          result.append(
+              value.max_whitespace_cnt.has_value() ? std::to_string(*value.max_whitespace_cnt)
+                                                   : std::string("null")
+          );
+          result.push_back('\n');
+          result.append(value.json_schema->serialize(false));
+          return result;
+        } else {
+          return value.ToJSON().serialize();
+        }
+      },
+      format
+  );
 
   // Check if we've already processed an identical format
   auto it = serialization_to_rule_id_.find(fingerprint);
@@ -1844,7 +1862,8 @@ Result<int, ISTError> StructuralTagGrammarConverter::Visit(const Format& format)
   }
 
   // Process the format and cache the result
-  auto result = VisitDispatch(format);
+  auto result =
+      std::visit([&](auto&& arg) -> Result<int, ISTError> { return VisitSub(arg); }, format);
   if (result.IsOk()) {
     int rule_id = std::move(result).Unwrap();
     serialization_to_rule_id_[fingerprint] = rule_id;
@@ -1867,8 +1886,8 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const JSONSchemaFo
     return ResultErr<ISTError>("Unsupported parsing type: " + format.style);
   }
   // The whitespace cap comes from the JSONSchemaFormat node (per-tag).
-  auto sub_grammar = GrammarNormalizer::Apply(JSONSchemaToGrammar(
-      format.json_schema,
+  auto sub_grammar = JSONSchemaValueToGrammar(
+      *format.json_schema,
       /*any_whitespace=*/true,
       /*indent=*/std::nullopt,
       /*separators=*/std::nullopt,
@@ -1876,7 +1895,10 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const JSONSchemaFo
       /*max_whitespace_cnt=*/format.max_whitespace_cnt,
       /*any_order=*/format.any_order,
       /*json_format=*/*json_format
-  ));
+  );
+  if (normalize_json_schema_subgrammars_) {
+    sub_grammar = GrammarNormalizer::Apply(sub_grammar);
+  }
   auto added_root_rule_id = SubGrammarAdder().Apply(&grammar_builder_, sub_grammar);
   return ResultOk(added_root_rule_id);
 }
@@ -2423,7 +2445,10 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const TokenDispatc
 /************** StructuralTag Conversion Public API **************/
 
 Result<Grammar, StructuralTagError> StructuralTagToGrammar(
-    const std::string& structural_tag_json, const std::optional<TokenizerInfo>& tokenizer_info
+    const std::string& structural_tag_json,
+    const std::optional<TokenizerInfo>& tokenizer_info,
+    bool normalize,
+    bool normalize_json_schema_subgrammars
 ) {
   auto structural_tag_result = StructuralTagParser::FromJSON(structural_tag_json);
   if (structural_tag_result.IsErr()) {
@@ -2441,11 +2466,15 @@ Result<Grammar, StructuralTagError> StructuralTagToGrammar(
     return ResultErr(std::move(err).value());
   }
 
-  auto result = StructuralTagGrammarConverter::Convert(structural_tag);
+  auto result =
+      StructuralTagGrammarConverter::Convert(structural_tag, normalize_json_schema_subgrammars);
   if (result.IsErr()) {
     return ResultErr(std::move(result).UnwrapErr());
   }
-  return ResultOk(GrammarNormalizer::Apply(std::move(result).Unwrap()));
+  if (normalize) {
+    return ResultOk(GrammarNormalizer::Apply(std::move(result).Unwrap()));
+  }
+  return ResultOk(std::move(result).Unwrap());
 }
 
 }  // namespace xgrammar

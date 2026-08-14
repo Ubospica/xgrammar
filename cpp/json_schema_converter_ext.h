@@ -7,8 +7,11 @@
 #ifndef XGRAMMAR_JSON_SCHEMA_CONVERTER_EXT_H_
 #define XGRAMMAR_JSON_SCHEMA_CONVERTER_EXT_H_
 
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "json_schema_converter.h"
 
@@ -30,7 +33,8 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
       std::optional<int> max_whitespace_cnt,
       RefResolver ref_resolver = nullptr,
       JSONFormat json_format = JSONFormat::kQwenXML,
-      bool any_order = false
+      bool any_order = false,
+      RegexFSMCache* regex_fsm_cache = nullptr
   );
 
   /*! \brief Convert SchemaSpec to grammar with XML format for root object. Note that this function
@@ -49,31 +53,36 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
   int32_t GenerateEnum(const EnumSpec& spec, const std::string& rule_name) override;
 
   // Override format hooks
-  int32_t FormatPropertyKey(const std::string& key) override;
+  int32_t FormatPropertyKey(const std::string& key, const SchemaSpecPtr& schema) override;
   int32_t FormatProperty(
-      const std::string& key, int32_t value_rule_id, const std::string& rule_name, int64_t idx
+      const std::string& key,
+      int32_t value_rule_id,
+      const std::string& rule_name,
+      int64_t idx,
+      const SchemaSpecPtr& schema
   ) override;
   int32_t FormatOtherProperty(
       int32_t key_pattern_expr,
       int32_t value_rule_id,
       const std::string& rule_name,
-      const std::string& rule_name_suffix
+      const std::string& rule_name_suffix,
+      const SchemaSpecPtr& schema
   ) override;
 
   std::string GetKeyPattern() const override;
+  std::string GetBasicAnyRuleName() const override;
   int32_t GetKeyPatternExcluding(
       const std::vector<ObjectSpec::Property>& properties, const std::string& rule_name
   ) override;
 
   std::string NextSeparator(bool is_end = false) override;
 
-  // Cache rules per XML output layer, so that the same schema generates separate rules for the
-  // XML layers and the nested JSON layer.
-  void AddCache(const std::string& key, int64_t indentation_context, int32_t rule_id) override;
-  std::optional<int32_t> GetCache(const std::string& key, int64_t indentation_context)
-      const override;
-
   void AddBasicRules() override;
+
+  void AddCache(const std::string& key, int32_t rule_id, bool indentation_sensitive = false)
+      override;
+  std::optional<int32_t> GetCache(const std::string& key, bool indentation_sensitive = false)
+      const override;
 
  private:
   // Wrapper strings for XML parameter tags (key prefix/suffix, value prefix, closing suffix)
@@ -91,11 +100,28 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
   static const std::string kXMLVariableName;
 
   std::string XMLValue(const std::string& json_value) const;
-  int32_t XMLKeySuffix();
+  std::string EscapeAttrValue(const std::string& value) const;
 
-  /*! \brief Prefix the cache key with the current output layer: 0 = root object with XML tags,
-   * 1 = parameter values, 2 = nested JSON. */
-  std::string LayeredCacheKey(const std::string& key) const;
+  /*!
+   * \brief Return the Kimi-K3 `type` attribute a value of \p spec is rendered with, or
+   * std::nullopt if the schema does not pin down a single type (\p spec may be nullptr, which
+   * is how free-form keys end up unconstrained).
+   *
+   * The Kimi-K3 tool-call parser reads the attribute as a decoding switch: type="string"
+   * keeps the value as raw text, anything else JSON-decodes it. So the attribute must agree
+   * with the value grammar, otherwise the decoded argument changes type (e.g. a string
+   * property tagged type="number" with body 123 decodes to the integer 123). Mirrors the
+   * model's renderer (_xtml_type), which maps both ints and floats to "number".
+   */
+  static std::optional<std::string> KimiK3TypeAttr(const SchemaSpecPtr& spec);
+
+  /*!
+   * \brief Build the expression between the property key and its value.
+   * \param pinned_type For kimi_k3_xml, the single type attribute this property must carry.
+   * std::nullopt keeps every type allowed, which is what free-form keys
+   * (additionalProperties / patternProperties) need.
+   */
+  int32_t XMLKeySuffix(const std::optional<std::string>& pinned_type = std::nullopt);
 
   JSONFormat json_format_;
   // Track if we're at the root object level

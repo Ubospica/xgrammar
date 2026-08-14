@@ -676,7 +676,7 @@ rule3 ::= [a-n] [b-c] "x" | ""
             # Input: "aбя中" - ASCII 'a', Cyrillic 'б' (2 bytes), 'я' (2 bytes), CJK '中' (3 bytes)
             "aбя中",
             # fmt: off
-            [22129, 22128, 31984, 22128, 31984, 22128, 31992, 31936, 22128],
+            [22051, 22050, 31984, 22050, 31984, 22050, 31992, 31936, 22050],
             # fmt: on
         )
     ],
@@ -827,9 +827,12 @@ def test_repeat_ref_range():
 
 
 def test_repeat_ref_boundary():
-    """Test that exact repetition ranges retain RepeatRef edges."""
+    """Test that {128} does NOT activate RepeatRef, but {129} does."""
     g128 = xgr.Grammar.from_ebnf('root ::= "a"{128}')
-    _assert_repeat_ref_active(g128)
+    tokenizer_info = xgr.TokenizerInfo([])
+    compiler = xgr.GrammarCompiler(tokenizer_info, cache_enabled=False)
+    fsm128 = _print_grammar_fsms(compiler.compile_grammar(g128).grammar)
+    assert "Repeat(" not in fsm128
 
     assert _is_grammar_accept_string(g128, "a" * 128)
     assert not _is_grammar_accept_string(g128, "a" * 127)

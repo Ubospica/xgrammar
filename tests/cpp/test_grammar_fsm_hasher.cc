@@ -42,9 +42,11 @@ int CountRuleEdges(const CompactFSMWithStartEnd& fsm) {
 TEST(XGrammarFSMHasherTest, RuleEdgeScratchIsScopedToEachState) {
   auto grammar = Grammar::FromEBNF(R"(
 root ::= left | right
-left ::= ref "x" | "a" ref "y"
-right ::= "a" ref "y" | ref "x"
-ref ::= "z"
+left ::= "a" first "x" second | "b" second "y" third
+right ::= "b" second "y" third | "a" first "x" second
+first ::= "1"
+second ::= "2"
+third ::= "3"
 )");
   GrammarFSMBuilder::Apply(&grammar);
   GrammarFSMHasher::Apply(&grammar);
@@ -55,8 +57,8 @@ ref ::= "z"
   ASSERT_GE(right, 0);
   ASSERT_TRUE(grammar->per_rule_fsms[left].has_value());
   ASSERT_TRUE(grammar->per_rule_fsms[right].has_value());
-  EXPECT_GE(CountRuleEdges(grammar->per_rule_fsms[left]->GetFsm()), 2);
-  EXPECT_GE(CountRuleEdges(grammar->per_rule_fsms[right]->GetFsm()), 2);
+  EXPECT_GE(CountRuleEdges(grammar->per_rule_fsms[left]->GetFsm()), 4);
+  EXPECT_GE(CountRuleEdges(grammar->per_rule_fsms[right]->GetFsm()), 4);
 
   ASSERT_TRUE(grammar->per_rule_fsm_hashes[left].has_value());
   ASSERT_TRUE(grammar->per_rule_fsm_hashes[right].has_value());

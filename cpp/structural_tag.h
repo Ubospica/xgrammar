@@ -82,15 +82,19 @@ struct ConstStringFormat {
 
 struct JSONSchemaFormat {
   static constexpr const char* type = "json_schema";
-  std::string json_schema;
-  std::string style = "json";  // "json","qwen_xml","minimax_xml","deepseek_xml","glm_xml"
+  // Alias the schema value in the parsed structural-tag document. Keeping the parsed value
+  // avoids serializing and reparsing every nested schema during grammar conversion; the aliasing
+  // shared pointer keeps the complete JSON document alive.
+  std::shared_ptr<const picojson::value> json_schema;
+  // "json","qwen_xml","minimax_xml","deepseek_xml","glm_xml","kimi_k3_xml"
+  std::string style = "json";
   // Whether to allow object properties to appear in any order. See
   // Grammar::FromJSONSchema / JSONSchemaToEBNF for the semantics.
   bool any_order = false;
   // Per-tag cap on consecutive whitespace characters in the JSON-schema content.
   std::optional<int> max_whitespace_cnt = std::nullopt;
   JSONSchemaFormat(
-      std::string json_schema,
+      std::shared_ptr<const picojson::value> json_schema,
       std::string style = "json",
       bool any_order = false,
       std::optional<int> max_whitespace_cnt = std::nullopt
@@ -389,11 +393,17 @@ struct StructuralTag {
 /*!
  * \brief Convert a structural tag JSON string to a grammar.
  * \param structural_tag_json The JSON string of the structural tag.
+ * \param tokenizer_info Optional tokenizer metadata for resolving named special tokens.
+ * \param normalize Whether to normalize the converted grammar before returning it.
+ * \param normalize_json_schema_subgrammars Whether to normalize each JSON Schema subgrammar
+ * before composition.
  * \return A grammar if the JSON is valid, otherwise an error message in std::string.
  */
 Result<Grammar, StructuralTagError> StructuralTagToGrammar(
     const std::string& structural_tag_json,
-    const std::optional<TokenizerInfo>& tokenizer_info = std::nullopt
+    const std::optional<TokenizerInfo>& tokenizer_info = std::nullopt,
+    bool normalize = true,
+    bool normalize_json_schema_subgrammars = true
 );
 
 }  // namespace xgrammar

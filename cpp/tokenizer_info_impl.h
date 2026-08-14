@@ -41,7 +41,9 @@ class TokenizerInfo::Impl {
   }
   const std::vector<int32_t>& GetTokenCharCounts() const;
   int32_t GetMaxTokenChars() const;
-  int32_t GetMaxTokenBytes() const { return max_token_bytes_; }
+  const std::vector<int32_t>& GetAsciiStringSafeIndices() const {
+    return ascii_string_safe_indices_;
+  }
   void BuildTokenCharData();
 
   std::string DumpMetadata() const;
@@ -85,9 +87,9 @@ class TokenizerInfo::Impl {
   std::vector<int32_t> token_id_to_sorted_vocab_index_;
   /*! \brief Unicode codepoint counts for the sorted decoded vocabulary. */
   int32_t max_token_chars_ = 0;
-  /*! \brief Maximum decoded token length in bytes. */
-  int32_t max_token_bytes_ = 0;
   std::vector<int32_t> token_char_counts_;
+  /*! \brief Sorted-vocabulary indices safe inside an unescaped JSON string. */
+  std::vector<int32_t> ascii_string_safe_indices_;
 
   /*!
    * \brief The tokens used to detect stop tokens from the vocabulary.
