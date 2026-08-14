@@ -2640,6 +2640,20 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     }
   }
 
+  constexpr size_t kMaxRuntimeJSONStringMaskCacheEntries = 32;
+  auto remember_runtime_json_string_mask = [&](std::vector<int32_t>&& key, DynamicBitset&& mask) {
+    RuntimeJSONStringUncertainCacheEntry entry{std::move(key), std::move(mask)};
+    if (runtime_json_string_mask_cache_.size() < kMaxRuntimeJSONStringMaskCacheEntries) {
+      runtime_json_string_mask_cache_.push_back(std::move(entry));
+    } else {
+      runtime_json_string_mask_cache_[runtime_json_string_mask_cache_next_replacement_] =
+          std::move(entry);
+      runtime_json_string_mask_cache_next_replacement_ =
+          (runtime_json_string_mask_cache_next_replacement_ + 1) %
+          kMaxRuntimeJSONStringMaskCacheEntries;
+    }
+  };
+
   for (const auto& state_with_mask : latest_states_with_masks) {
     const auto& state = state_with_mask.state;
     const auto& adaptive_token_mask = *state_with_mask.adaptive_token_mask;
@@ -2733,6 +2747,16 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
             tmp_accepted_bitset_ |= cached->mask;
             continue;
           }
+          DynamicBitset shared_mask(tokenizer_info_.GetVocabSize());
+          if (compiled_grammar_->GetRuntimeJSONStringMask(
+                  *runtime_json_string_mask_key, &shared_mask
+              )) {
+            tmp_accepted_bitset_ |= shared_mask;
+            remember_runtime_json_string_mask(
+                std::move(*runtime_json_string_mask_key), std::move(shared_mask)
+            );
+            continue;
+          }
           tmp_runtime_uncertain_accepted_bitset_.Reset();
         }
       }
@@ -2751,8 +2775,11 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     PushOneStateToCheck(state);
     std::optional<ContinuationTransitionCache> continuation_cache;
     constexpr size_t kMinUncertainTokensForContinuationCache = 128;
-    if (!has_budget_rules_ && !has_char_budget_rules_ && !runtime_json_length &&
-        !capture_tracking_ && adaptive_token_mask.store_type != StoreType::kRejected &&
+    // The canonical configuration includes every runtime JSON-string field, so constrained
+    // strings can safely reuse continuation transitions when a complete runtime mask was not
+    // already found above.
+    if (!has_budget_rules_ && !has_char_budget_rules_ && !capture_tracking_ &&
+        adaptive_token_mask.store_type != StoreType::kRejected &&
         indices_to_check->size() >= kMinUncertainTokensForContinuationCache) {
       continuation_cache.emplace(this);
     }
@@ -2907,22 +2934,13 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
                          << ", configurations=" << continuation_cache->CanonicalConfigurations()
                          << ", enabled=" << continuation_cache->IsEnabled() << ")";
     }
-    constexpr size_t kMaxRuntimeJSONStringMaskCacheEntries = 32;
     if (runtime_json_string_mask_key.has_value()) {
       DynamicBitset owned_mask(tokenizer_info_.GetVocabSize());
       owned_mask = tmp_runtime_uncertain_accepted_bitset_;
-      RuntimeJSONStringUncertainCacheEntry entry{
+      compiled_grammar_->AddRuntimeJSONStringMask(*runtime_json_string_mask_key, owned_mask);
+      remember_runtime_json_string_mask(
           std::move(*runtime_json_string_mask_key), std::move(owned_mask)
-      };
-      if (runtime_json_string_mask_cache_.size() < kMaxRuntimeJSONStringMaskCacheEntries) {
-        runtime_json_string_mask_cache_.push_back(std::move(entry));
-      } else {
-        runtime_json_string_mask_cache_[runtime_json_string_mask_cache_next_replacement_] =
-            std::move(entry);
-        runtime_json_string_mask_cache_next_replacement_ =
-            (runtime_json_string_mask_cache_next_replacement_ + 1) %
-            kMaxRuntimeJSONStringMaskCacheEntries;
-      }
+      );
     }
   }
 

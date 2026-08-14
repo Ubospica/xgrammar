@@ -390,6 +390,86 @@ def test_runtime_json_string_mask_cache_replacement_matches_fresh_replay():
     assert cached.is_terminated()
 
 
+def test_runtime_json_string_mask_cache_is_shared_concurrently():
+    vocabulary = ['"', "a", "aa", r"\u0061", 'a"']
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    schema = {"type": "string", "minLength": 1, "maxLength": 64}
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_json_schema(schema)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(schema)
+
+    expected_matcher = xgr.GrammarMatcher(eager, terminate_without_stop_token=True)
+    assert expected_matcher.accept_string('"a')
+    expected_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    expected_matcher.fill_next_token_bitmask(expected_mask)
+
+    barrier = threading.Barrier(8)
+
+    def fill_shared_mask():
+        matcher = xgr.GrammarMatcher(dynamic, terminate_without_stop_token=True)
+        assert matcher.accept_string('"a')
+        mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        barrier.wait()
+        matcher.fill_next_token_bitmask(mask)
+        return mask
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        masks = list(executor.map(lambda _: fill_shared_mask(), range(8)))
+    for mask in masks:
+        torch.testing.assert_close(mask, expected_mask, rtol=0, atol=0)
+
+    cached_matcher = xgr.GrammarMatcher(dynamic, terminate_without_stop_token=True)
+    assert cached_matcher.accept_string('"a')
+    cached_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    cached_matcher.fill_next_token_bitmask(cached_mask)
+    torch.testing.assert_close(cached_mask, expected_mask, rtol=0, atol=0)
+
+
+def test_continuation_transition_cache_handles_runtime_json_string_constraints(capfd):
+    suffixes = [
+        chr(first) + chr(second)
+        for first in range(ord("a"), ord("n"))
+        for second in range(ord("a"), ord("n"))
+    ]
+    vocabulary = ['{"x": "'] + [suffix + '"' for suffix in suffixes] + [', "y": true}']
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    schema = {
+        "type": "object",
+        "properties": {
+            "x": {"type": "string", "minLength": 1, "maxLength": 64},
+            "y": {"type": "boolean"},
+        },
+        "required": ["x", "y"],
+        "additionalProperties": False,
+    }
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_json_schema(schema, any_whitespace=False, strict_mode=True)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(schema, any_whitespace=False, strict_mode=True)
+
+    expected_matcher = xgr.GrammarMatcher(eager, terminate_without_stop_token=True)
+    actual_matcher = xgr.GrammarMatcher(dynamic, terminate_without_stop_token=True)
+    assert expected_matcher.accept_token(0)
+    assert actual_matcher.accept_token(0)
+    expected_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    actual_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    expected_matcher.fill_next_token_bitmask(expected_mask)
+    actual_matcher.fill_next_token_bitmask(actual_mask, debug_print=True)
+    debug_log = capfd.readouterr().err
+    assert "ContinuationTransitionCache(queries=" in debug_log
+    assert "ContinuationTransitionCache(queries=0" not in debug_log
+    torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+    assert actual_matcher.accept_token(1)
+    assert actual_matcher.accept_token(len(vocabulary) - 1)
+    assert actual_matcher.is_terminated()
+
+
 def test_streaming_literal_pattern_masks_are_shared_concurrently():
     alternatives = ["bcd", "abce", "he", "she", "his", "hers"] + [
         f"region-{index:03d}" for index in range(96)

@@ -204,6 +204,10 @@ class CompiledGrammar::Impl {
       character_class_repeat_runtime_masks;
   mutable std::mutex character_class_repeat_runtime_masks_mutex;
 
+  /*! \brief Stable runtime JSON-string masks shared by matchers using this grammar. */
+  std::unordered_map<std::vector<int32_t>, DynamicBitset, IntVectorHash> runtime_json_string_masks;
+  mutable std::mutex runtime_json_string_masks_mutex;
+
   /*! \brief Grammar-wide flags and nullable rules shared by Earley parsers. */
   std::shared_ptr<const EarleyParserGrammarFeatures> earley_parser_grammar_features;
   /*! \brief Tag-dispatch data retained for on-demand token mask generation. */
@@ -225,6 +229,8 @@ class CompiledGrammar::Impl {
   void AddCharacterClassRepeatRuntimeMask(
       const std::vector<int32_t>& key, const DynamicBitset& mask
   );
+  bool GetRuntimeJSONStringMask(const std::vector<int32_t>& key, DynamicBitset* output) const;
+  void AddRuntimeJSONStringMask(const std::vector<int32_t>& key, const DynamicBitset& mask);
 
   void MaterializeAdaptiveTokenMaskCache();
 

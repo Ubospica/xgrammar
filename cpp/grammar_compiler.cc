@@ -1596,6 +1596,28 @@ void CompiledGrammar::Impl::AddCharacterClassRepeatRuntimeMask(
   }
 }
 
+bool CompiledGrammar::Impl::GetRuntimeJSONStringMask(
+    const std::vector<int32_t>& key, DynamicBitset* output
+) const {
+  std::lock_guard<std::mutex> lock(runtime_json_string_masks_mutex);
+  const auto existing = runtime_json_string_masks.find(key);
+  if (existing == runtime_json_string_masks.end()) {
+    return false;
+  }
+  *output = existing->second;
+  return true;
+}
+
+void CompiledGrammar::Impl::AddRuntimeJSONStringMask(
+    const std::vector<int32_t>& key, const DynamicBitset& mask
+) {
+  constexpr size_t kMaxRuntimeJSONStringMasks = 256;
+  std::lock_guard<std::mutex> lock(runtime_json_string_masks_mutex);
+  if (runtime_json_string_masks.size() < kMaxRuntimeJSONStringMasks) {
+    runtime_json_string_masks.emplace(key, mask);
+  }
+}
+
 void CompiledGrammar::Impl::MaterializeAdaptiveTokenMaskCache() {
   if (tokenizer_info.GetVocabSize() == 0) {
     return;
