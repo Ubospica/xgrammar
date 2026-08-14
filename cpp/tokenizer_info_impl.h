@@ -3,12 +3,14 @@
 
 #include <picojson.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "support/dynamic_bitset.h"
 #include "support/reflection.h"
 #include "xgrammar/tokenizer_info.h"
 
@@ -41,8 +43,23 @@ class TokenizerInfo::Impl {
   }
   const std::vector<int32_t>& GetTokenCharCounts() const;
   int32_t GetMaxTokenChars() const;
+  int32_t GetMaxTokenBytes() const { return max_token_bytes_; }
   const std::vector<int32_t>& GetAsciiStringSafeIndices() const {
     return ascii_string_safe_indices_;
+  }
+  const DynamicBitset& GetAsciiStringSafeBitset() const { return ascii_string_safe_bitset_; }
+  const std::array<std::vector<int32_t>, 256>& GetAsciiStringSafeIndicesByFirstByte() const {
+    return ascii_string_safe_indices_by_first_byte_;
+  }
+  const DynamicBitset& GetJSONStringContentPrefixBitset() const {
+    return json_string_content_prefix_bitset_;
+  }
+  const std::array<std::vector<int32_t>, 256>& GetJSONStringContentPrefixIndicesByFirstByte(
+  ) const {
+    return json_string_content_prefix_indices_by_first_byte_;
+  }
+  const std::vector<int32_t>& GetJSONStringCrossingIndices() const {
+    return json_string_crossing_indices_;
   }
   void BuildTokenCharData();
 
@@ -87,9 +104,20 @@ class TokenizerInfo::Impl {
   std::vector<int32_t> token_id_to_sorted_vocab_index_;
   /*! \brief Unicode codepoint counts for the sorted decoded vocabulary. */
   int32_t max_token_chars_ = 0;
+  int32_t max_token_bytes_ = 0;
   std::vector<int32_t> token_char_counts_;
   /*! \brief Sorted-vocabulary indices safe inside an unescaped JSON string. */
   std::vector<int32_t> ascii_string_safe_indices_;
+  /*! \brief Token-id bitset for tokens safe inside an unescaped JSON string. */
+  DynamicBitset ascii_string_safe_bitset_;
+  /*! \brief Safe sorted-vocabulary indices grouped by their first byte. */
+  std::array<std::vector<int32_t>, 256> ascii_string_safe_indices_by_first_byte_;
+  /*! \brief Token-id bitset for valid JSON string content prefixes, including partial atoms. */
+  DynamicBitset json_string_content_prefix_bitset_;
+  /*! \brief JSON string content-prefix tokens grouped by their first byte. */
+  std::array<std::vector<int32_t>, 256> json_string_content_prefix_indices_by_first_byte_;
+  /*! \brief Sorted-vocabulary tokens that can cross an unescaped closing quote. */
+  std::vector<int32_t> json_string_crossing_indices_;
 
   /*!
    * \brief The tokens used to detect stop tokens from the vocabulary.
