@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "support/dynamic_bitset.h"
 #include "support/reflection.h"
 #include "xgrammar/tokenizer_info.h"
 
@@ -43,6 +44,13 @@ class TokenizerInfo::Impl {
   int32_t GetMaxTokenChars() const;
   const std::vector<int32_t>& GetAsciiStringSafeIndices() const {
     return ascii_string_safe_indices_;
+  }
+  const std::vector<uint8_t>& GetTokenIsJSONStringContentSafe() const {
+    return token_is_json_string_content_safe_;
+  }
+  const DynamicBitset& GetJSONStringContentSafeUpToLength(int32_t max_length) const;
+  int32_t GetMaxPrecomputedJSONStringContentSafeLength() const {
+    return static_cast<int32_t>(json_string_content_safe_up_to_length_.size()) - 1;
   }
   void BuildTokenCharData();
 
@@ -88,8 +96,13 @@ class TokenizerInfo::Impl {
   /*! \brief Unicode codepoint counts for the sorted decoded vocabulary. */
   int32_t max_token_chars_ = 0;
   std::vector<int32_t> token_char_counts_;
+  /*! \brief Whether each sorted decoded token is a non-empty sequence of unescaped ASCII JSON
+   * string-content bytes. Such tokens have an exact decoded length equal to their byte length. */
+  std::vector<uint8_t> token_is_json_string_content_safe_;
   /*! \brief Sorted-vocabulary indices safe inside an unescaped JSON string. */
   std::vector<int32_t> ascii_string_safe_indices_;
+  /*! \brief Token-id bitsets for complete raw JSON-string content up to each decoded length. */
+  std::vector<DynamicBitset> json_string_content_safe_up_to_length_;
 
   /*!
    * \brief The tokens used to detect stop tokens from the vocabulary.

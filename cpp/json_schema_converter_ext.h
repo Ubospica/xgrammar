@@ -31,7 +31,8 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
       RefResolver ref_resolver = nullptr,
       JSONFormat json_format = JSONFormat::kQwenXML,
       bool any_order = false,
-      RegexFSMCache* regex_fsm_cache = nullptr
+      RegexFSMCache* regex_fsm_cache = nullptr,
+      bool enable_runtime_json_string_constraints = true
   );
 
   /*! \brief Convert SchemaSpec to grammar with XML format for root object. Note that this function

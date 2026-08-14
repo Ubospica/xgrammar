@@ -178,8 +178,8 @@ schema__grammar__accepted_instances__rejected_instances__test_non_strict = [
         + r"""root_additional ::= basic_number | basic_string | basic_boolean | basic_null | basic_array | basic_object
 root ::= ("[" [ \n\t]* (basic_integer [ \n\t]* "," [ \n\t]* basic_integer) ([ \n\t]* "," [ \n\t]* root_additional)* [ \n\t]* "]")
 """,
-        [[1, 2], [1, 2, 3], [1, 2, 3, "123"]],
-        [[1]],
+        [[], [1], [1, 2], [1, 2, 3], [1, 2, 3, "123"]],
+        [["bad"]],
     ),
     (
         {
@@ -250,6 +250,102 @@ root ::= "{" "" (("\"bars\"" ": " root_prop_0 root_part_0)) "" "}"
     check_schema_with_instance(schema, instance, any_whitespace=False)
 
 
+def test_structured_const_and_enum_follow_json_formatting():
+    const_schema = {"const": {"left": [1, 2], "right": True}}
+    for value in ('{"left": [1, 2], "right": true}', '{ "right" : true, "left" : [ 1 , 2 ] }'):
+        grammar = xgr.Grammar.from_json_schema(
+            json.dumps(const_schema), any_whitespace=True, any_order=True
+        )
+        assert _is_grammar_accept_string(grammar, value)
+    check_schema_with_instance(
+        const_schema, '{"left": [1, 2], "right": false}', is_accepted=False, any_whitespace=True
+    )
+
+    enum_schema = {"enum": [[1, 2], {"nested": None}]}
+    for value in ("[ 1, 2 ]", '{ "nested" : null }'):
+        grammar = xgr.Grammar.from_json_schema(
+            json.dumps(enum_schema), any_whitespace=True, any_order=True
+        )
+        assert _is_grammar_accept_string(grammar, value)
+
+
+def test_structured_const_cache_respects_indentation_depth():
+    repeated_const = {"const": [1]}
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": repeated_const,
+            "b": {
+                "type": "object",
+                "properties": {"inner": repeated_const},
+                "required": ["inner"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["a", "b"],
+        "additionalProperties": False,
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), any_whitespace=False, indent=2)
+    correctly_indented = """{
+  \"a\": [
+    1
+  ],
+  \"b\": {
+    \"inner\": [
+      1
+    ]
+  }
+}"""
+    wrong_reused_depth = """{
+  \"a\": [
+    1
+  ],
+  \"b\": {
+    \"inner\": [
+    1
+  ]
+  }
+}"""
+    assert _is_grammar_accept_string(grammar, correctly_indented)
+    assert not _is_grammar_accept_string(grammar, wrong_reused_depth)
+
+
+def test_large_structured_const_any_order_fails_instead_of_fixing_order():
+    value = {f"property_{index}": index for index in range(13)}
+    with pytest.raises(RuntimeError, match="exceeds the exact any_order limit"):
+        xgr.Grammar.from_json_schema(json.dumps({"const": value}), any_order=True)
+
+
+@pytest.mark.parametrize(
+    "schema, accepted_instances, rejected_instances",
+    [
+        (
+            {"properties": {"value": {"type": "integer"}}},
+            ['{"value": 1}', "[]", '"text"', "1", "true", "null"],
+            ['{"value": "wrong"}'],
+        ),
+        (
+            {"items": {"type": "integer"}},
+            ["[1, 2]", "{}", '"text"', "1", "true", "null"],
+            ['[1, "wrong"]'],
+        ),
+        ({"required": [], "properties": {}}, ["{}", "[]", '"text"', "1", "true", "null"], []),
+        ({"minimum": 2}, ["2", "2.5", "{}", "[]", '"text"', "true", "null"], ["1", "1.5"]),
+        ({"minLength": 2}, ['"ab"', "{}", "[]", "1", "true", "null"], ['"a"']),
+    ],
+)
+def test_keywords_without_explicit_type_only_constrain_applicable_instances(
+    schema, accepted_instances, rejected_instances
+):
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps(schema), any_whitespace=True, strict_mode=False, any_order=True
+    )
+    for instance in accepted_instances:
+        assert _is_grammar_accept_string(grammar, instance), (schema, instance)
+    for instance in rejected_instances:
+        assert not _is_grammar_accept_string(grammar, instance), (schema, instance)
+
+
 def test_empty_enum_rejected():
     """Empty enum [] should raise error, not produce invalid grammar."""
     schema_obj = '{"type":"object","properties":{"x":{"type":"string","enum":[]}},"required":["x"]}'
@@ -284,6 +380,18 @@ def test_empty_enum_rejected():
             [10, 15, 20],
             [5, 6],
         ),
+        ({"type": "integer", "minimum": 0, "multipleOf": 2}, [0, 2, 20000], [-1, 1, 3]),
+        ({"type": "integer", "maximum": 0, "multipleOf": 5}, [-10, -5, 0], [-11, 1]),
+        (
+            {"type": "integer", "minimum": 0, "maximum": 20000, "multipleOf": 12},
+            [0, 12000, 19992],
+            [-1, 12001, 20001],
+        ),
+        (
+            {"type": "integer", "minimum": 0, "maximum": 18446744073709551615, "multipleOf": 3},
+            [0, 9223372036854775809, 18446744073709551615],
+            [-1, 9223372036854775808, 18446744073709551614, 18446744073709551616],
+        ),
     ],
 )
 def test_integer_multiple_of(
@@ -298,12 +406,6 @@ def test_integer_multiple_of(
 @pytest.mark.parametrize(
     "schema, warning_message, accepted_instances, rejected_instances",
     [
-        (
-            {"type": "number", "multipleOf": 2},
-            "multipleOf is not supported for type:number; ignoring multipleOf",
-            [3, 5.5],
-            [],
-        ),
         (
             {"type": "integer", "multipleOf": 2.5},
             "multipleOf for type:integer must be an integer; ignoring multipleOf",
@@ -322,12 +424,6 @@ def test_integer_multiple_of(
             [1, 2],
             [],
         ),
-        (
-            {"type": "integer", "minimum": 0, "multipleOf": 2},
-            "range + multipleOf combination not yet supported; ignoring multipleOf",
-            [1, 3],
-            [-1],
-        ),
     ],
 )
 def test_multiple_of_unsupported_warns_and_ignores(
@@ -343,6 +439,62 @@ def test_multiple_of_unsupported_warns_and_ignores(
     assert warning_message in captured.err
     for instance in rejected_instances:
         check_schema_with_instance(schema, instance, is_accepted=False)
+
+
+@pytest.mark.parametrize(
+    "schema, accepted_instances, rejected_instances",
+    [
+        ({"type": "number", "multipleOf": 0.01}, [0, 99.99, -0.01, 1e-2], [99.991, -0.011]),
+        ({"type": "number", "multipleOf": 0.1}, [0, 16, -1.2, 1e-1], [15.999, 0.01]),
+        ({"type": "number", "multipleOf": 1.0}, [0, 1, -2, 1e3], [1.5, -0.1]),
+        ({"type": "number", "multipleOf": 10}, [0, 20, -30, 1e2], [21, -1]),
+        (
+            {"type": "number", "minimum": -20, "maximum": 20, "multipleOf": 0.25},
+            [-20, -0.25, 0, 19.75, 20],
+            [-20.25, 0.1, 20.25],
+        ),
+    ],
+)
+def test_number_multiple_of(
+    schema: Dict[str, Any],
+    accepted_instances: List[Union[int, float]],
+    rejected_instances: List[Union[int, float]],
+):
+    for instance in accepted_instances:
+        check_schema_with_instance(schema, instance, is_accepted=True)
+    for instance in rejected_instances:
+        check_schema_with_instance(schema, instance, is_accepted=False)
+
+
+@pytest.mark.parametrize(
+    "multiple_of, accepted_instances, rejected_instances",
+    [
+        (
+            "0.01",
+            ["0", "1", "1.0", "1e0", "1E+2", "10e-1", "100e-2", "1e-2", "-2e-2", "1e9999999999"],
+            ["1e-3", "1.001", "-0.011", "1e-9999999999"],
+        ),
+        ("0.1", ["0.1", "1e-1", "10e-2", "100e-3", "-1.20"], ["1e-2", "1.01"]),
+        ("1.0", ["0", "1", "1.0", "10e-1", "1e3", "-20"], ["1.5", "15e-1"]),
+        ("10", ["0", "10", "1e1", "100e-1", "-2E1"], ["1", "1e0", "21"]),
+        ("0.000000001", ["1e-9", "0.000000001", "1"], ["1e-10", "0.0000000011"]),
+        ("3", ["0", "3e9999999999", "-6e9999999999"], ["1e9999999999", "3e-9999999999"]),
+    ],
+)
+def test_number_multiple_of_exact_lexemes(
+    multiple_of: str, accepted_instances: List[str], rejected_instances: List[str]
+):
+    grammar = xgr.Grammar.from_json_schema(
+        f'{{"type":"number","multipleOf":{multiple_of}}}',
+        any_whitespace=True,
+        indent=None,
+        separators=None,
+        strict_mode=True,
+    )
+    for instance in accepted_instances:
+        assert _is_grammar_accept_string(grammar, instance), (multiple_of, instance)
+    for instance in rejected_instances:
+        assert not _is_grammar_accept_string(grammar, instance), (multiple_of, instance)
 
 
 @pytest.mark.parametrize(
@@ -734,6 +886,75 @@ def test_reference_schema():
     )
 
 
+@pytest.mark.parametrize(
+    "definition, reference",
+    [
+        ({"id": "#nonnegative"}, "#nonnegative"),
+        ({"$anchor": "nonnegative"}, "#nonnegative"),
+        ({"$dynamicAnchor": "nonnegative"}, "#nonnegative"),
+    ],
+)
+def test_plain_name_fragment_references(definition: dict, reference: str):
+    definition = {**definition, "type": "integer", "minimum": 0}
+    schema = {
+        "type": "object",
+        "properties": {"value": {"$ref": reference}},
+        "required": ["value"],
+        "additionalProperties": False,
+        "$defs": {"nonnegative": definition},
+    }
+
+    check_schema_with_instance(schema, '{"value": 0}', any_whitespace=False)
+    check_schema_with_instance(schema, '{"value": -1}', is_accepted=False, any_whitespace=False)
+
+
+def test_json_pointer_reference_through_array():
+    schema = {
+        "type": "object",
+        "properties": {"value": {"$ref": "#/$defs/options/anyOf/0"}},
+        "required": ["value"],
+        "additionalProperties": False,
+        "$defs": {
+            "options": {
+                "anyOf": [{"type": "integer", "minimum": 0}, {"type": "string", "minLength": 2}]
+            }
+        },
+    }
+
+    check_schema_with_instance(schema, '{"value": 0}', any_whitespace=False)
+    check_schema_with_instance(schema, '{"value": -1}', is_accepted=False, any_whitespace=False)
+    check_schema_with_instance(schema, '{"value": "ok"}', is_accepted=False, any_whitespace=False)
+
+
+@pytest.mark.parametrize("keyword", ["const", "enum"])
+def test_numeric_const_and_enum_preserve_exact_decimal_value(keyword: str):
+    schema = {"type": "number", keyword: 0.4 if keyword == "const" else [0.1, 0.2, 0.3, 0.4]}
+
+    check_schema_with_instance(schema, "0.4", any_whitespace=False)
+    check_schema_with_instance(schema, "4e-1", any_whitespace=False)
+    check_schema_with_instance(
+        schema, "0.40000000000000002", is_accepted=False, any_whitespace=False
+    )
+
+
+def test_nested_numeric_const_preserves_value_and_internal_marker_strings():
+    marker = "\0xgrammar:exact-json-number:0.4"
+    schema = {"const": {"number": 0.4, "marker": marker}}
+
+    check_schema_with_instance(
+        schema, json.dumps({"marker": marker, "number": 4e-1}), any_whitespace=False
+    )
+    check_schema_with_instance(
+        schema,
+        json.dumps({"marker": marker, "number": 0.5}),
+        is_accepted=False,
+        any_whitespace=False,
+    )
+    check_schema_with_instance(
+        {"type": "string", "const": marker}, json.dumps(marker), any_whitespace=False
+    )
+
+
 def test_union():
     class Cat(BaseModel):
         name: str
@@ -818,7 +1039,6 @@ def test_oneof_unsupported_overlap_warns_and_falls_back(capfd):
     assert_oneof_falls_back({"oneOf": [{"type": "integer"}, {}]}, ["1", "true"])
     assert_oneof_falls_back({"oneOf": [{"const": 1}, {"const": 1.0}]}, ["1"])
     assert_oneof_falls_back('{"oneOf":[{"const":9007199254740993},{"const":9007199254740993.0}]}')
-    assert_oneof_falls_back('{"oneOf":[{"const":1.5},{"const":2.5}]}', ["1.5", "2.5"], ["3.5"])
     assert_oneof_falls_back('{"oneOf":[{"enum":[9007199254740993]},{"enum":[9007199254740993.0]}]}')
     assert_oneof_falls_back({"oneOf": [{"enum": [1, "hello", 2]}, {"type": "integer"}]}, ["1", "3"])
     # A non-integer numeric const is conservatively treated as possibly overlapping an
@@ -885,6 +1105,13 @@ def test_oneof_disjoint_cases(capfd):
     assert not _is_grammar_accept_string(grammar, "9007199254740994")
     assert_no_fallback()
 
+    schema = '{"oneOf":[{"const":1.5},{"const":2.5}]}'
+    grammar = xgr.Grammar.from_json_schema(schema, any_whitespace=False)
+    assert _is_grammar_accept_string(grammar, "1.5")
+    assert _is_grammar_accept_string(grammar, "2.5")
+    assert not _is_grammar_accept_string(grammar, "3.5")
+    assert_no_fallback()
+
     schema = {
         "oneOf": [
             {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "cat"}}},
@@ -909,10 +1136,574 @@ def test_oneof_disjoint_cases(capfd):
     assert_no_fallback()
 
 
+def test_oneof_exclusive_required_object_properties(capfd):
+    schema = {
+        "type": "object",
+        "properties": {
+            "left": {"type": "string"},
+            "right": {"type": "integer"},
+            "label": {"type": "boolean"},
+        },
+        "required": ["label"],
+        "additionalProperties": False,
+        "oneOf": [{"required": ["left"]}, {"required": ["right"]}],
+    }
+
+    check_schema_with_instance(
+        schema, '{"left": "value", "label": true}', any_whitespace=True, strict_mode=False
+    )
+    check_schema_with_instance(
+        schema, '{"right": 1, "label": false}', any_whitespace=True, strict_mode=False
+    )
+    check_schema_with_instance(
+        schema,
+        '{"left": "value", "right": 1, "label": true}',
+        is_accepted=False,
+        any_whitespace=True,
+        strict_mode=False,
+    )
+    check_schema_with_instance(
+        schema, '{"label": true}', is_accepted=False, any_whitespace=True, strict_mode=False
+    )
+    check_schema_with_instance(
+        schema,
+        '{"left": "value", "label": 1}',
+        is_accepted=False,
+        any_whitespace=True,
+        strict_mode=False,
+    )
+    captured = capfd.readouterr()
+    assert "falling back to anyOf semantics" not in captured.err
+
+
+def test_allof_merges_object_references_and_constraints(capfd):
+    schema = {
+        "$defs": {
+            "identity": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            "score": {
+                "type": "object",
+                "properties": {"score": {"type": "integer"}},
+                "required": ["score"],
+            },
+        },
+        "type": "object",
+        "allOf": [
+            {"$ref": "#/$defs/identity"},
+            {"$ref": "#/$defs/score"},
+            {"properties": {"label": {"type": "boolean"}}, "required": ["label"]},
+        ],
+        "minProperties": 3,
+        "maxProperties": 4,
+    }
+    check_schema_with_instance(
+        schema, {"name": "Ada", "score": 10, "label": True}, strict_mode=False
+    )
+    for instance in (
+        {"name": "Ada", "score": 10},
+        {"name": "Ada", "label": True},
+        {"score": 10, "label": True},
+        {"name": "Ada", "score": "bad", "label": True},
+        {"name": "Ada", "score": 10, "label": True, "a": 1, "b": 2},
+    ):
+        check_schema_with_instance(schema, instance, is_accepted=False, strict_mode=False)
+    assert "Support for allOf with multiple options" not in capfd.readouterr().err
+
+
+def test_allof_merges_same_property_schema_recursively():
+    schema = {
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "nested": {
+                        "type": "object",
+                        "properties": {"left": {"type": "string"}},
+                        "required": ["left"],
+                    }
+                },
+                "required": ["nested"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "nested": {
+                        "type": "object",
+                        "properties": {"right": {"type": "integer"}},
+                        "required": ["right"],
+                    }
+                },
+            },
+        ]
+    }
+    check_schema_with_instance(schema, {"nested": {"left": "ok", "right": 1}}, strict_mode=False)
+    check_schema_with_instance(
+        schema, {"nested": {"left": "ok"}}, is_accepted=False, strict_mode=False
+    )
+
+
+def test_allof_merges_primitive_property_intersection(capfd):
+    schema = {
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string", "minLength": 2}},
+                "required": ["value"],
+            },
+            {"type": "object", "properties": {"value": {"type": "string", "maxLength": 4}}},
+        ]
+    }
+    check_schema_with_instance(schema, {"value": "ab"}, strict_mode=False)
+    check_schema_with_instance(schema, {"value": "abcd"}, strict_mode=False)
+    check_schema_with_instance(schema, {"value": "a"}, is_accepted=False, strict_mode=False)
+    check_schema_with_instance(schema, {"value": "abcde"}, is_accepted=False, strict_mode=False)
+    assert "Support for allOf with multiple options" not in capfd.readouterr().err
+
+
+def test_allof_merges_typed_string_constraints(capfd):
+    schema = {
+        "type": "string",
+        "allOf": [{"format": "uri"}, {"pattern": "^https://"}, {"maxLength": 30}],
+    }
+    check_schema_with_instance(schema, '"https://example.com"', strict_mode=False)
+    check_schema_with_instance(schema, '"http://example.com"', is_accepted=False, strict_mode=False)
+    check_schema_with_instance(
+        schema, '"https://example.com/path/that/is/too/long"', is_accepted=False, strict_mode=False
+    )
+    check_schema_with_instance(schema, 1, is_accepted=False, strict_mode=False)
+    assert "Support for allOf with multiple options" not in capfd.readouterr().err
+
+
+def test_allof_merges_array_reference_and_ignores_inapplicable_object_keywords(capfd):
+    schema = {
+        "$defs": {
+            "base": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+            }
+        },
+        "allOf": [
+            {"$ref": "#/$defs/base"},
+            {"properties": {"flag": {"type": "boolean"}}},
+            {"minItems": 1},
+        ],
+    }
+    check_schema_with_instance(schema, [{"name": "ok"}], strict_mode=False)
+    for instance in ([], [{"name": 1}], [{}], "not-an-array", None):
+        check_schema_with_instance(schema, instance, is_accepted=False, strict_mode=False)
+    assert "Support for allOf with multiple options" not in capfd.readouterr().err
+
+
+def test_allof_intersects_types_with_enum_and_numeric_bounds(capfd):
+    enum_schema = {"allOf": [{"type": "string"}, {"enum": ["female", "male", 1]}]}
+    check_schema_with_instance(enum_schema, '"female"', strict_mode=False)
+    check_schema_with_instance(enum_schema, '"male"', strict_mode=False)
+    check_schema_with_instance(enum_schema, 1, is_accepted=False, strict_mode=False)
+    check_schema_with_instance(enum_schema, '"other"', is_accepted=False, strict_mode=False)
+
+    integer_schema = {
+        "allOf": [{"type": "number"}, {"type": "integer"}, {"minimum": 2}, {"maximum": 4}]
+    }
+    for instance in (2, 3, 4):
+        check_schema_with_instance(integer_schema, instance, strict_mode=False)
+    for instance in (1, 5, 2.5, '"3"'):
+        check_schema_with_instance(integer_schema, instance, is_accepted=False, strict_mode=False)
+    assert "Support for allOf with multiple options" not in capfd.readouterr().err
+
+
+def test_allof_object_merge_detects_impossible_conjunctions():
+    for schema in (
+        {"allOf": [{"type": "object"}, {"type": "string"}]},
+        {
+            "allOf": [
+                {"type": "object", "properties": {"allowed": {}}, "additionalProperties": False},
+                {"type": "object", "required": ["forbidden"]},
+            ]
+        },
+    ):
+        grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False)
+        for instance in ({}, {"allowed": 1}, {"forbidden": 1}, "text", 1, None):
+            serialized = json.dumps(instance)
+            assert not _is_grammar_accept_string(grammar, serialized)
+
+
+def test_allof_object_merge_preserves_strict_mode_additional_property_narrowing(capfd):
+    schema = {
+        "allOf": [
+            {"type": "object", "properties": {"left": {"type": "string"}}},
+            {"type": "object", "properties": {"right": {"type": "integer"}}},
+        ]
+    }
+    # In standards mode, absent additionalProperties means true and the merge is exact.
+    check_schema_with_instance(schema, {"left": "ok", "right": 1}, strict_mode=False)
+    # Strict mode historically narrows each branch to its own declared keys. Their conjunction is
+    # not representable by a single unioned ObjectSpec, so this shape must stay on the old path.
+    xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=True)
+    assert "Support for allOf with multiple options" in capfd.readouterr().err
+
+
 def test_anyof_integer_number_unchanged():
     schema = {"anyOf": [{"type": "integer"}, {"type": "number"}]}
     check_schema_with_instance(schema, 1, any_whitespace=False)
     check_schema_with_instance(schema, 1.5, any_whitespace=False)
+
+
+def test_anyof_preserves_common_sibling_constraints():
+    schema = {
+        "type": "object",
+        "properties": {"kind": {"type": "string"}, "value": {"type": "integer"}},
+        "required": ["kind", "value"],
+        "additionalProperties": False,
+        "anyOf": [
+            {"properties": {"kind": {"const": "left"}}},
+            {"properties": {"kind": {"const": "right"}}},
+        ],
+    }
+    check_schema_with_instance(schema, {"kind": "left", "value": 1}, strict_mode=False)
+    check_schema_with_instance(schema, {"kind": "right", "value": 2}, strict_mode=False)
+    for instance in (
+        {"kind": "other", "value": 1},
+        {"kind": "left", "value": "bad"},
+        {"kind": "left"},
+        {"kind": "left", "value": 1, "extra": True},
+        "left",
+    ):
+        check_schema_with_instance(schema, instance, is_accepted=False, strict_mode=False)
+
+
+def test_oneof_preserves_common_object_and_nested_item_constraints():
+    schema = {
+        "type": "object",
+        "properties": {
+            "grantType": {"type": "string"},
+            "redirectUris": {"type": "array", "items": {"type": "string"}},
+        },
+        "oneOf": [
+            {
+                "properties": {"grantType": {"enum": ["authorization_code"]}},
+                "required": ["grantType"],
+            },
+            {
+                "properties": {"grantType": {"enum": ["client_credentials"]}},
+                "required": ["grantType"],
+            },
+        ],
+    }
+    check_schema_with_instance(
+        schema, {"grantType": "authorization_code", "redirectUris": ["https://example.com"]}
+    )
+    check_schema_with_instance(
+        schema,
+        {"grantType": "authorization_code", "redirectUris": [123]},
+        is_accepted=False,
+        strict_mode=False,
+    )
+    check_schema_with_instance(
+        schema, {"grantType": "other", "redirectUris": []}, is_accepted=False, strict_mode=False
+    )
+
+
+def test_oneof_siblings_distribute_through_referenced_nested_oneof():
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "minLength": 1}},
+        "required": ["name"],
+        "oneOf": [{"$ref": "#/$defs/changed"}, {"$ref": "#/$defs/error"}],
+        "$defs": {
+            "changed": {
+                "properties": {"status": {"const": "changed"}},
+                "required": ["status"],
+                "oneOf": [{"$ref": "#/$defs/file"}, {"$ref": "#/$defs/link"}],
+            },
+            "file": {
+                "properties": {
+                    "kind": {"const": "file"},
+                    "changes": {"type": "array", "minItems": 1},
+                },
+                "required": ["kind", "changes"],
+            },
+            "link": {
+                "properties": {
+                    "kind": {"const": "link"},
+                    "target": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "target"],
+            },
+            "error": {"properties": {"status": {"const": "error"}}, "required": ["status"]},
+        },
+    }
+
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps(schema), any_whitespace=True, strict_mode=False, any_order=True
+    )
+    for instance in (
+        {"name": "ok", "status": "changed", "kind": "file", "changes": ["size"]},
+        {"name": "ok", "status": "changed", "kind": "link", "target": "/tmp/link"},
+        {"name": "ok", "status": "error"},
+    ):
+        assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+    for instance in (
+        {"name": "", "status": "error"},
+        {"name": "ok", "status": "changed", "kind": "file", "changes": []},
+        {"name": "ok", "status": "changed", "kind": "link", "target": ""},
+    ):
+        assert not _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+
+
+def test_allof_distributes_common_object_constraints_over_combinators():
+    anyof_schema = {
+        "type": "object",
+        "properties": {
+            "result": {"type": "string", "minLength": 1},
+            "tags": {"type": "array", "minItems": 1},
+            "ids": {"type": "array", "minItems": 1},
+        },
+        "additionalProperties": False,
+        "allOf": [
+            {"required": ["result"]},
+            {"anyOf": [{"required": ["tags"]}, {"required": ["ids"]}]},
+        ],
+    }
+    anyof_grammar = xgr.Grammar.from_json_schema(
+        json.dumps(anyof_schema), strict_mode=False, any_order=True
+    )
+    for instance in (
+        {"result": "ok", "tags": ["a"]},
+        {"ids": [1], "result": "ok"},
+        {"result": "ok", "tags": ["a"], "ids": [1]},
+    ):
+        assert _is_grammar_accept_string(anyof_grammar, json.dumps(instance)), instance
+    for instance in (
+        {"result": "ok"},
+        {"result": "", "tags": ["a"]},
+        {"result": "ok", "tags": []},
+        {"result": "ok", "ids": [1], "extra": True},
+    ):
+        assert not _is_grammar_accept_string(anyof_grammar, json.dumps(instance)), instance
+
+    oneof_schema = {
+        "type": "object",
+        "allOf": [
+            {
+                "type": "object",
+                "oneOf": [
+                    {"properties": {"state": {"const": "waiting"}}, "required": ["state"]},
+                    {"properties": {"state": {"const": "running"}}, "required": ["state"]},
+                ],
+            },
+            {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+        ],
+    }
+    oneof_grammar = xgr.Grammar.from_json_schema(
+        json.dumps(oneof_schema), strict_mode=False, any_order=True
+    )
+    for instance in ({"state": "waiting", "id": 1}, {"id": 2, "state": "running"}):
+        assert _is_grammar_accept_string(oneof_grammar, json.dumps(instance)), instance
+    for instance in (
+        {"state": "waiting"},
+        {"state": "other", "id": 1},
+        {"state": "running", "id": "bad"},
+    ):
+        assert not _is_grammar_accept_string(oneof_grammar, json.dumps(instance)), instance
+
+
+def test_required_properties_need_not_be_declared_in_properties():
+    schema = {"type": "object", "required": ["left", "right"]}
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    for instance in ({"left": 1, "right": "ok"}, {"extra": None, "right": 2, "left": []}):
+        assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+    for instance in ({}, {"left": 1}, {"left": 1, "extra": 2}, {"other1": 1, "other2": 2}):
+        assert not _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+
+    constrained_additional = {
+        "type": "object",
+        "required": ["value"],
+        "additionalProperties": {"type": "integer"},
+    }
+    constrained_grammar = xgr.Grammar.from_json_schema(
+        json.dumps(constrained_additional), strict_mode=False, any_order=True
+    )
+    assert _is_grammar_accept_string(constrained_grammar, '{"value": 1}')
+    assert not _is_grammar_accept_string(constrained_grammar, '{"value": "bad"}')
+
+    forbidden_required_grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "object", "required": ["missing"], "additionalProperties": False}),
+        strict_mode=False,
+    )
+    for instance in ({}, {"missing": None}, {"other": 1}):
+        assert not _is_grammar_accept_string(forbidden_required_grammar, json.dumps(instance))
+
+
+def test_unsatisfiable_items_schema_does_not_make_array_schema_uncompilable():
+    schema = {
+        "type": "array",
+        "items": {"type": "object", "required": ["missing"], "additionalProperties": False},
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    assert _is_grammar_accept_string(grammar, "[]")
+    for instance in ([{}], [{"missing": None}]):
+        assert not _is_grammar_accept_string(grammar, json.dumps(instance))
+
+
+def test_additional_properties_key_does_not_bypass_pattern_properties():
+    schema = {
+        "type": "object",
+        "patternProperties": {"^S_": {"type": "string"}, "_count$": {"type": "integer"}},
+        "additionalProperties": {"type": "boolean"},
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    for instance in (
+        {},
+        {"S_name": "ok"},
+        {"item_count": 2},
+        {"other": True},
+        {"S_name": "ok", "item_count": 2, "other": False},
+    ):
+        assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+    for instance in ({"S_name": True}, {"item_count": False}, {"other": 2}):
+        assert not _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+
+
+def test_additional_properties_key_excludes_named_and_pattern_properties():
+    schema = {
+        "type": "object",
+        "properties": {"fixed": {"type": "integer"}},
+        "patternProperties": {"^S_": {"type": "string"}},
+        "additionalProperties": {"type": "boolean"},
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    for instance in (
+        {"fixed": 1},
+        {"S_name": "ok"},
+        {"other": True},
+        {"fixed": 1, "S_name": "ok", "other": False},
+    ):
+        assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+    for instance in ({"fixed": True}, {"S_name": False}, {"other": 1}):
+        assert not _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+
+    restored = xgr.Grammar.deserialize_json(grammar.serialize_json())
+    assert _is_grammar_accept_string(restored, '{"other": true}')
+    assert not _is_grammar_accept_string(restored, '{"S_name": true}')
+
+
+def test_named_property_conjoins_matching_pattern_property_schema():
+    schema = {
+        "type": "object",
+        "properties": {"id": {"type": "string", "pattern": "^[A-Fa-f\\d]{24}$"}},
+        "patternProperties": {
+            "^[0-9a-zA-Z_-]{1,255}$": {"type": ["string", "number", "boolean", "null"]}
+        },
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    assert _is_grammar_accept_string(grammar, '{"id": "507f1f77bcf86cd799439011"}')
+    for instance in ('{"id": "507f1f77bcf86cd79943901"}', '{"id": true}'):
+        assert not _is_grammar_accept_string(grammar, instance)
+
+
+def test_any_order_tracks_twelve_required_keys_within_state_budget():
+    required = [f"key_{index}" for index in range(12)]
+    schema = {
+        "type": "object",
+        "properties": {key: {"type": "integer"} for key in required},
+        "required": required,
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    valid = {key: index for index, key in reversed(list(enumerate(required)))}
+    assert _is_grammar_accept_string(grammar, json.dumps(valid))
+
+    # Keep the same total number of properties so a count-only approximation would accept it.
+    missing_one = dict(valid)
+    del missing_one[required[-1]]
+    missing_one["extra"] = 12
+    assert not _is_grammar_accept_string(grammar, json.dumps(missing_one))
+
+
+def test_any_order_tracks_large_required_sets_at_runtime():
+    required = [f"key_{index}" for index in range(13)]
+    properties = {key: {"type": "integer"} for key in required}
+    properties["key_0"] = {"type": "array", "items": {"type": "string"}, "minItems": 1}
+    properties["optional"] = {"type": "boolean"}
+    schema = {"type": "object", "properties": properties, "required": required}
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+
+    valid = {key: index for index, key in reversed(list(enumerate(required)))}
+    valid["key_0"] = ["ok"]
+    assert _is_grammar_accept_string(grammar, json.dumps(valid))
+
+    # An optional/additional key cannot substitute for a missing required name merely because the
+    # total property count is unchanged.
+    missing_one = dict(valid)
+    del missing_one[required[-1]]
+    missing_one["optional"] = True
+    assert not _is_grammar_accept_string(grammar, json.dumps(missing_one))
+
+    # The runtime constraint must be reflected in the generated token mask as well as in the
+    # definitive byte/token acceptance path. In particular, an object-closing token is available
+    # only after every required property has appeared.
+    tokenizer_info = xgr.TokenizerInfo(["}", "<eos>"], stop_token_ids=[1])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_grammar(grammar)
+    for instance, close_is_masked in [(missing_one, True), (valid, False)]:
+        matcher = xgr.GrammarMatcher(compiled)
+        assert matcher.accept_string(json.dumps(instance)[:-1])
+        bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        matcher.fill_next_token_bitmask(bitmask)
+        masked_tokens = xgr.testing._get_masked_tokens_from_bitmask(
+            bitmask, tokenizer_info.vocab_size
+        )
+        assert (0 in masked_tokens) == close_is_masked
+
+    # Every property wrapper must retain its own value constraint even in the middle of the
+    # unbounded any-order item sequence.
+    bad_value_items = [(key, value) for key, value in valid.items() if key != "key_0"]
+    bad_value_items.insert(5, ("key_0", []))
+    bad_value = dict(bad_value_items)
+    assert not _is_grammar_accept_string(grammar, json.dumps(bad_value))
+
+
+def test_any_order_large_required_runtime_state_nests():
+    inner_required = [f"inner_{index}" for index in range(13)]
+    inner_schema = {
+        "type": "object",
+        "properties": {key: {"type": "integer"} for key in inner_required},
+        "required": inner_required,
+    }
+    outer_required = ["nested"] + [f"outer_{index}" for index in range(12)]
+    outer_properties = {key: {"type": "integer"} for key in outer_required}
+    outer_properties["nested"] = inner_schema
+    schema = {"type": "object", "properties": outer_properties, "required": outer_required}
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+
+    inner = {key: index for index, key in enumerate(inner_required)}
+    valid = {key: index for index, key in enumerate(outer_required)}
+    valid["nested"] = inner
+    assert _is_grammar_accept_string(grammar, json.dumps(valid))
+
+    missing_inner = dict(inner)
+    del missing_inner[inner_required[-1]]
+    invalid = dict(valid)
+    invalid["nested"] = missing_inner
+    assert not _is_grammar_accept_string(grammar, json.dumps(invalid))
+
+
+def test_enum_preserves_sibling_type_and_ignores_unknown_annotations():
+    impossible = {"type": "object", "enum": ["MODIFIABLE", "DELETABLE"], "readonly": True}
+    for instance in ({}, '"MODIFIABLE"', '"DELETABLE"', None):
+        check_schema_with_instance(impossible, instance, is_accepted=False, strict_mode=False)
+
+    filtered = {"type": ["string", "null"], "enum": ["ok", None, 1], "mergeStrategy": "append"}
+    check_schema_with_instance(filtered, '"ok"', strict_mode=False)
+    check_schema_with_instance(filtered, None, strict_mode=False)
+    check_schema_with_instance(filtered, 1, is_accepted=False, strict_mode=False)
 
 
 def test_alias():
@@ -1087,7 +1878,6 @@ schema__err_message__test_array_schema_error_cases = [
         {"type": "array", "prefixItems": ["not an object"]},
         "prefixItems must be an array of objects or booleans",
     ),
-    ({"type": "array", "prefixItems": [False]}, "prefixItems contains false"),
     ({"type": "array", "items": "not an object"}, "items must be a boolean or an object"),
     (
         {"type": "array", "unevaluatedItems": "not an object"},
@@ -1096,10 +1886,6 @@ schema__err_message__test_array_schema_error_cases = [
     ({"type": "array", "minItems": "not an integer"}, "minItems must be an integer"),
     ({"type": "array", "maxItems": -1}, "maxItems must be a non-negative integer"),
     ({"type": "array", "minItems": 5, "maxItems": 3}, "minItems is greater than maxItems: 5 > 3"),
-    (
-        {"type": "array", "prefixItems": [{}, {}, {}], "maxItems": 2},
-        "maxItems is less than the number of prefixItems: 2 < 3",
-    ),
     (
         {"type": "array", "prefixItems": [{}, {}], "minItems": 3, "items": False},
         "minItems is greater than the number of prefixItems, but additional items are not "
@@ -1159,8 +1945,10 @@ root ::= ("[" [ \n\t]* (root_item_0 [ \n\t]* "," [ \n\t]* basic_integer [ \n\t]*
 """
         ),
         [
+            ([], True),
+            ([{"name": "John", "age": 30}], True),
+            ([{"name": "John", "age": 30}, 42], True),
             ([{"name": "John", "age": 30}, 42, "test"], True),
-            ([{"name": "John", "age": 30}, 42], False),
             ([{"name": "John", "age": 30}, "test", 42], False),
             ([{"name": "John"}, 42, "test"], False),
         ],
@@ -1191,6 +1979,8 @@ root ::= ("[" [ \n\t]* (root_item_0 [ \n\t]* "," [ \n\t]* basic_integer) ([ \n\t
 """
         ),
         [
+            ([], True),
+            ([{"name": "John", "age": 30}], True),
             ([{"name": "John", "age": 30}, 42, {"name": "Jane"}], True),
             ([{"name": "John", "age": 30}, 42], True),
             ([{"name": "John", "age": 30}, 42, 123], False),
@@ -1261,7 +2051,14 @@ schema__expected_grammar__instances__test_array_schema_min_max = [
             + r"""root ::= ("[" [ \n\t]* (basic_string [ \n\t]* "," [ \n\t]* basic_integer) [ \n\t]* "]")
 """
         ),
-        [(["foo", 42], True), (["foo", 42, "bar"], False), (["foo"], False), ([42, "foo"], False)],
+        [
+            ([], True),
+            (["foo"], True),
+            (["foo", 42], True),
+            (["foo", 42, "bar"], False),
+            ([42], False),
+            ([42, "foo"], False),
+        ],
     ),
     # prefix non-empty, additional items allowed
     (
@@ -1366,6 +2163,143 @@ def test_array_with_only_items_keyword():
     check_schema_with_instance(
         schema_unevaluated_items, instance_rejected, is_accepted=False, any_whitespace=False
     )
+
+
+@pytest.mark.parametrize(
+    "schema, accepted_instances, rejected_instances",
+    [
+        (False, [], [None, False, 0, "", [], {}]),
+        (True, [None, False, 0, '""', [], {}], []),
+        (
+            {
+                "type": "object",
+                "properties": {"allowed": {"type": "integer"}, "forbidden": False},
+                "additionalProperties": False,
+            },
+            [{}, {"allowed": 1}],
+            [{"forbidden": None}, {"allowed": 1, "forbidden": 2}],
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"forbidden": False},
+                "required": ["forbidden"],
+                "additionalProperties": False,
+            },
+            [],
+            [{}, {"forbidden": None}],
+        ),
+        (
+            {"type": "array", "prefixItems": [True, False], "items": True},
+            [[], [1]],
+            [[1, 2], [1, 2, 3]],
+        ),
+        ({"type": "array", "prefixItems": [True, False], "minItems": 2}, [], [[], [1], [1, 2]]),
+        ({"type": "object", "propertyNames": False}, [{}], [{"key": 1}]),
+        ({"anyOf": [False, {"type": "string"}]}, ['"ok"'], [None, 1, False, [], {}]),
+        ({"$defs": {"never": False}, "$ref": "#/$defs/never"}, [], [None, False, 0, "", [], {}]),
+    ],
+)
+def test_boolean_schemas(schema: Any, accepted_instances: List[Any], rejected_instances: List[Any]):
+    for instance in accepted_instances:
+        check_schema_with_instance(schema, instance, strict_mode=False)
+    for instance in rejected_instances:
+        check_schema_with_instance(schema, instance, is_accepted=False, strict_mode=False)
+
+
+@pytest.mark.parametrize(
+    "schema, accepted_instances, rejected_instances",
+    [
+        (
+            {"type": "integer", "minimum": 0, "maximum": 9223372036854776000},
+            [0, 9223372036854775807, 9223372036854776000],
+            [-1, 9223372036854776001, 18446744073709551615],
+        ),
+        (
+            {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+            [0, 9223372036854775808, 18446744073709551615],
+            [-1, 18446744073709551616],
+        ),
+        (
+            {"type": "integer", "minimum": 0, "maximum": 3.6893488147419103e19},
+            [0, 36893488147419103000],
+            [-1, 36893488147419103001],
+        ),
+        (
+            {
+                "type": "integer",
+                "exclusiveMinimum": -18446744073709551616,
+                "exclusiveMaximum": 18446744073709551616,
+            },
+            [-18446744073709551615, 0, 18446744073709551615],
+            [-18446744073709551616, 18446744073709551616],
+        ),
+    ],
+)
+def test_integer_bounds_beyond_int64(
+    schema: Dict[str, Any], accepted_instances: List[int], rejected_instances: List[int]
+):
+    for instance in accepted_instances:
+        check_schema_with_instance(schema, instance, any_whitespace=False)
+    for instance in rejected_instances:
+        check_schema_with_instance(schema, instance, is_accepted=False, any_whitespace=False)
+
+
+def test_integer_scientific_bound_preserves_source_lexeme():
+    # Build from the literal JSON source: materializing this value as a Python float first would
+    # round it to 36893488147419103232 and would not test the Schema's stated decimal boundary.
+    grammar = xgr.Grammar.from_json_schema(
+        '{"type":"integer","minimum":0,"maximum":3.6893488147419103e19}', any_whitespace=False
+    )
+    assert _is_grammar_accept_string(grammar, "36893488147419103000")
+    assert not _is_grammar_accept_string(grammar, "36893488147419103001")
+
+
+def test_exact_integer_bound_preservation_is_schema_aware(capfd):
+    # Large integral bounds on type:number are preserved exactly as number-range metadata.
+    check_schema_with_instance(
+        {"type": "number", "maximum": 1e19}, "5000000000000000000", any_whitespace=False
+    )
+    check_schema_with_instance(
+        {"type": "number", "maximum": 1e19},
+        "10000000000000000001",
+        is_accepted=False,
+        any_whitespace=False,
+    )
+
+    # Unsupported large multipleOf values must still warn and be ignored, not become strings.
+    check_schema_with_instance({"type": "integer", "multipleOf": 1e30}, 7, any_whitespace=False)
+    assert "multipleOf for type:integer must be > 0 and <= 1024" in capfd.readouterr().err
+
+    # Instance-valued keywords are opaque even when their data has a member named maximum.
+    for keyword, value in (
+        ("const", {"maximum": 9223372036854775808}),
+        ("enum", [{"maximum": 9223372036854775808}]),
+    ):
+        grammar = xgr.Grammar.from_json_schema(json.dumps({keyword: value}))
+        assert "xgrammar:exact-integer-bound" not in str(grammar)
+
+    # Property/definition names are not interpreted as Schema keywords, while arbitrary local
+    # reference targets still receive exact bounds.
+    schema = {"maximum": {"type": "integer", "maximum": 18446744073709551615}, "$ref": "#/maximum"}
+    check_schema_with_instance(schema, 18446744073709551615, any_whitespace=False)
+    check_schema_with_instance(
+        schema, 18446744073709551616, is_accepted=False, any_whitespace=False
+    )
+
+
+def test_exact_integer_bound_marker_cannot_be_supplied_by_schema():
+    forged_marker = "\\u0000xgrammar:exact-integer-bound:18446744073709551615"
+    schema = '{"type":"integer","maximum":"' + forged_marker + '"}'
+    with pytest.raises(RuntimeError, match="Value must be a number"):
+        xgr.Grammar.from_json_schema(schema)
+
+
+def test_exact_number_bound_marker_cannot_be_supplied_by_schema():
+    forged_marker = "\\u0000xgrammar:exact-number-bound:0.125"
+    schema = '{"type":"number","minimum":"' + forged_marker + '"}'
+    with pytest.raises(RuntimeError, match="Value must be a number"):
+        xgr.Grammar.from_json_schema(schema)
 
 
 def test_object_with_only_properties_keyword():
@@ -1959,12 +2893,23 @@ def test_email_format(instance: str, accepted: bool):
 
 instance__accepted__test_date_format = [
     (r"0000-01-01", True),
+    (r"0000-02-29", True),
+    (r"1900-02-28", True),
+    (r"2000-02-29", True),
+    (r"2024-02-29", True),
     (r"9999-12-31", True),
     (r"10-01-01", False),
     (r"2025-00-01", False),
     (r"2025-13-01", False),
     (r"2025-01-00", False),
     (r"2025-01-32", False),
+    (r"1900-02-29", False),
+    (r"2023-02-29", False),
+    (r"2024-02-30", False),
+    (r"2025-04-31", False),
+    (r"2025-06-31", False),
+    (r"2025-09-31", False),
+    (r"2025-11-31", False),
 ]
 
 
@@ -2018,12 +2963,18 @@ def test_time_format(instance: str, accepted: bool):
 
 
 instance__accepted__test_date_time_format = [
+    (r"2000-02-29T00:00:00Z", True),
+    (r"2024-02-29T14:23:45Z", True),
     (r"2024-05-19T14:23:45Z", True),
     (r"2019-11-30T08:15:27+05:30", True),
     (r"2030-02-01T22:59:59-07:00", True),
     (r"2021-07-04T00:00:00.123456Z", True),
     (r"2022-12-31T23:45:12-03:00", True),
     (r"2024-12-31T23:45:60.123456Z", True),
+    (r"1900-02-29T00:00:00Z", False),
+    (r"2023-02-29T00:00:00Z", False),
+    (r"2024-02-30T00:00:00Z", False),
+    (r"2025-04-31T00:00:00Z", False),
     (r"2024-12-31T23:60:12.123456+05:30", False),
     (r"2024-13-15T14:30:00Z", False),
     (r"2023-02-2010:59:59Z", False),
@@ -2426,6 +3377,43 @@ def test_min_max_length():
     check_schema_with_instance(schema, instance_rejected, is_accepted=False, any_whitespace=True)
 
 
+def test_plain_string_length_counts_decoded_codepoints():
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "minLength": 2, "maxLength": 2})
+    )
+    for instance in ('"ab"', r'"\nX"', '"éa"', r'"\u00e9a"', '"😀a"', r'"\ud83d\ude00a"'):
+        assert _is_grammar_accept_string(grammar, instance), instance
+    for instance in ('""', '"a"', r'"\n"', r'"\u00e9"', '"abc"', r'"\ud83d\ude00ab"'):
+        assert not _is_grammar_accept_string(grammar, instance), instance
+
+
+def test_string_format_combines_pattern_and_decoded_length():
+    schema = {
+        "type": "string",
+        "format": "email",
+        "pattern": "@example\\.com$",
+        "minLength": 13,
+        "maxLength": 21,
+    }
+    for instance in ('"a@example.com"', '"alice@example.com"'):
+        check_schema_with_instance(schema, instance)
+    for instance in ('"a@other.com"', '"not-an-email"', '"verylongname@example.com"'):
+        check_schema_with_instance(schema, instance, is_accepted=False)
+
+    # Exercise an exact decoded-length boundary without relying on non-ASCII local parts, which
+    # are outside the JSON Schema `email` format (internationalized mailboxes use `idn-email`).
+    exact_length_schema = {
+        "type": "string",
+        "format": "email",
+        "pattern": "@example\\.com$",
+        "minLength": 13,
+        "maxLength": 13,
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(exact_length_schema))
+    assert _is_grammar_accept_string(grammar, '"a@example.com"')
+    assert not _is_grammar_accept_string(grammar, '"ab@example.com"')
+
+
 def test_type_array():
     schema = {
         "type": ["integer", "string"],
@@ -2712,9 +3700,7 @@ number_range_instances = [
     # negative exclusive
     ({"type": "number", "exclusiveMinimum": -5.5}, "-5.5", False),
     ({"type": "number", "exclusiveMinimum": -5.5}, "-5.499999", True),
-    # bounds with more fraction digits than the 6-digit precision must round
-    # toward the feasible region (upper rounds down, lower rounds up) so no
-    # out-of-range value leaks in
+    # Bounds with more than six fractional digits are enforced without truncation.
     ({"type": "number", "maximum": 0.9999999}, "1", False),
     ({"type": "number", "maximum": 0.9999999}, "0.999999", True),
     ({"type": "number", "maximum": 4.9999996}, "5", False),
@@ -2736,6 +3722,115 @@ number_range_instances = [
 @pytest.mark.parametrize("schema, instance, accepted", number_range_instances)
 def test_number_range_value_acceptance(schema, instance, accepted):
     check_schema_with_instance(schema, instance, is_accepted=accepted)
+
+
+@pytest.mark.parametrize(
+    "schema, accepted_instances, rejected_instances",
+    [
+        (
+            '{"type":"number","minimum":0.01604249,"maximum":0.01604251}',
+            ["0.0160425", "0.016042490000", "160425e-7"],
+            ["0.016042489999", "0.016042510001"],
+        ),
+        (
+            '{"type":"number","minimum":0.123456789012345678901234567890,'
+            '"maximum":0.123456789012345678901234567891}',
+            ["0.123456789012345678901234567890", "0.1234567890123456789012345678905"],
+            ["0.1234567890123456789012345678899", "0.123456789012345678901234567892"],
+        ),
+        (
+            '{"type":"number","minimum":1,"maximum":2}',
+            ["1e0", "10e-1", "2E+0", "0.02e2"],
+            ["9e-1", "2.0000000000000000001", "20.1e-1"],
+        ),
+        (
+            '{"type":"number","minimum":-2,"maximum":-1}',
+            ["-1e0", "-20e-1", "-1.5"],
+            ["-0.999999999", "-2.000000001", "1.5"],
+        ),
+        (
+            '{"type":"number","minimum":0,"maximum":0}',
+            ["0", "-0", "-0.000", "0e9999999999"],
+            ["1e-9999999999", "-1e-9999999999"],
+        ),
+        (
+            '{"type":"number","minimum":9007199254740993,' '"maximum":9007199254740995}',
+            ["9007199254740993", "9007199254740994", "9007199254740995"],
+            ["9007199254740992", "9007199254740996"],
+        ),
+        (
+            '{"type":"number","minimum":1e100,"maximum":2e100}',
+            ["1e100", "15e99", "2e100"],
+            ["999e97", "2001e97"],
+        ),
+        (
+            '{"type":"number","minimum":0.1,"maximum":1,"multipleOf":0.1}',
+            ["0.1", "1e-1", "0.3", "1.0"],
+            ["0", "0.25", "1.1"],
+        ),
+    ],
+)
+def test_number_range_exact_decimal_lexemes(
+    schema: str, accepted_instances: List[str], rejected_instances: List[str]
+):
+    grammar = xgr.Grammar.from_json_schema(schema, any_whitespace=False)
+    for instance in accepted_instances:
+        assert _is_grammar_accept_string(grammar, instance), (schema, instance)
+    for instance in rejected_instances:
+        assert not _is_grammar_accept_string(grammar, instance), (schema, instance)
+
+
+@pytest.mark.parametrize(
+    "schema, accepted_instances, rejected_instances",
+    [
+        (
+            '{"type":"number","minimum":1e3000000000,"maximum":2e3000000000}',
+            ["1e3000000000", "10e2999999999", "15e2999999999", "2e3000000000"],
+            ["1e2999999999", "2e2999999999", "0.09e3000000001", "21e2999999999"],
+        ),
+        (
+            '{"type":"number","minimum":-1e3000000000,"maximum":-1e-3000000000}',
+            ["-1e3000000000", "-1", "-1e-3000000000"],
+            ["-1e3000000001", "-1e-3000000001", "1e-3000000001"],
+        ),
+        (
+            '{"type":"number","minimum":1e3000000000,"multipleOf":0.1}',
+            ["1e3000000000", "15e2999999999"],
+            ["1e2999999999", "1e-3000000000"],
+        ),
+        (
+            '{"type":"number","minimum":1e9223372036854775807,' '"maximum":1e9223372036854775809}',
+            ["1e9223372036854775807", "10e9223372036854775806", "1e9223372036854775809"],
+            ["1e9223372036854775806", "9e9223372036854775806", "1e9223372036854775810"],
+        ),
+        (
+            '{"type":"number","maximum":1e-9223372036854775808}',
+            ["1e-9223372036854775809", "1e-9223372036854775808"],
+            ["1e-9223372036854775807", "1"],
+        ),
+    ],
+)
+def test_number_range_arbitrary_precision_exponents(
+    schema: str, accepted_instances: List[str], rejected_instances: List[str]
+):
+    grammar = xgr.Grammar.from_json_schema(schema, any_whitespace=False)
+    for instance in accepted_instances:
+        assert _is_grammar_accept_string(grammar, instance), (schema, instance)
+    for instance in rejected_instances:
+        assert not _is_grammar_accept_string(grammar, instance), (schema, instance)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        '{"type":"number","minimum":1e3000000001,"maximum":1e3000000000}',
+        '{"type":"number","exclusiveMinimum":1e3000000000,"maximum":1e3000000000}',
+        '{"type":"number","minimum":1e9223372036854775810,' '"maximum":1e9223372036854775809}',
+    ],
+)
+def test_number_range_arbitrary_precision_exponent_empty_range(schema: str):
+    with pytest.raises(RuntimeError, match="Invalid range: empty range"):
+        xgr.Grammar.from_json_schema(schema, any_whitespace=False)
 
 
 unsatisfiable_range_schemas = [
@@ -3083,7 +4178,8 @@ def test_utf8_object_array_in_enum():
     assert _is_grammar_accept_string(grammar, '{"key":"你好"}')
     assert _is_grammar_accept_string(grammar, '{"key":"hello"}')
     assert _is_grammar_accept_string(grammar, '{"key":"\\n"}')
-    assert _is_grammar_accept_string(grammar, '[123,"こんにちは","😊","你好","hello","\\n"]')
+    # The array is present in enum but cannot satisfy the sibling `type: object` assertion.
+    assert not _is_grammar_accept_string(grammar, '[123,"こんにちは","😊","你好","hello","\\n"]')
 
 
 def test_utf8_object_const():
@@ -3109,6 +4205,22 @@ def test_pattern_properties_with_properties():
 
     check_schema_with_instance(schema, {"name": "John", "grade": "B"}, any_whitespace=False)
     check_schema_with_instance(schema, {"grade": "B"}, is_accepted=False, any_whitespace=False)
+
+
+@pytest.mark.parametrize("any_order", [False, True])
+def test_named_property_cannot_bypass_through_inapplicable_pattern_schema(any_order: bool):
+    """A key matching properties and patternProperties must satisfy both value schemas."""
+    schema = {
+        "type": "object",
+        "properties": {"version": {"type": "number"}},
+        "required": ["version"],
+        "additionalProperties": False,
+        # Object keywords do not constrain a numeric value, but the pattern branch must not become
+        # an alternative that lets the named key bypass its numeric schema.
+        "patternProperties": {"^.+$": {"properties": {"nested": {"type": "string"}}}},
+    }
+    _accept_any_order(schema, '{"version": 0.1}', True, any_order=any_order)
+    _accept_any_order(schema, '{"version": "0.1"}', False, any_order=any_order)
 
 
 def test_pattern_properties_extra_key():
@@ -3226,10 +4338,9 @@ def test_any_order_ebnf():
         "additionalProperties": False,
     }
     ebnf = _json_schema_to_ebnf(schema, any_whitespace=False, any_order=True)
-    # One "item" alternation repeated [n=#required=2, m=unbounded] times.
-    assert "root_item ::=" in ebnf
+    # A small state graph records which required fields have already appeared.
+    assert "root_required_state" in ebnf
     assert "root ::= " in ebnf
-    assert "{1, -1}" in ebnf
 
 
 @pytest.mark.parametrize(
@@ -3237,10 +4348,7 @@ def test_any_order_ebnf():
     [
         ('{"a": 1, "b": "x"}', True),  # declared order
         ('{"b": "x", "a": 1}', True),  # reordered required
-        (
-            '{"a": 1, "a": 2}',
-            True,
-        ),  # duplicate required, b missing -> only the count (2) is enforced
+        ('{"a": 1, "a": 2}', False),  # repeating a cannot stand in for the missing required b
         ('{"a": 1, "b": "x", "c": true}', True),  # with optional
         ('{"b": "x", "a": 1, "c": true}', True),  # reordered required + optional
         ('{"c": true, "a": 1, "b": "x"}', True),  # optional fully interleaved before required
@@ -3378,9 +4486,11 @@ def test_any_order_backward_compatible():
     default = _json_schema_to_ebnf(schema, any_whitespace=False)
     explicit_false = _json_schema_to_ebnf(schema, any_whitespace=False, any_order=False)
     assert default == explicit_false
-    # The any_order-only "item" alternation rule must not appear in the fixed-order grammar.
-    assert "root_item" not in default
-    assert "root_item" in _json_schema_to_ebnf(schema, any_whitespace=False, any_order=True)
+    # The any_order-only required-field state graph must not appear in the fixed-order grammar.
+    assert "root_required_state" not in default
+    assert "root_required_state" in _json_schema_to_ebnf(
+        schema, any_whitespace=False, any_order=True
+    )
 
 
 def test_any_order_qwen_xml():
@@ -3393,9 +4503,9 @@ def test_any_order_qwen_xml():
     ordered = _json_schema_to_ebnf(json.dumps(schema), json_format="qwen_xml", any_order=False)
     any_order = _json_schema_to_ebnf(json.dumps(schema), json_format="qwen_xml", any_order=True)
 
-    # Ordered keeps declared order; any_order emits one repeated item alternation.
-    assert "root_item ::=" not in ordered
-    assert "root_item ::=" in any_order
+    # Ordered keeps declared order; any_order emits the required-field state graph.
+    assert "root_required_state" not in ordered
+    assert "root_required_state" in any_order
     assert _is_grammar_accept_string(
         ordered, "<parameter=a>1</parameter><parameter=b>x</parameter>"
     )
@@ -3423,9 +4533,9 @@ def test_compile_json_schema_any_order(cache_enabled: bool):
     any_order = str(
         compiler.compile_json_schema(schema, any_whitespace=False, any_order=True).grammar
     )
-    # any_order=True relaxes ordering via the flat "item" alternation; the default does not.
-    assert "root_item" not in ordered
-    assert "root_item" in any_order
+    # any_order=True relaxes ordering via the required-field state graph; the default does not.
+    assert "root_required_state" not in ordered
+    assert "root_required_state" in any_order
     assert ordered != any_order
 
 

@@ -329,6 +329,53 @@ void GrammarBuilder::UpdateJSONStringLengthBounds(
   grammar_->rules_[rule_id].json_string_max_chars = max_chars;
 }
 
+void GrammarBuilder::UpdateJSONStringPattern(int32_t rule_id, const std::string& pattern) {
+  XGRAMMAR_CHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(grammar_->rules_.size()))
+      << "Rule id " << rule_id << " is out of range.";
+  grammar_->rules_[rule_id].json_string_pattern = pattern;
+}
+
+void GrammarBuilder::UpdateJSONNumberMultipleOf(
+    int32_t rule_id, int32_t coefficient, int32_t decimal_scale
+) {
+  XGRAMMAR_CHECK(0 <= rule_id && rule_id < static_cast<int32_t>(grammar_->rules_.size()));
+  XGRAMMAR_CHECK(coefficient >= 0);
+  grammar_->rules_[rule_id].json_number_multiple_of_coefficient = coefficient;
+  grammar_->rules_[rule_id].json_number_multiple_of_decimal_scale = decimal_scale;
+}
+
+void GrammarBuilder::UpdateJSONNumberRange(
+    int32_t rule_id,
+    const std::string& minimum,
+    const std::string& maximum,
+    bool exclusive_minimum,
+    bool exclusive_maximum
+) {
+  XGRAMMAR_CHECK(0 <= rule_id && rule_id < static_cast<int32_t>(grammar_->rules_.size()));
+  grammar_->rules_[rule_id].json_number_minimum = minimum;
+  grammar_->rules_[rule_id].json_number_maximum = maximum;
+  grammar_->rules_[rule_id].json_number_exclusive_minimum = exclusive_minimum;
+  grammar_->rules_[rule_id].json_number_exclusive_maximum = exclusive_maximum;
+}
+
+void GrammarBuilder::UpdateJSONObjectRequiredCount(int32_t rule_id, int32_t required_count) {
+  XGRAMMAR_CHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(grammar_->rules_.size()));
+  XGRAMMAR_CHECK(required_count >= 0);
+  grammar_->rules_[rule_id].json_object_required_count = required_count;
+}
+
+void GrammarBuilder::UpdateJSONObjectRequiredProperty(
+    int32_t rule_id, int32_t owner_rule_id, int32_t property_index
+) {
+  XGRAMMAR_CHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(grammar_->rules_.size()));
+  XGRAMMAR_CHECK(
+      owner_rule_id >= 0 && owner_rule_id < static_cast<int32_t>(grammar_->rules_.size())
+  );
+  XGRAMMAR_CHECK(property_index >= 0);
+  grammar_->rules_[rule_id].json_object_required_owner_rule_id = owner_rule_id;
+  grammar_->rules_[rule_id].json_object_required_property_index = property_index;
+}
+
 void GrammarBuilder::UpdateCaptureName(int32_t rule_id, const std::string& capture_name) {
   XGRAMMAR_CHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(grammar_->rules_.size()))
       << "Rule id " << rule_id << " is out of range.";

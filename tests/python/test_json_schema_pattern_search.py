@@ -90,6 +90,91 @@ def test_pattern_json_string_escape_spellings():
     assert not _is_grammar_accept_string(literal, r'"\u0062"')
 
 
+def test_streaming_search_pattern_decodes_surrogate_pairs():
+    grammar = xgr.Grammar.from_json_schema(json.dumps({"type": "string", "pattern": r"[\s\S]"}))
+    assert _is_grammar_accept_string(grammar, r'"\ud83d\ude00"')
+
+
+@pytest.mark.parametrize(
+    "encoded_value", ['"é"', r'"\u00e9"', '"😀"', r'"\ud83d\ude00"', r'"\n"', r'"\t"']
+)
+def test_streaming_any_character_decodes_equivalent_json_spellings(encoded_value: str):
+    grammar = xgr.Grammar.from_json_schema(json.dumps({"type": "string", "pattern": r"[\s\S]"}))
+    assert _is_grammar_accept_string(grammar, encoded_value)
+    assert not _is_grammar_accept_string(grammar, '""')
+
+
+def test_streaming_ascii_literal_decodes_unicode_escape_and_short_escape():
+    literal = xgr.Grammar.from_json_schema(json.dumps({"type": "string", "pattern": "a"}))
+    assert _is_grammar_accept_string(literal, '"prefix-a-suffix"')
+    assert _is_grammar_accept_string(literal, r'"prefix-\u0061-suffix"')
+
+    newline = xgr.Grammar.from_json_schema(json.dumps({"type": "string", "pattern": r"\n"}))
+    assert _is_grammar_accept_string(newline, r'"prefix\nsuffix"')
+    assert _is_grammar_accept_string(newline, r'"prefix\u000asuffix"')
+    assert not _is_grammar_accept_string(newline, '"prefix-n-suffix"')
+
+
+def test_large_literal_alternative_search_handles_failure_transitions():
+    alternatives = ["bcd", "abce", "he", "she", "his", "hers"] + [
+        f"region-{index:03d}" for index in range(128)
+    ]
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "|".join(alternatives)})
+    )
+    assert "json_schema_streaming_pattern" in str(grammar)
+    for value in ["abcd", "ushers", "prefix-region-127-suffix"]:
+        assert _is_grammar_accept_string(grammar, json.dumps(value))
+    for value in ["abcf", "prefix-region-128-suffix", "nothing"]:
+        assert not _is_grammar_accept_string(grammar, json.dumps(value))
+
+
+def test_streaming_pattern_properties_and_length_constraints():
+    alternatives = ["needle", "bcd", "abce"] + [f"zone-{index:03d}" for index in range(64)]
+    schema = {
+        "type": "object",
+        "patternProperties": {"|".join(alternatives): {"type": "integer"}},
+        "additionalProperties": False,
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema))
+    assert "json_schema_streaming_pattern" in str(grammar)
+    assert _is_grammar_accept_string(grammar, '{"prefix-zone-063-suffix":1}')
+    assert _is_grammar_accept_string(grammar, '{"abcd":2}')
+    assert not _is_grammar_accept_string(grammar, '{"prefix-zone-064-suffix":1}')
+    assert not _is_grammar_accept_string(grammar, '{"prefix-zone-063-suffix":"wrong"}')
+
+    string_grammar = xgr.Grammar.from_json_schema(
+        json.dumps({"type": "string", "pattern": "target|bcd|abce", "minLength": 7, "maxLength": 7})
+    )
+    assert _is_grammar_accept_string(string_grammar, '"😀target"')
+    assert _is_grammar_accept_string(string_grammar, r'"\ud83d\ude00target"')
+    assert not _is_grammar_accept_string(string_grammar, '"target"')
+    assert not _is_grammar_accept_string(string_grammar, '"😀targetx"')
+
+
+@pytest.mark.parametrize("encoded_value", ['"é"', r'"\u00e9"', '"😀"', r'"\ud83d\ude00"'])
+def test_anchored_dot_counts_decoded_unicode_codepoints(encoded_value: str):
+    one = xgr.Grammar.from_json_schema(json.dumps({"type": "string", "pattern": "^.$"}))
+    two = xgr.Grammar.from_json_schema(json.dumps({"type": "string", "pattern": "^..$"}))
+    assert _is_grammar_accept_string(one, encoded_value)
+    assert not _is_grammar_accept_string(two, encoded_value)
+
+
+@pytest.mark.parametrize(
+    "pattern,accepted,rejected",
+    [("^é$", '"é"', '"ê"'), ("^[éê]$", '"ê"', '"a"'), ("^[😀-😿]$", '"😀"', '"🌀"')],
+)
+def test_anchored_unicode_pattern_decodes_equivalent_json_spellings(
+    pattern: str, accepted: str, rejected: str
+):
+    grammar = xgr.Grammar.from_json_schema(json.dumps({"type": "string", "pattern": pattern}))
+    accepted_value = json.loads(accepted)
+    escaped_accepted = json.dumps(accepted_value, ensure_ascii=True)
+    assert _is_grammar_accept_string(grammar, accepted)
+    assert _is_grammar_accept_string(grammar, escaped_accepted)
+    assert not _is_grammar_accept_string(grammar, rejected)
+
+
 def test_bounded_character_class_repeat_counts_decoded_characters():
     grammar = xgr.Grammar.from_json_schema(
         json.dumps({"type": "string", "pattern": r"^[A-F\d]{2,3}$"})
@@ -267,6 +352,34 @@ def test_pattern_length_compiled_grammar_serialization(enable_dynamic_compilatio
     for token_id in [0, 1]:
         assert matcher.accept_token(token_id)
     assert not matcher.accept_token(2)
+
+
+@pytest.mark.parametrize("enable_dynamic_compilation", [False, True])
+def test_large_streaming_pattern_serialization_preserves_masks(enable_dynamic_compilation: bool):
+    alternatives = ["bcd", "abce", "hers"] + [f"region-{index:03d}" for index in range(96)]
+    vocabulary = ['"', "prefix-", "abcd", "region-095", "region-096", "-suffix", '"']
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=enable_dynamic_compilation
+    ).compile_json_schema(
+        json.dumps(
+            {"type": "string", "pattern": "|".join(alternatives), "minLength": 4, "maxLength": 32}
+        )
+    )
+    restored = xgr.CompiledGrammar.deserialize_json(compiled.serialize_json(), tokenizer_info)
+    for token_ids in ([0, 2, 6], [0, 1, 3, 5, 6]):
+        original = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        recovered = xgr.GrammarMatcher(restored, terminate_without_stop_token=True)
+        original_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        recovered_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        for token_id in token_ids:
+            original.fill_next_token_bitmask(original_mask)
+            recovered.fill_next_token_bitmask(recovered_mask)
+            assert original_mask.equal(recovered_mask)
+            assert original.accept_token(token_id)
+            assert recovered.accept_token(token_id)
+        assert original.is_terminated()
+        assert recovered.is_terminated()
 
 
 @pytest.mark.parametrize("enable_dynamic_compilation", [False, True])

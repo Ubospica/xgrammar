@@ -42,7 +42,8 @@ XMLToolCallingConverter::XMLToolCallingConverter(
     RefResolver ref_resolver,
     JSONFormat json_format,
     bool any_order,
-    RegexFSMCache* regex_fsm_cache
+    RegexFSMCache* regex_fsm_cache,
+    bool enable_runtime_json_string_constraints
 )
     : JSONSchemaConverter(
           indent,
@@ -51,7 +52,8 @@ XMLToolCallingConverter::XMLToolCallingConverter(
           max_whitespace_cnt,
           ref_resolver,
           any_order,
-          regex_fsm_cache
+          regex_fsm_cache,
+          enable_runtime_json_string_constraints
       ),
       json_format_(json_format),
       nested_object_level_(0),

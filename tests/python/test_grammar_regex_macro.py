@@ -112,12 +112,12 @@ def test_regex_macro_accept_string(ebnf_str: str, input_str: str, accepted: bool
 
 
 ebnf_str__input_str__accepted__test_regex_macro_json_string = [
-    # json_string=true excludes '"', '\' and the control characters from every character
-    # match, so the regex cannot produce an unescaped quote inside a JSON string literal.
+    # json_string=true consumes JSON source spellings. Valid escapes such as \b represent their
+    # decoded character, while an unescaped quote and invalid escape remain rejected.
     (r'root ::= Regex("\\S+", json_string=true)', "abc", True),
     (r'root ::= Regex("\\S+", json_string=true)', "a.b!c", True),
     (r'root ::= Regex("\\S+", json_string=true)', 'a"b', False),
-    (r'root ::= Regex("\\S+", json_string=true)', "a\\b", False),
+    (r'root ::= Regex("\\S+", json_string=true)', "a\\b", True),
     (r'root ::= Regex("\\S+", json_string=true)', "a b", False),
     (r'root ::= Regex(".+", json_string=true)', "ab", True),
     (r'root ::= Regex(".+", json_string=true)', "a\tb", False),
@@ -191,14 +191,14 @@ def test_regex_macro_invalid_pattern():
 def test_json_schema_pattern_uses_regex_macro():
     schema = json.dumps({"type": "string", "pattern": "^\\S+$"})
     grammar = xgr.Grammar.from_json_schema(schema, any_whitespace=False)
-    assert "Regex(" in str(grammar)
-    assert "json_string=true" in str(grammar)
+    assert "json_schema_streaming_pattern" in str(grammar)
     assert _is_grammar_accept_string(grammar, '"abc"')
     assert _is_grammar_accept_string(grammar, '"a.b!c"')
-    # An unescaped quote or backslash inside the string would be invalid JSON.
+    # An unescaped quote or invalid escape is invalid JSON. A JSON \b escape is valid and
+    # decodes to a non-whitespace backspace character.
     assert not _is_grammar_accept_string(grammar, '"""')
     assert not _is_grammar_accept_string(grammar, '"a"b"')
-    assert not _is_grammar_accept_string(grammar, '"a\\b"')
+    assert _is_grammar_accept_string(grammar, '"a\\b"')
     assert not _is_grammar_accept_string(grammar, '"a b"')
     assert not _is_grammar_accept_string(grammar, '""')
 
@@ -207,26 +207,24 @@ def test_json_schema_pattern_repetition():
     # End-to-end check of the simplification passes on the compiled pattern automaton.
     schema = json.dumps({"type": "string", "pattern": "^(ab)+$"})
     grammar = xgr.Grammar.from_json_schema(schema, any_whitespace=False)
-    assert "Regex(" in str(grammar)
-    assert "json_string=true" in str(grammar)
+    assert "json_schema_streaming_pattern" in str(grammar)
     assert _is_grammar_accept_string(grammar, '"abab"')
     assert not _is_grammar_accept_string(grammar, '""')
     assert not _is_grammar_accept_string(grammar, '"a"')
 
 
 def test_json_schema_pattern_json_string_encoding_and_fallback():
-    # A logical quote is represented by a JSON escape inside the string body and remains on the
-    # regex-FSM path.
+    # A logical quote is represented by a JSON escape and checked by the decoded streaming DFA.
     schema = json.dumps({"type": "string", "pattern": '^a"b$'})
     grammar = xgr.Grammar.from_json_schema(schema, any_whitespace=False)
-    assert "Regex(" in str(grammar)
+    assert "json_schema_streaming_pattern" in str(grammar)
     assert _is_grammar_accept_string(grammar, '"a\\"b"')
     assert not _is_grammar_accept_string(grammar, '"ab"')
 
-    # A pattern with non-printable-ASCII characters also falls back to the CFG expansion.
+    # Unicode character classes use the same decoded streaming path.
     schema = json.dumps({"type": "string", "pattern": "^[一-龥]+$"})
     grammar = xgr.Grammar.from_json_schema(schema, any_whitespace=False)
-    assert "Regex(" not in str(grammar)
+    assert "json_schema_streaming_pattern" in str(grammar)
     assert _is_grammar_accept_string(grammar, '"你好"')
     assert not _is_grammar_accept_string(grammar, '"ab"')
 

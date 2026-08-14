@@ -163,6 +163,14 @@ class DynamicBitset {
     return *this;
   }
 
+  /*! \brief OR the intersection of two bitsets into this bitset. */
+  void OrWithIntersection(const DynamicBitset& lhs, const DynamicBitset& rhs) {
+    XGRAMMAR_DCHECK(buffer_size_ <= lhs.buffer_size_ && buffer_size_ <= rhs.buffer_size_);
+    for (int i = 0; i < buffer_size_; ++i) {
+      data_[i] |= lhs.data_[i] & rhs.data_[i];
+    }
+  }
+
   int FindFirstOne() const { return DoFindOneFrom(0); }
 
   int FindNextOne(int pos) const {

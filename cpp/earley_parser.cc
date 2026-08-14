@@ -12,7 +12,9 @@
 #include <vector>
 
 #include "fsm.h"
+#include "fsm_builder.h"
 #include "grammar_impl.h"
+#include "json_schema_converter.h"
 #include "support/encoding.h"
 #include "support/logging.h"
 #include "xgrammar/grammar.h"
@@ -22,6 +24,199 @@ namespace xgrammar {
 using GrammarExprType = Grammar::Impl::GrammarExprType;
 
 using GrammarExpr = Grammar::Impl::GrammarExpr;
+
+namespace {
+
+using JSONNumberBound = EarleyParserGrammarFeatures::JSONNumberBound;
+
+constexpr uint32_t kNumberSeenFraction = 1U << 0;
+constexpr uint32_t kNumberInExponent = 1U << 1;
+constexpr uint32_t kNumberExponentNegative = 1U << 2;
+constexpr uint32_t kNumberNonzero = 1U << 3;
+constexpr uint32_t kNumberExponentOverflow = 1U << 4;
+constexpr uint32_t kNumberFractionOverflow = 1U << 5;
+constexpr uint32_t kNumberSignificantOverflow = 1U << 6;
+constexpr uint32_t kNumberNegative = 1U << 7;
+constexpr int32_t kNumberMinimumCompareShift = 8;
+constexpr int32_t kNumberMaximumCompareShift = 10;
+constexpr uint32_t kNumberCompareMask = 3;
+constexpr uint32_t kNumberTrailingOverflow = 1U << 12;
+constexpr int32_t kNumberTrailingShift = 13;
+constexpr uint32_t kNumberLowFlagsMask = (1U << kNumberTrailingShift) - 1;
+constexpr uint32_t kNumberTrailingMax =
+    std::numeric_limits<uint32_t>::max() >> kNumberTrailingShift;
+constexpr int32_t kNumberCompareEqual = 0;
+constexpr int32_t kNumberCompareLess = 1;
+constexpr int32_t kNumberCompareGreater = 2;
+
+struct JSONObjectRequiredMergeStateHash {
+  size_t operator()(ParserState state) const {
+    state.json_object_required_state_id = -1;
+    return StateHashForParsing()(state);
+  }
+};
+
+struct JSONObjectRequiredMergeStateEqual {
+  bool operator()(ParserState lhs, ParserState rhs) const {
+    lhs.json_object_required_state_id = -1;
+    rhs.json_object_required_state_id = -1;
+    return StateEqualForParsing()(lhs, rhs);
+  }
+};
+
+int32_t GetNumberCompare(uint32_t flags, int32_t shift) {
+  return (flags >> shift) & kNumberCompareMask;
+}
+
+void SetNumberCompare(uint32_t* flags, int32_t shift, int32_t compare) {
+  *flags = (*flags & ~(kNumberCompareMask << shift)) | (compare << shift);
+}
+
+std::optional<JSONNumberBound> ParseJSONNumberBound(const std::string& text) {
+  size_t position = 0;
+  bool negative = false;
+  if (position < text.size() && text[position] == '-') {
+    negative = true;
+    ++position;
+  }
+  const size_t integer_begin = position;
+  while (position < text.size() && std::isdigit(static_cast<unsigned char>(text[position]))) {
+    ++position;
+  }
+  if (position == integer_begin || (text[integer_begin] == '0' && position - integer_begin != 1)) {
+    return std::nullopt;
+  }
+  std::string digits = text.substr(integer_begin, position - integer_begin);
+  int64_t fractional_digits = 0;
+  if (position < text.size() && text[position] == '.') {
+    const size_t fraction_begin = ++position;
+    while (position < text.size() && std::isdigit(static_cast<unsigned char>(text[position]))) {
+      digits.push_back(text[position++]);
+    }
+    if (position == fraction_begin) return std::nullopt;
+    fractional_digits = static_cast<int64_t>(position - fraction_begin);
+  }
+
+  SignedDecimalInteger exponent;
+  bool exponent_negative = false;
+  if (position < text.size() && (text[position] == 'e' || text[position] == 'E')) {
+    ++position;
+    if (position < text.size() && (text[position] == '+' || text[position] == '-')) {
+      exponent_negative = text[position++] == '-';
+    }
+    const size_t exponent_begin = position;
+    while (position < text.size() && std::isdigit(static_cast<unsigned char>(text[position]))) {
+      ++position;
+    }
+    if (position == exponent_begin) return std::nullopt;
+    exponent = MakeSignedDecimalInteger(
+        exponent_negative, std::string_view(text).substr(exponent_begin, position - exponent_begin)
+    );
+  }
+  if (position != text.size()) return std::nullopt;
+
+  const size_t first_nonzero = digits.find_first_not_of('0');
+  if (first_nonzero == std::string::npos) {
+    return JSONNumberBound{false, "0", {}, 0};
+  }
+  digits.erase(0, first_nonzero);
+  SignedDecimalInteger order =
+      AddSignedDecimalInteger(exponent, static_cast<int64_t>(digits.size()) - fractional_digits);
+  while (digits.size() > 1 && digits.back() == '0') {
+    digits.pop_back();
+  }
+  auto small_order = TryConvertSignedDecimalIntegerToInt64(order);
+  return JSONNumberBound{negative, std::move(digits), std::move(order), small_order};
+}
+
+struct JSONNumberExponentThreshold {
+  bool negative = false;
+  uint64_t small_magnitude = 0;
+  std::string large_magnitude;
+
+  bool IsZero() const {
+    return large_magnitude.empty() ? small_magnitude == 0 : large_magnitude == "0";
+  }
+
+  int32_t DigitCount() const {
+    if (!large_magnitude.empty()) {
+      return large_magnitude == "0" ? 0 : static_cast<int32_t>(large_magnitude.size());
+    }
+    int32_t result = 0;
+    for (uint64_t value = small_magnitude; value != 0; value /= 10) {
+      ++result;
+    }
+    return result;
+  }
+
+  int32_t DigitAt(int32_t index) const {
+    if (!large_magnitude.empty()) {
+      return index < static_cast<int32_t>(large_magnitude.size()) ? large_magnitude[index] - '0'
+                                                                  : 0;
+    }
+    const int32_t digit_count = DigitCount();
+    if (index >= digit_count) {
+      return 0;
+    }
+    uint64_t divisor = 1;
+    for (int32_t position = index + 1; position < digit_count; ++position) {
+      divisor *= 10;
+    }
+    return static_cast<int32_t>(small_magnitude / divisor % 10);
+  }
+};
+
+bool TryAddInt64(int64_t lhs, int64_t rhs, int64_t* result) {
+  if ((rhs > 0 && lhs > std::numeric_limits<int64_t>::max() - rhs) ||
+      (rhs < 0 && lhs < std::numeric_limits<int64_t>::min() - rhs)) {
+    return false;
+  }
+  *result = lhs + rhs;
+  return true;
+}
+
+uint64_t UnsignedMagnitude(int64_t value) {
+  return value >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value + 1)) + 1;
+}
+
+JSONNumberExponentThreshold MakeJSONNumberExponentThreshold(
+    const JSONNumberBound& bound, int32_t significand_order, bool exponent_negative
+) {
+  // For a positive exponent, compare exponent against bound.order - significand_order.
+  // For a negative exponent, compare it against significand_order - bound.order and invert the
+  // result. Construct the latter by negating the former.
+  const int64_t adjustment = -static_cast<int64_t>(significand_order);
+  int64_t small_threshold = 0;
+  if (bound.small_order.has_value() &&
+      TryAddInt64(*bound.small_order, adjustment, &small_threshold)) {
+    if (exponent_negative && small_threshold != std::numeric_limits<int64_t>::min()) {
+      small_threshold = -small_threshold;
+    } else if (exponent_negative) {
+      SignedDecimalInteger exact =
+          NegateSignedDecimalInteger(AddSignedDecimalInteger(bound.order, adjustment));
+      return {exact.negative, 0, std::move(exact.digits)};
+    }
+    return {small_threshold < 0, UnsignedMagnitude(small_threshold), {}};
+  }
+  SignedDecimalInteger exact = AddSignedDecimalInteger(bound.order, adjustment);
+  if (exponent_negative) {
+    exact = NegateSignedDecimalInteger(std::move(exact));
+  }
+  return {exact.negative, 0, std::move(exact.digits)};
+}
+
+int32_t JSONNumberExponentDigitCount(uint32_t flags, int32_t exponent_storage) {
+  if (flags & kNumberExponentOverflow) {
+    return exponent_storage;
+  }
+  int32_t result = 0;
+  for (int32_t value = exponent_storage; value != 0; value /= 10) {
+    ++result;
+  }
+  return result;
+}
+
+}  // namespace
 
 bool EarleyParser::IsCompleted() const { return is_completed_.back(); }
 
@@ -103,6 +298,20 @@ int32_t EarleyParser::ResolveActiveTemperatureRule(int32_t rule_id, int32_t inhe
   return grammar_->GetRule(rule_id).temperature.has_value() ? rule_id : inherited_rule_id;
 }
 
+void EarleyParser::EnterJSONObjectRequiredRule(
+    const ParserState& parent_state, int32_t ref_rule_id, ParserState* child_state
+) const {
+  child_state->json_object_required_rule_id = parent_state.json_object_required_rule_id;
+  child_state->json_object_required_state_id = parent_state.json_object_required_state_id;
+  const auto& ref_rule = grammar_->GetRule(ref_rule_id);
+  if (ref_rule.HasJSONObjectRequiredConstraint()) {
+    child_state->json_object_required_rule_id = ref_rule_id;
+    child_state->json_object_required_state_id =
+        grammar_features_->GetJSONObjectRequiredEmptyState(ref_rule_id);
+    XGRAMMAR_DCHECK(child_state->json_object_required_state_id >= 0);
+  }
+}
+
 void EarleyParser::PopLastStates(int32_t cnt) {
   stop_token_is_accepted_ = false;
   if (cnt >= static_cast<int32_t>(rule_id_to_completable_states_.size())) {
@@ -123,15 +332,55 @@ void EarleyParser::PopLastStates(int32_t cnt) {
 }
 
 void EarleyParser::Complete(const ParserState& state, bool debug_print, bool marker_present) {
-  const bool completes_json_string_length_rule =
-      state.rule_id >= 0 && state.rule_id == state.json_string_length_rule_id;
-  if (completes_json_string_length_rule) {
+  auto runtime_constraints_allow_completion = [&]() {
+    if (state.json_string_length_rule_id < 0) {
+      return true;
+    }
     const auto& completed_rule = grammar_->GetRule(state.json_string_length_rule_id);
-    if ((state.json_string_decode_state != 0 || state.json_string_pending_high_surrogate != 0 ||
-         state.json_string_char_count < completed_rule.json_string_min_chars ||
-         (completed_rule.json_string_max_chars >= 0 &&
-          state.json_string_char_count > completed_rule.json_string_max_chars))) {
+    if (completed_rule.HasJSONNumberConstraint()) {
+      return (completed_rule.json_number_multiple_of_coefficient == 0 ||
+              JSONNumberMultipleOfAccepts(state)) &&
+             JSONNumberRangeAccepts(state);
+    }
+    const auto* pattern_dfa =
+        grammar_features_->GetJSONStringPatternDFA(state.json_string_length_rule_id);
+    return state.GetJSONStringDecodeState() == 0 && state.json_string_pending_high_surrogate == 0 &&
+           state.json_string_char_count >= completed_rule.json_string_min_chars &&
+           (completed_rule.json_string_max_chars < 0 ||
+            state.json_string_char_count <= completed_rule.json_string_max_chars) &&
+           (pattern_dfa == nullptr || pattern_dfa->IsEndState(state.GetJSONStringPatternState()));
+  };
+  const bool completes_runtime_constraint_rule =
+      state.rule_id >= 0 && state.rule_id == state.json_string_length_rule_id;
+  if (completes_runtime_constraint_rule && !runtime_constraints_allow_completion()) {
+    return;
+  }
+  const bool completes_json_object_required_rule =
+      state.rule_id >= 0 && state.rule_id == state.json_object_required_rule_id;
+  if (completes_json_object_required_rule) {
+    const auto& completed_rule = grammar_->GetRule(state.json_object_required_rule_id);
+    XGRAMMAR_DCHECK(completed_rule.HasJSONObjectRequiredConstraint());
+    if (!grammar_features_->json_object_required_states->IsComplete(
+            state.json_object_required_state_id, completed_rule.json_object_required_count
+        )) {
       return;
+    }
+  }
+  int32_t completed_json_object_required_state_id = state.json_object_required_state_id;
+  if (state.rule_id >= 0) {
+    const auto& completed_rule = grammar_->GetRule(state.rule_id);
+    if (completed_rule.IsJSONObjectRequiredProperty() &&
+        state.json_object_required_rule_id == completed_rule.json_object_required_owner_rule_id) {
+      completed_json_object_required_state_id =
+          grammar_features_->json_object_required_states->Mark(
+              state.json_object_required_state_id,
+              completed_rule.json_object_required_property_index
+          );
+      if (debug_print) {
+        XGRAMMAR_LOG(INFO) << "Completed required property " << completed_rule.name << ": state "
+                           << state.json_object_required_state_id << " -> "
+                           << completed_json_object_required_state_id;
+      }
     }
   }
   // Record capture and hidden-span events. This is only enabled during definitive advances;
@@ -144,6 +393,12 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
   }
   // Check if a rule is completed.
   if (state.rule_start_pos == ParserState::kNoPrevInputPos) {
+    // A terminal-like constrained body can be flattened into its enclosing FSM. In that case the
+    // active owner rule has no separate completion state, so its constraint must be checked when
+    // the derivation leaves the active runtime-constraint scope instead.
+    if (!runtime_constraints_allow_completion()) {
+      return;
+    }
     // assert: if a root rule can achieve here, then it must be completed.
     if (debug_print) {
       XGRAMMAR_LOG(INFO) << "The root rule is completed.";
@@ -153,8 +408,8 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
   }
   if (debug_print) {
     XGRAMMAR_LOG(INFO) << "The rule " << state.rule_id << ": "
-                       << grammar_->GetRule(state.rule_id).name
-                       << " is completed, trying to complete its parent states.";
+                       << grammar_->GetRule(state.rule_id).name << " is completed with " << state
+                       << ", trying to complete its parent states.";
   }
 
   // Check all the possible parent states.
@@ -165,13 +420,28 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
     if (ref_id != state.rule_id) {
       continue;
     }
+    if (state.json_string_length_rule_id >= 0 &&
+        parent_state.json_string_length_rule_id != state.json_string_length_rule_id &&
+        !runtime_constraints_allow_completion()) {
+      continue;
+    }
     auto resume_parent_state = [&](ParserState result) {
       if (parent_state.json_string_length_rule_id >= 0 &&
           parent_state.json_string_length_rule_id == state.json_string_length_rule_id) {
+        result.partial_codepoint = state.partial_codepoint;
         result.json_string_char_count = state.json_string_char_count;
         result.json_string_decode_state = state.json_string_decode_state;
         result.json_string_pending_high_surrogate = state.json_string_pending_high_surrogate;
         result.json_string_length_rule_id = state.json_string_length_rule_id;
+        result.json_string_pattern_state = state.json_string_pattern_state;
+      }
+      if (parent_state.json_object_required_rule_id >= 0 &&
+          parent_state.json_object_required_rule_id == state.json_object_required_rule_id) {
+        result.json_object_required_rule_id = state.json_object_required_rule_id;
+        result.json_object_required_state_id = completed_json_object_required_state_id;
+      } else {
+        result.json_object_required_rule_id = parent_state.json_object_required_rule_id;
+        result.json_object_required_state_id = parent_state.json_object_required_state_id;
       }
       return result;
     };
@@ -263,11 +533,13 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
             parent_state.char_budget_deadline
         };
         if (parent_tracks_json_string_length) {
+          result.partial_codepoint = parent_state.partial_codepoint;
           result.json_string_char_count = parent_state.json_string_char_count;
           result.json_string_decode_state = parent_state.json_string_decode_state;
           result.json_string_pending_high_surrogate =
               parent_state.json_string_pending_high_surrogate;
           result.json_string_length_rule_id = parent_state.json_string_length_rule_id;
+          result.json_string_pattern_state = parent_state.json_string_pattern_state;
         }
         return resume_parent_state(std::move(result));
       };
@@ -313,18 +585,11 @@ std::pair</* scanable */ bool, /* completable */ bool> EarleyParser::Predict(
     }
     case GrammarExprType::kCharacterClassStar: {
       if (state.sub_element_id == 0) {
-        Enqueue(ParserState{
-            state.rule_id,
-            state.sequence_id,
-            state.element_id + 1,
-            state.rule_start_pos,
-            state.budget_deadline,
-            0,
-            0,
-            0,
-            state.active_temperature_rule_id,
-            state.char_budget_deadline
-        });
+        auto next_state = state;
+        ++next_state.element_id;
+        next_state.sub_element_id = 0;
+        next_state.repeat_count = 0;
+        Enqueue(next_state);
       }
       return std::make_pair(true, false);
     }
@@ -338,18 +603,11 @@ std::pair</* scanable */ bool, /* completable */ bool> EarleyParser::Predict(
         ExpandNextRuleRefElement(state, grammar_expr, &element_expr, debug_print);
       }
       if (state.repeat_count >= min_repeat_count) {
-        Enqueue(ParserState{
-            state.rule_id,
-            state.sequence_id,
-            state.element_id + 1,
-            state.rule_start_pos,
-            state.budget_deadline,
-            0,
-            0,
-            0,
-            state.active_temperature_rule_id,
-            state.char_budget_deadline
-        });
+        auto next_state = state;
+        ++next_state.element_id;
+        next_state.sub_element_id = 0;
+        next_state.repeat_count = 0;
+        Enqueue(next_state);
       }
       return std::make_pair(false, false);
     }
@@ -461,7 +719,7 @@ bool EarleyParser::Advance(const uint8_t ch, bool debug_print) {
     RemoveCommittedLazyStates();
   }
   is_completed_.push_back(tmp_accept_stop_token_);
-  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+  PushLatestScanableStates();
   if (has_char_budget_rules_) {
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }
@@ -483,9 +741,95 @@ void EarleyParser::RemoveCommittedLazyStates() {
   );
 }
 
-EarleyParserGrammarFeatures::EarleyParserGrammarFeatures(const Grammar& grammar)
+int32_t EarleyParserGrammarFeatures::JSONObjectRequiredStateInterner::InternLocked(
+    Key key, int32_t seen_count
+) {
+  auto existing = ids_.find(key);
+  if (existing != ids_.end()) return existing->second;
+  const int32_t id = static_cast<int32_t>(states_.size());
+  states_.push_back(std::move(key));
+  seen_counts_.push_back(seen_count);
+  ids_.emplace(states_.back(), id);
+  return id;
+}
+
+int32_t EarleyParserGrammarFeatures::JSONObjectRequiredStateInterner::InternEmpty(
+    int32_t owner_rule_id, int32_t required_count
+) {
+  XGRAMMAR_CHECK(owner_rule_id >= 0 && required_count >= 0);
+  std::lock_guard<std::mutex> lock(mutex_);
+  return InternLocked(
+      Key{owner_rule_id, std::vector<uint64_t>((required_count + 63) / 64, uint64_t{0})}, 0
+  );
+}
+
+int32_t EarleyParserGrammarFeatures::JSONObjectRequiredStateInterner::Mark(
+    int32_t state_id, int32_t property_index
+) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  XGRAMMAR_DCHECK(state_id >= 0 && state_id < static_cast<int32_t>(states_.size()));
+  const Key& current = states_[state_id];
+  XGRAMMAR_DCHECK(
+      property_index >= 0 && property_index < static_cast<int32_t>(current.words.size() * 64)
+  );
+  const size_t word_index = static_cast<size_t>(property_index) / 64;
+  const uint64_t bit = uint64_t{1} << (property_index % 64);
+  if (current.words[word_index] & bit) return state_id;
+  Key next = current;
+  next.words[word_index] |= bit;
+  return InternLocked(std::move(next), seen_counts_[state_id] + 1);
+}
+
+int32_t EarleyParserGrammarFeatures::JSONObjectRequiredStateInterner::Union(
+    int32_t lhs_state_id, int32_t rhs_state_id
+) {
+  if (lhs_state_id == rhs_state_id) return lhs_state_id;
+  std::lock_guard<std::mutex> lock(mutex_);
+  XGRAMMAR_DCHECK(lhs_state_id >= 0 && lhs_state_id < static_cast<int32_t>(states_.size()));
+  XGRAMMAR_DCHECK(rhs_state_id >= 0 && rhs_state_id < static_cast<int32_t>(states_.size()));
+  const Key& lhs = states_[lhs_state_id];
+  const Key& rhs = states_[rhs_state_id];
+  XGRAMMAR_DCHECK(lhs.owner_rule_id == rhs.owner_rule_id && lhs.words.size() == rhs.words.size());
+  Key merged = lhs;
+  int32_t seen_count = 0;
+  for (size_t index = 0; index < merged.words.size(); ++index) {
+    merged.words[index] |= rhs.words[index];
+    seen_count += __builtin_popcountll(merged.words[index]);
+  }
+  return InternLocked(std::move(merged), seen_count);
+}
+
+bool EarleyParserGrammarFeatures::JSONObjectRequiredStateInterner::IsComplete(
+    int32_t state_id, int32_t required_count
+) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  XGRAMMAR_DCHECK(state_id >= 0 && state_id < static_cast<int32_t>(seen_counts_.size()));
+  return seen_counts_[state_id] == required_count;
+}
+
+int32_t EarleyParserGrammarFeatures::JSONObjectRequiredStateInterner::SeenCount(int32_t state_id
+) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  XGRAMMAR_DCHECK(state_id >= 0 && state_id < static_cast<int32_t>(seen_counts_.size()));
+  return seen_counts_[state_id];
+}
+
+size_t EarleyParserGrammarFeatures::JSONObjectRequiredStateInterner::MemorySizeBytes() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t result = sizeof(*this) + states_.capacity() * sizeof(Key) + MemorySize(seen_counts_);
+  for (const auto& state : states_) result += MemorySize(state.words);
+  return result;
+}
+
+EarleyParserGrammarFeatures::EarleyParserGrammarFeatures(
+    const Grammar& grammar, RegexFSMCache* regex_fsm_cache
+)
     : fsm_state_flags(grammar->complete_fsm.NumStates(), kFsmStateInitialized),
-      rule_is_nullable(grammar->NumRules(), 0) {
+      rule_is_nullable(grammar->NumRules(), 0),
+      json_string_pattern_dfas(grammar->NumRules()),
+      json_number_ranges(grammar->NumRules()),
+      json_object_required_states(std::make_shared<JSONObjectRequiredStateInterner>()),
+      json_object_empty_state_ids(grammar->NumRules(), -1) {
   XGRAMMAR_CHECK(grammar->optimized)
       << "Cannot build Earley parser features for an unoptimized grammar";
 
@@ -515,7 +859,79 @@ EarleyParserGrammarFeatures::EarleyParserGrammarFeatures(const Grammar& grammar)
     const auto* suffix_stop_info = grammar->GetSuffixStopInfo(rule_id);
     has_budget_rules = has_budget_rules || rule.max_tokens >= 0;
     has_char_budget_rules = has_char_budget_rules || rule.max_chars >= 0;
-    has_json_string_length_rules = has_json_string_length_rules || rule.json_string_min_chars >= 0;
+    has_json_string_length_rules = has_json_string_length_rules ||
+                                   rule.json_string_min_chars >= 0 ||
+                                   rule.HasJSONNumberConstraint();
+    if (rule.HasJSONObjectRequiredConstraint()) {
+      has_json_object_required_rules = true;
+      json_object_empty_state_ids[rule_id] =
+          json_object_required_states->InternEmpty(rule_id, rule.json_object_required_count);
+    }
+    if (rule.HasJSONNumberRange()) {
+      JSONNumberRange range;
+      if (!rule.json_number_minimum.empty()) {
+        range.minimum = ParseJSONNumberBound(rule.json_number_minimum);
+        XGRAMMAR_CHECK(range.minimum.has_value())
+            << "Invalid exact JSON-number minimum on rule " << rule.name;
+      }
+      if (!rule.json_number_maximum.empty()) {
+        range.maximum = ParseJSONNumberBound(rule.json_number_maximum);
+        XGRAMMAR_CHECK(range.maximum.has_value())
+            << "Invalid exact JSON-number maximum on rule " << rule.name;
+      }
+      range.exclusive_minimum = rule.json_number_exclusive_minimum;
+      range.exclusive_maximum = rule.json_number_exclusive_maximum;
+      json_number_ranges[rule_id] = std::move(range);
+    }
+    if (!rule.json_string_pattern.empty()) {
+      const std::string rewritten_pattern =
+          RewriteJSONSchemaPatternForFullMatch(rule.json_string_pattern);
+      const std::string cache_key = MakeRegexFSMCacheKey(rewritten_pattern, /*json_string=*/false);
+      FSMWithStartEnd* pattern_fsm = nullptr;
+      if (regex_fsm_cache != nullptr) {
+        auto cached = regex_fsm_cache->find(cache_key);
+        if (cached != regex_fsm_cache->end()) {
+          pattern_fsm = &cached->second;
+        }
+      }
+      std::optional<FSMWithStartEnd> built_fsm;
+      if (pattern_fsm == nullptr) {
+        auto built = BuildJSONSchemaPatternFSM(rule.json_string_pattern, 4096);
+        XGRAMMAR_CHECK(built.IsOk())
+            << "Failed to rebuild decoded JSON-string pattern for rule " << rule.name;
+        built_fsm.emplace(std::move(built).Unwrap());
+        pattern_fsm = &*built_fsm;
+      }
+      XGRAMMAR_CHECK(pattern_fsm->IsDFA())
+          << "Decoded JSON-string pattern is no longer deterministic for rule " << rule.name;
+      if (regex_fsm_cache != nullptr && built_fsm.has_value()) {
+        pattern_fsm =
+            &regex_fsm_cache->insert_or_assign(cache_key, std::move(*built_fsm)).first->second;
+      }
+      const int32_t num_states = pattern_fsm->GetFsm().NumStates();
+      XGRAMMAR_CHECK(num_states < static_cast<int32_t>(JSONStringPatternDFA::kNoTransition))
+          << "Decoded JSON-string pattern has too many states for its dense transition table";
+      JSONStringPatternDFA pattern_dfa;
+      pattern_dfa.start = pattern_fsm->GetStart();
+      pattern_dfa.is_end_state.assign(num_states, false);
+      for (int32_t end_state : pattern_fsm->GetEnds()) {
+        pattern_dfa.is_end_state[end_state] = true;
+      }
+      pattern_dfa.dense_transitions.assign(num_states * 256, JSONStringPatternDFA::kNoTransition);
+      for (int32_t state = 0; state < num_states; ++state) {
+        for (const auto& edge : pattern_fsm->GetFsm().GetEdges(state)) {
+          XGRAMMAR_DCHECK(edge.IsCharRange());
+          for (int32_t byte = edge.min; byte <= edge.max; ++byte) {
+            XGRAMMAR_DCHECK(
+                pattern_dfa.dense_transitions[state * 256 + byte] ==
+                JSONStringPatternDFA::kNoTransition
+            );
+            pattern_dfa.dense_transitions[state * 256 + byte] = static_cast<uint16_t>(edge.target);
+          }
+        }
+      }
+      json_string_pattern_dfas[rule_id] = std::move(pattern_dfa);
+    }
     capture_tracking =
         capture_tracking || !rule.capture_name.empty() ||
         (suffix_stop_info != nullptr && !suffix_stop_info->stop_capture_name.empty());
@@ -547,6 +963,7 @@ EarleyParser::EarleyParser(
   has_budget_rules_ = grammar_features_->has_budget_rules;
   has_char_budget_rules_ = grammar_features_->has_char_budget_rules;
   has_json_string_length_rules_ = grammar_features_->has_json_string_length_rules;
+  has_json_object_required_rules_ = grammar_features_->has_json_object_required_rules;
   capture_tracking_ = grammar_features_->capture_tracking;
   has_hidden_capture_rules_ = grammar_features_->has_hidden_capture_rules;
   PushStateAndExpand(initial_state.has_value() ? *initial_state : RootInitialState());
@@ -569,8 +986,84 @@ ParserState EarleyParser::RootInitialState() const {
   );
   if (grammar_->GetRule(root_rule_id).json_string_min_chars >= 0) {
     result.json_string_length_rule_id = root_rule_id;
+    if (const auto* pattern_dfa = grammar_features_->GetJSONStringPatternDFA(root_rule_id)) {
+      result.SetJSONStringPatternState(pattern_dfa->GetStart());
+    }
+  } else if (grammar_->GetRule(root_rule_id).HasJSONNumberConstraint()) {
+    const auto& rule = grammar_->GetRule(root_rule_id);
+    result.SetJSONNumberRuleId(root_rule_id);
+    result.SetJSONNumberExponentMagnitude(
+        rule.json_number_multiple_of_coefficient > 0 ? 1 % rule.json_number_multiple_of_coefficient
+                                                     : 0
+    );
+    result.SetJSONNumberFlags(0);
+  }
+  if (grammar_->GetRule(root_rule_id).HasJSONObjectRequiredConstraint()) {
+    result.json_object_required_rule_id = root_rule_id;
+    result.json_object_required_state_id =
+        grammar_features_->GetJSONObjectRequiredEmptyState(root_rule_id);
   }
   return result;
+}
+
+void EarleyParser::PushLatestScanableStates() {
+  if (!has_json_object_required_rules_) {
+    scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+    return;
+  }
+
+  using StateIndex = std::unordered_map<
+      ParserState,
+      size_t,
+      JSONObjectRequiredMergeStateHash,
+      JSONObjectRequiredMergeStateEqual>;
+  auto merge_state =
+      [&](const ParserState& state, StateIndex* indices, std::vector<ParserState>* merged) {
+        auto [iterator, inserted] = indices->emplace(state, merged->size());
+        if (inserted) {
+          merged->push_back(state);
+          return;
+        }
+        ParserState& existing = (*merged)[iterator->second];
+        if (state.json_object_required_rule_id >= 0) {
+          existing.json_object_required_state_id =
+              grammar_features_->json_object_required_states->Union(
+                  existing.json_object_required_state_id, state.json_object_required_state_id
+              );
+        }
+      };
+
+  tmp_merged_json_object_states_.clear();
+  tmp_merged_json_object_states_.reserve(tmp_states_to_be_added_.size());
+  StateIndex scanable_indices;
+  scanable_indices.reserve(tmp_states_to_be_added_.size());
+  for (const ParserState* state : tmp_states_to_be_added_) {
+    merge_state(*state, &scanable_indices, &tmp_merged_json_object_states_);
+  }
+  scanable_state_history_.PushBack(tmp_merged_json_object_states_);
+
+  const auto completable_row = rule_id_to_completable_states_.Back();
+  tmp_merged_json_object_completable_states_.clear();
+  tmp_merged_json_object_completable_states_.reserve(completable_row.size());
+  std::unordered_map<int32_t, StateIndex> completable_indices;
+  for (const auto& [ref_rule_id, state] : completable_row) {
+    StateIndex& indices = completable_indices[ref_rule_id];
+    auto [iterator, inserted] =
+        indices.emplace(state, tmp_merged_json_object_completable_states_.size());
+    if (inserted) {
+      tmp_merged_json_object_completable_states_.emplace_back(ref_rule_id, state);
+      continue;
+    }
+    ParserState& existing = tmp_merged_json_object_completable_states_[iterator->second].second;
+    if (state.json_object_required_rule_id >= 0) {
+      existing.json_object_required_state_id =
+          grammar_features_->json_object_required_states->Union(
+              existing.json_object_required_state_id, state.json_object_required_state_id
+          );
+    }
+  }
+  rule_id_to_completable_states_.PopBack(1);
+  rule_id_to_completable_states_.PushBack(tmp_merged_json_object_completable_states_);
 }
 
 void EarleyParser::PushStateAndExpand(const ParserState& state) {
@@ -598,7 +1091,7 @@ void EarleyParser::PushStateAndExpand(const ParserState& state) {
     RemoveCommittedLazyStates();
   }
   is_completed_.push_back(tmp_accept_stop_token_);
-  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+  PushLatestScanableStates();
   if (has_char_budget_rules_) {
     char_count_history_.push_back(GetCurrentCharIndex());
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
@@ -649,8 +1142,8 @@ void EarleyParser::ExpandNextRuleRefElement(
   if (state.element_id != grammar_expr.size() - 1 ||
       sub_grammar_expr->type == GrammarExprType::kRepeat ||
       (state.rule_start_pos == rule_id_to_completable_states_.size() - 1) ||
-      state.json_string_length_rule_id >= 0 || RuleNeedsCaptureEvent(state.rule_id) ||
-      RuleNeedsCaptureEvent(ref_rule_id)) {
+      state.json_string_length_rule_id >= 0 || state.json_object_required_rule_id >= 0 ||
+      RuleNeedsCaptureEvent(state.rule_id) || RuleNeedsCaptureEvent(ref_rule_id)) {
     // It's not the right recursion, or it's the root rule.
     rule_id_to_completable_states_.PushBackInLatestRow(std::make_pair(ref_rule_id, state));
   } else {
@@ -697,11 +1190,15 @@ void EarleyParser::ExpandNextRuleRefElement(
         state.char_budget_deadline
     };
     if (state.json_string_length_rule_id >= 0) {
+      nullable_parent.partial_codepoint = state.partial_codepoint;
       nullable_parent.json_string_char_count = state.json_string_char_count;
       nullable_parent.json_string_decode_state = state.json_string_decode_state;
       nullable_parent.json_string_pending_high_surrogate = state.json_string_pending_high_surrogate;
       nullable_parent.json_string_length_rule_id = state.json_string_length_rule_id;
+      nullable_parent.json_string_pattern_state = state.json_string_pattern_state;
     }
+    nullable_parent.json_object_required_rule_id = state.json_object_required_rule_id;
+    nullable_parent.json_object_required_state_id = state.json_object_required_state_id;
     Enqueue(nullable_parent);
   }
 
@@ -728,13 +1225,27 @@ void EarleyParser::ExpandNextRuleRefElement(
       CharDeadlineForRule(ref_rule_id, state.char_budget_deadline)
   };
   if (state.json_string_length_rule_id >= 0) {
+    child_state.partial_codepoint = state.partial_codepoint;
     child_state.json_string_char_count = state.json_string_char_count;
     child_state.json_string_decode_state = state.json_string_decode_state;
     child_state.json_string_pending_high_surrogate = state.json_string_pending_high_surrogate;
     child_state.json_string_length_rule_id = state.json_string_length_rule_id;
+    child_state.json_string_pattern_state = state.json_string_pattern_state;
   } else if (ref_rule.json_string_min_chars >= 0) {
     child_state.json_string_length_rule_id = ref_rule_id;
+    if (const auto* pattern_dfa = grammar_features_->GetJSONStringPatternDFA(ref_rule_id)) {
+      child_state.SetJSONStringPatternState(pattern_dfa->GetStart());
+    }
+  } else if (ref_rule.HasJSONNumberConstraint()) {
+    child_state.SetJSONNumberRuleId(ref_rule_id);
+    child_state.SetJSONNumberExponentMagnitude(
+        ref_rule.json_number_multiple_of_coefficient > 0
+            ? 1 % ref_rule.json_number_multiple_of_coefficient
+            : 0
+    );
+    child_state.SetJSONNumberFlags(0);
   }
+  EnterJSONObjectRequiredRule(state, ref_rule_id, &child_state);
   Enqueue(child_state);
 }
 
@@ -755,11 +1266,15 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
         state.char_budget_deadline
     };
     if (tracks_json_string_length) {
+      result.partial_codepoint = state.partial_codepoint;
       result.json_string_char_count = state.json_string_char_count;
       result.json_string_decode_state = state.json_string_decode_state;
       result.json_string_pending_high_surrogate = state.json_string_pending_high_surrogate;
       result.json_string_length_rule_id = state.json_string_length_rule_id;
+      result.json_string_pattern_state = state.json_string_pattern_state;
     }
+    result.json_object_required_rule_id = state.json_object_required_rule_id;
+    result.json_object_required_state_id = state.json_object_required_state_id;
     return result;
   };
   // Add the rule reference pairs, and enqueue the epsilon edges.
@@ -803,8 +1318,8 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
     }
     const uint8_t target_flags = GetFsmStateFlags(state.rule_id, target);
     const bool can_elide_parent_completion =
-        !tracks_json_string_length && !is_repeat && !(target_flags & kFsmStateHasEdges) &&
-        (target_flags & kFsmStateEnd) &&
+        !tracks_json_string_length && state.json_object_required_rule_id < 0 && !is_repeat &&
+        !(target_flags & kFsmStateHasEdges) && (target_flags & kFsmStateEnd) &&
         state.rule_start_pos != static_cast<int32_t>(rule_id_to_completable_states_.size() - 1) &&
         !RuleNeedsCaptureEvent(state.rule_id) && !RuleNeedsCaptureEvent(ref_rule_id);
     // Eliding this rule's completion would also elide the repeat-count increment in a parent
@@ -897,13 +1412,27 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
         CharDeadlineForRule(ref_rule_id, state.char_budget_deadline)
     };
     if (tracks_json_string_length) {
+      child_state.partial_codepoint = state.partial_codepoint;
       child_state.json_string_char_count = state.json_string_char_count;
       child_state.json_string_decode_state = state.json_string_decode_state;
       child_state.json_string_pending_high_surrogate = state.json_string_pending_high_surrogate;
       child_state.json_string_length_rule_id = state.json_string_length_rule_id;
+      child_state.json_string_pattern_state = state.json_string_pattern_state;
     } else if (ref_rule.json_string_min_chars >= 0) {
       child_state.json_string_length_rule_id = ref_rule_id;
+      if (const auto* pattern_dfa = grammar_features_->GetJSONStringPatternDFA(ref_rule_id)) {
+        child_state.SetJSONStringPatternState(pattern_dfa->GetStart());
+      }
+    } else if (ref_rule.HasJSONNumberConstraint()) {
+      child_state.SetJSONNumberRuleId(ref_rule_id);
+      child_state.SetJSONNumberExponentMagnitude(
+          ref_rule.json_number_multiple_of_coefficient > 0
+              ? 1 % ref_rule.json_number_multiple_of_coefficient
+              : 0
+      );
+      child_state.SetJSONNumberFlags(0);
     }
+    EnterJSONObjectRequiredRule(state, ref_rule_id, &child_state);
     Enqueue(child_state);
   }
 }
@@ -1197,8 +1726,14 @@ void EarleyParser::AdvanceFsm(const ParserState& state, const uint8_t ch) {
       continue;
     }
     ParserState advanced_state = state;
-    if (state.json_string_length_rule_id >= 0 && !AdvanceJSONStringLength(&advanced_state, ch)) {
-      continue;
+    if (state.json_string_length_rule_id >= 0) {
+      const auto& runtime_rule = grammar_->GetRule(state.json_string_length_rule_id);
+      const bool advanced = runtime_rule.HasJSONNumberConstraint()
+                                ? AdvanceJSONNumber(&advanced_state, ch)
+                                : AdvanceJSONStringLength(&advanced_state, ch);
+      if (!advanced) {
+        continue;
+      }
     }
     const uint8_t flags = GetFsmStateFlags(state.rule_id, edge.target);
     if (!(flags & kFsmStateNonTerminal) && !(flags & kFsmStateEnd) && (flags & kFsmStateScanable)) {
@@ -1217,9 +1752,12 @@ bool EarleyParser::AdvanceJSONStringLength(ParserState* state, uint8_t ch) const
   // 0 boundary; 1 after '\\'; 2--5 collect a \uXXXX code unit; 6 expects the '\\'
   // starting a low-surrogate escape; 7 expects its 'u'; 8--11 collect that code unit;
   // 12--14 are remaining raw UTF-8 continuation-byte counts.
-  int32_t& decode_state = state->json_string_decode_state;
+  int32_t decode_state = state->GetJSONStringDecodeState();
   int32_t& partial = state->json_string_pending_high_surrogate;
-  auto finish_code_point = [&]() {
+  auto finish_code_point = [&](int32_t codepoint) {
+    if (!AdvanceJSONStringPattern(state, codepoint)) {
+      return false;
+    }
     if (rule.json_string_max_chars < 0 &&
         state->json_string_char_count >= rule.json_string_min_chars) {
       // Once an unbounded rule has met its minimum, larger exact counts are language-equivalent.
@@ -1229,6 +1767,7 @@ bool EarleyParser::AdvanceJSONStringLength(ParserState* state, uint8_t ch) const
       ++state->json_string_char_count;
     }
     decode_state = 0;
+    state->SetJSONStringDecodeState(decode_state);
     partial = 0;
     return rule.json_string_max_chars < 0 ||
            state->json_string_char_count <= rule.json_string_max_chars;
@@ -1243,10 +1782,11 @@ bool EarleyParser::AdvanceJSONStringLength(ParserState* state, uint8_t ch) const
   if (decode_state == 0) {
     if (ch == '\\') {
       decode_state = 1;
+      state->SetJSONStringDecodeState(decode_state);
       return true;
     }
     if (ch <= 0x7F) {
-      return ch >= 0x20 && ch != '"' && finish_code_point();
+      return ch >= 0x20 && ch != '"' && finish_code_point(ch);
     }
     if (0xC2 <= ch && ch <= 0xDF) {
       decode_state = 12;
@@ -1257,7 +1797,8 @@ bool EarleyParser::AdvanceJSONStringLength(ParserState* state, uint8_t ch) const
     } else {
       return false;
     }
-    partial = ch;
+    partial = ch <= 0xDF ? ch & 0x1F : ch <= 0xEF ? ch & 0x0F : ch & 0x07;
+    state->SetJSONStringDecodeState(decode_state);
     return true;
   }
   if (decode_state >= 12) {
@@ -1266,25 +1807,31 @@ bool EarleyParser::AdvanceJSONStringLength(ParserState* state, uint8_t ch) const
       return false;
     }
     // Tighten the first continuation byte to valid scalar-value UTF-8.
-    if ((remaining == 2 && partial == 0xE0 && ch < 0xA0) ||
-        (remaining == 2 && partial == 0xED && ch > 0x9F) ||
-        (remaining == 3 && partial == 0xF0 && ch < 0x90) ||
-        (remaining == 3 && partial == 0xF4 && ch > 0x8F)) {
+    if ((remaining == 2 && partial == 0 && ch < 0xA0) ||
+        (remaining == 2 && partial == 0x0D && ch > 0x9F) ||
+        (remaining == 3 && partial == 0 && ch < 0x90) ||
+        (remaining == 3 && partial == 4 && ch > 0x8F)) {
       return false;
     }
+    partial = (partial << 6) | (ch & 0x3F);
     if (remaining == 1) {
-      return finish_code_point();
+      return finish_code_point(partial);
     }
     --decode_state;
+    state->SetJSONStringDecodeState(decode_state);
     return true;
   }
   if (decode_state == 1) {
-    if (std::string_view("\"\\/bfnrt").find(static_cast<char>(ch)) != std::string_view::npos) {
-      return finish_code_point();
+    constexpr std::string_view kEscapes = "\"\\/bfnrt";
+    constexpr std::string_view kDecoded = "\"\\/\b\f\n\r\t";
+    const size_t escape_index = kEscapes.find(static_cast<char>(ch));
+    if (escape_index != std::string_view::npos) {
+      return finish_code_point(static_cast<uint8_t>(kDecoded[escape_index]));
     }
     if (ch == 'u') {
       decode_state = 2;
       partial = 0;
+      state->SetJSONStringDecodeState(decode_state);
       return true;
     }
     return false;
@@ -1293,32 +1840,421 @@ bool EarleyParser::AdvanceJSONStringLength(ParserState* state, uint8_t ch) const
     int32_t nibble = hex_value(ch);
     if (nibble < 0) return false;
     partial = (partial << 4) | nibble;
-    if (decode_state++ != 5) return true;
+    if (decode_state++ != 5) {
+      state->SetJSONStringDecodeState(decode_state);
+      return true;
+    }
     if (0xD800 <= partial && partial <= 0xDBFF) {
+      // Store the high-surrogate offset plus one in the high half. This keeps the accumulator
+      // positive while reserving zero for "no pending scalar".
+      partial = (partial - 0xD800 + 1) << 16;
       decode_state = 6;
+      state->SetJSONStringDecodeState(decode_state);
       return true;
     }
     if (0xDC00 <= partial && partial <= 0xDFFF) return false;
-    return finish_code_point();
+    return finish_code_point(partial);
   }
   if (decode_state == 6) {
     if (ch != '\\') return false;
     decode_state = 7;
+    state->SetJSONStringDecodeState(decode_state);
     return true;
   }
   if (decode_state == 7) {
     if (ch != 'u') return false;
     decode_state = 8;
-    partial = 0;
+    state->SetJSONStringDecodeState(decode_state);
     return true;
   }
   XGRAMMAR_DCHECK(8 <= decode_state && decode_state <= 11);
   int32_t nibble = hex_value(ch);
   if (nibble < 0) return false;
-  partial = (partial << 4) | nibble;
-  if (decode_state++ != 11) return true;
-  if (partial < 0xDC00 || partial > 0xDFFF) return false;
-  return finish_code_point();
+  partial = static_cast<int32_t>(
+      (static_cast<uint32_t>(partial) & 0xFFFF0000U) |
+      (((static_cast<uint32_t>(partial) & 0xFFFFU) << 4) | static_cast<uint32_t>(nibble))
+  );
+  if (decode_state++ != 11) {
+    state->SetJSONStringDecodeState(decode_state);
+    return true;
+  }
+  const uint32_t encoded_pair = static_cast<uint32_t>(partial);
+  const int32_t high_offset = (encoded_pair >> 16) - 1;
+  const int32_t low = encoded_pair & 0xFFFF;
+  if (low < 0xDC00 || low > 0xDFFF) return false;
+  return finish_code_point(0x10000 + (high_offset << 10) + (low - 0xDC00));
+}
+
+bool EarleyParser::AdvanceJSONNumber(ParserState* state, uint8_t ch) const {
+  const auto& rule = grammar_->GetRule(state->GetJSONNumberRuleId());
+  const int32_t coefficient = rule.json_number_multiple_of_coefficient;
+  uint32_t flags = static_cast<uint32_t>(state->GetJSONNumberFlags());
+  if (ch == '.') {
+    flags |= kNumberSeenFraction;
+    state->SetJSONNumberFlags(static_cast<int32_t>(flags));
+    return true;
+  }
+  if (ch == 'e' || ch == 'E') {
+    const auto* range = grammar_features_->GetJSONNumberRange(state->GetJSONNumberRuleId());
+    auto finish_significand_compare = [&](const std::optional<JSONNumberBound>& bound,
+                                          int32_t shift) {
+      if (bound.has_value() && GetNumberCompare(flags, shift) == kNumberCompareEqual &&
+          static_cast<size_t>(state->GetJSONNumberSignificantDigits()) < bound->digits.size()) {
+        SetNumberCompare(&flags, shift, kNumberCompareLess);
+      }
+    };
+    if (range != nullptr) {
+      finish_significand_compare(range->minimum, kNumberMinimumCompareShift);
+      finish_significand_compare(range->maximum, kNumberMaximumCompareShift);
+    }
+    state->SetJSONNumberSignificantDigits(
+        state->GetJSONNumberSignificantDigits() - state->GetJSONNumberFractionalDigits()
+    );
+    flags |= kNumberInExponent;
+    state->SetJSONNumberExponentMagnitude(0);
+    state->SetJSONNumberFlags(static_cast<int32_t>(flags));
+    return true;
+  }
+  if (ch == '-' || ch == '+') {
+    if (ch == '-') {
+      flags |= (flags & kNumberInExponent) ? kNumberExponentNegative : kNumberNegative;
+    }
+    state->SetJSONNumberFlags(static_cast<int32_t>(flags));
+    return true;
+  }
+  if (ch < '0' || ch > '9') {
+    return false;
+  }
+  const int32_t digit = ch - '0';
+  if (flags & kNumberInExponent) {
+    int32_t exponent = state->GetJSONNumberExponentMagnitude();
+    const int32_t exponent_digits = JSONNumberExponentDigitCount(flags, exponent);
+    if (exponent_digits != 0 || digit != 0) {
+      const auto* range = grammar_features_->GetJSONNumberRange(state->GetJSONNumberRuleId());
+      auto advance_exponent_compare = [&](const std::optional<JSONNumberBound>& bound,
+                                          bool minimum) {
+        if (!bound.has_value() ||
+            state->GetJSONNumberExponentCompare(minimum) != kNumberCompareEqual) {
+          return;
+        }
+        const auto threshold = MakeJSONNumberExponentThreshold(
+            *bound, state->GetJSONNumberSignificantDigits(), (flags & kNumberExponentNegative) != 0
+        );
+        if (threshold.negative) {
+          state->SetJSONNumberExponentCompare(minimum, kNumberCompareGreater);
+          return;
+        }
+        const int32_t threshold_digit = threshold.DigitAt(exponent_digits);
+        if (digit < threshold_digit) {
+          state->SetJSONNumberExponentCompare(minimum, kNumberCompareLess);
+        } else if (digit > threshold_digit) {
+          state->SetJSONNumberExponentCompare(minimum, kNumberCompareGreater);
+        }
+      };
+      if (range != nullptr) {
+        advance_exponent_compare(range->minimum, true);
+        advance_exponent_compare(range->maximum, false);
+      }
+
+      if (flags & kNumberExponentOverflow) {
+        exponent = exponent_digits == std::numeric_limits<int32_t>::max() ? exponent_digits
+                                                                          : exponent_digits + 1;
+      } else if (exponent > (std::numeric_limits<int32_t>::max() - digit) / 10) {
+        flags |= kNumberExponentOverflow;
+        exponent = exponent_digits + 1;
+      } else {
+        exponent = exponent * 10 + digit;
+      }
+    }
+    state->SetJSONNumberExponentMagnitude(exponent);
+    state->SetJSONNumberFlags(static_cast<int32_t>(flags));
+    return true;
+  }
+
+  if (flags & kNumberSeenFraction) {
+    int32_t fractional_digits = state->GetJSONNumberFractionalDigits();
+    if (fractional_digits == std::numeric_limits<int32_t>::max()) {
+      flags |= kNumberFractionOverflow;
+    } else {
+      state->SetJSONNumberFractionalDigits(fractional_digits + 1);
+    }
+  }
+
+  if ((flags & kNumberNonzero) || digit != 0) {
+    int32_t significant_digits = state->GetJSONNumberSignificantDigits();
+    if (significant_digits == std::numeric_limits<int32_t>::max()) {
+      flags |= kNumberSignificantOverflow;
+    } else {
+      const auto* range = grammar_features_->GetJSONNumberRange(state->GetJSONNumberRuleId());
+      auto advance_compare = [&](const std::optional<JSONNumberBound>& bound, int32_t shift) {
+        if (!bound.has_value() || GetNumberCompare(flags, shift) != kNumberCompareEqual) {
+          return;
+        }
+        const int32_t bound_digit = significant_digits < static_cast<int32_t>(bound->digits.size())
+                                        ? bound->digits[significant_digits] - '0'
+                                        : 0;
+        if (digit < bound_digit) {
+          SetNumberCompare(&flags, shift, kNumberCompareLess);
+        } else if (digit > bound_digit) {
+          SetNumberCompare(&flags, shift, kNumberCompareGreater);
+        }
+      };
+      if (range != nullptr) {
+        advance_compare(range->minimum, kNumberMinimumCompareShift);
+        advance_compare(range->maximum, kNumberMaximumCompareShift);
+      }
+      state->SetJSONNumberSignificantDigits(significant_digits + 1);
+    }
+  }
+
+  if (digit != 0) {
+    flags |= kNumberNonzero;
+  }
+  if (coefficient > 0) {
+    int32_t trailing_zeros = flags >> kNumberTrailingShift;
+    if (digit == 0) {
+      state->SetJSONNumberExponentMagnitude(static_cast<int32_t>(
+          static_cast<int64_t>(state->GetJSONNumberExponentMagnitude()) * 10 % coefficient
+      ));
+      if (trailing_zeros == kNumberTrailingMax) {
+        flags |= kNumberTrailingOverflow;
+      } else {
+        ++trailing_zeros;
+      }
+    } else {
+      int64_t remainder = state->GetJSONNumberRemainder();
+      remainder = remainder * state->GetJSONNumberExponentMagnitude() % coefficient;
+      remainder = (remainder * 10 + digit) % coefficient;
+      state->SetJSONNumberRemainder(static_cast<int32_t>(remainder));
+      state->SetJSONNumberExponentMagnitude(1 % coefficient);
+      trailing_zeros = 0;
+      flags &= ~kNumberTrailingOverflow;
+    }
+    flags = (flags & kNumberLowFlagsMask) | (trailing_zeros << kNumberTrailingShift);
+  }
+  state->SetJSONNumberFlags(static_cast<int32_t>(flags));
+  return true;
+}
+
+bool EarleyParser::JSONNumberMultipleOfAccepts(const ParserState& state) const {
+  const auto& rule = grammar_->GetRule(state.GetJSONNumberRuleId());
+  const int32_t coefficient = rule.json_number_multiple_of_coefficient;
+  XGRAMMAR_DCHECK(coefficient > 0);
+  const uint32_t flags = static_cast<uint32_t>(state.GetJSONNumberFlags());
+  if (!(flags & kNumberNonzero)) {
+    return true;
+  }
+  // Fractional/trailing counts beyond their storage range require billions of source bytes and
+  // are deliberately rejected. Exponent overflow is different: a short scientific-notation
+  // literal can trigger it, and its saturated sign and magnitude are sufficient for an exact
+  // divisibility decision.
+  if (flags & (kNumberFractionOverflow | kNumberTrailingOverflow)) {
+    return false;
+  }
+  int64_t exponent = 0;
+  int64_t fractional_digits = state.GetJSONNumberFractionalDigits();
+  const int64_t trailing_zeros = flags >> kNumberTrailingShift;
+  if (flags & kNumberInExponent) {
+    if (flags & kNumberExponentOverflow) {
+      if (flags & kNumberExponentNegative) {
+        return false;
+      }
+      exponent = std::numeric_limits<int64_t>::max() / 4;
+    } else {
+      exponent = state.GetJSONNumberExponentMagnitude();
+    }
+    if (flags & kNumberExponentNegative) {
+      exponent = -exponent;
+    }
+  }
+  const int64_t decimal_shift = static_cast<int64_t>(rule.json_number_multiple_of_decimal_scale) -
+                                fractional_digits + exponent + trailing_zeros;
+  if (decimal_shift < 0) {
+    return false;
+  }
+
+  int32_t coprime_coefficient = coefficient;
+  int32_t power_of_two = 0;
+  int32_t power_of_five = 0;
+  while (coprime_coefficient % 2 == 0) {
+    coprime_coefficient /= 2;
+    ++power_of_two;
+  }
+  while (coprime_coefficient % 5 == 0) {
+    coprime_coefficient /= 5;
+    ++power_of_five;
+  }
+  if (decimal_shift >= std::max(power_of_two, power_of_five)) {
+    return state.GetJSONNumberRemainder() % coprime_coefficient == 0;
+  }
+  int64_t remainder = state.GetJSONNumberRemainder();
+  for (int64_t index = 0; index < decimal_shift; ++index) {
+    remainder = remainder * 10 % coefficient;
+  }
+  return remainder == 0;
+}
+
+bool EarleyParser::JSONNumberRangeAccepts(const ParserState& state) const {
+  const auto* range = grammar_features_->GetJSONNumberRange(state.GetJSONNumberRuleId());
+  if (range == nullptr) {
+    return true;
+  }
+  const uint32_t flags = static_cast<uint32_t>(state.GetJSONNumberFlags());
+  if (flags & (kNumberFractionOverflow | kNumberSignificantOverflow)) {
+    return false;
+  }
+
+  const bool input_zero = !(flags & kNumberNonzero);
+  const bool input_negative = !input_zero && (flags & kNumberNegative);
+
+  auto compare_input_order = [&](const JSONNumberBound& bound, bool minimum) {
+    if (!(flags & kNumberInExponent)) {
+      const int64_t input_order = static_cast<int64_t>(state.GetJSONNumberSignificantDigits()) -
+                                  state.GetJSONNumberFractionalDigits();
+      return CompareSignedDecimalInteger(MakeSignedDecimalInteger(input_order), bound.order);
+    }
+
+    const bool exponent_negative = (flags & kNumberExponentNegative) != 0;
+    const auto threshold = MakeJSONNumberExponentThreshold(
+        bound, state.GetJSONNumberSignificantDigits(), exponent_negative
+    );
+    int32_t exponent_compare = 0;
+    const int32_t exponent_digits =
+        JSONNumberExponentDigitCount(flags, state.GetJSONNumberExponentMagnitude());
+    if (threshold.negative) {
+      exponent_compare = 1;
+    } else if (threshold.IsZero()) {
+      exponent_compare = exponent_digits == 0 ? 0 : 1;
+    } else if (exponent_digits != threshold.DigitCount()) {
+      exponent_compare = exponent_digits < threshold.DigitCount() ? -1 : 1;
+    } else {
+      const int32_t tracked = state.GetJSONNumberExponentCompare(minimum);
+      exponent_compare = tracked == kNumberCompareLess      ? -1
+                         : tracked == kNumberCompareGreater ? 1
+                                                            : 0;
+    }
+    return exponent_negative ? -exponent_compare : exponent_compare;
+  };
+
+  auto compare_to_bound = [&](const JSONNumberBound& bound, int32_t compare_shift) {
+    const bool bound_zero = bound.digits == "0";
+    if (input_zero || bound_zero) {
+      if (input_zero && bound_zero) return 0;
+      if (input_zero) return bound.negative ? 1 : -1;
+      return input_negative ? -1 : 1;
+    }
+    if (input_negative != bound.negative) {
+      return input_negative ? -1 : 1;
+    }
+
+    int32_t magnitude_compare = 0;
+    const int32_t order_compare =
+        compare_input_order(bound, compare_shift == kNumberMinimumCompareShift);
+    if (order_compare != 0) {
+      magnitude_compare = order_compare;
+    } else {
+      const int32_t tracked = GetNumberCompare(flags, compare_shift);
+      if (tracked == kNumberCompareLess) {
+        magnitude_compare = -1;
+      } else if (tracked == kNumberCompareGreater) {
+        magnitude_compare = 1;
+      } else if (!(flags & kNumberInExponent) &&
+                 static_cast<size_t>(state.GetJSONNumberSignificantDigits()) <
+                     bound.digits.size()) {
+        // Bound digits are canonicalized without trailing zeros, so an unvisited suffix contains
+        // a nonzero digit and is strictly greater than the input's implicit zero suffix.
+        magnitude_compare = -1;
+      }
+    }
+    return input_negative ? -magnitude_compare : magnitude_compare;
+  };
+
+  if (range->minimum.has_value()) {
+    const int32_t compare = compare_to_bound(*range->minimum, kNumberMinimumCompareShift);
+    if (compare < 0 || (compare == 0 && range->exclusive_minimum)) {
+      return false;
+    }
+  }
+  if (range->maximum.has_value()) {
+    const int32_t compare = compare_to_bound(*range->maximum, kNumberMaximumCompareShift);
+    if (compare > 0 || (compare == 0 && range->exclusive_maximum)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool EarleyParser::AdvanceJSONStringPattern(ParserState* state, int32_t codepoint) const {
+  const auto* pattern_dfa =
+      grammar_features_->GetJSONStringPatternDFA(state->json_string_length_rule_id);
+  if (pattern_dfa == nullptr) {
+    return true;
+  }
+  int32_t pattern_state = state->GetJSONStringPatternState();
+  XGRAMMAR_DCHECK(pattern_state >= 0);
+  auto advance_byte = [&](uint8_t byte) {
+    const int32_t next_state = grammar_features_->GetJSONStringPatternTransition(
+        state->json_string_length_rule_id, pattern_state, byte
+    );
+    if (next_state < 0) {
+      return false;
+    }
+    pattern_state = next_state;
+    return true;
+  };
+  if (codepoint <= 0x7F) {
+    if (!advance_byte(static_cast<uint8_t>(codepoint))) {
+      return false;
+    }
+  } else {
+    uint8_t encoded[4];
+    int32_t width;
+    if (codepoint <= 0x7FF) {
+      encoded[0] = 0xC0 | (codepoint >> 6);
+      encoded[1] = 0x80 | (codepoint & 0x3F);
+      width = 2;
+    } else if (codepoint <= 0xFFFF) {
+      encoded[0] = 0xE0 | (codepoint >> 12);
+      encoded[1] = 0x80 | ((codepoint >> 6) & 0x3F);
+      encoded[2] = 0x80 | (codepoint & 0x3F);
+      width = 3;
+    } else {
+      encoded[0] = 0xF0 | (codepoint >> 18);
+      encoded[1] = 0x80 | ((codepoint >> 12) & 0x3F);
+      encoded[2] = 0x80 | ((codepoint >> 6) & 0x3F);
+      encoded[3] = 0x80 | (codepoint & 0x3F);
+      width = 4;
+    }
+    for (int32_t index = 0; index < width; ++index) {
+      if (!advance_byte(encoded[index])) {
+        return false;
+      }
+    }
+  }
+  state->SetJSONStringPatternState(pattern_state);
+  return true;
+}
+
+bool EarleyParser::JSONStringRuntimeConstraintsAllowToken(
+    ParserState state, const std::string& token
+) const {
+  XGRAMMAR_DCHECK(state.json_string_length_rule_id >= 0);
+  const auto& rule = grammar_->GetRule(state.json_string_length_rule_id);
+  const auto* pattern_dfa =
+      grammar_features_->GetJSONStringPatternDFA(state.json_string_length_rule_id);
+  for (uint8_t byte : token) {
+    if (state.GetJSONStringDecodeState() == 0 && byte == '"') {
+      return state.json_string_pending_high_surrogate == 0 &&
+             state.json_string_char_count >= rule.json_string_min_chars &&
+             (rule.json_string_max_chars < 0 ||
+              state.json_string_char_count <= rule.json_string_max_chars) &&
+             (pattern_dfa == nullptr || pattern_dfa->IsEndState(state.GetJSONStringPatternState()));
+    }
+    if (!AdvanceJSONStringLength(&state, byte)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void EarleyParser::ScanAtomicToken(const ParserState& state, int32_t token_id) {
@@ -1391,7 +2327,7 @@ bool EarleyParser::AdvanceAtomicToken(
     RemoveCommittedLazyStates();
   }
   is_completed_.push_back(tmp_accept_stop_token_);
-  scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+  PushLatestScanableStates();
   if (has_char_budget_rules_) {
     char_budget_entry_history_.push_back(tmp_char_budget_entered_);
   }

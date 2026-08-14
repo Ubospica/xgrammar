@@ -231,6 +231,28 @@ class GrammarBuilder {
    * max_chars may also be -1 for an unbounded upper limit. */
   void UpdateJSONStringLengthBounds(int32_t rule_id, int32_t min_chars, int32_t max_chars);
 
+  /*! \brief Set the incremental decoded JSON-string pattern on a rule. Empty means none. */
+  void UpdateJSONStringPattern(int32_t rule_id, const std::string& pattern);
+
+  /*! \brief Set an exact runtime JSON-number multipleOf constraint on a rule. */
+  void UpdateJSONNumberMultipleOf(int32_t rule_id, int32_t coefficient, int32_t decimal_scale);
+
+  void UpdateJSONNumberRange(
+      int32_t rule_id,
+      const std::string& minimum,
+      const std::string& maximum,
+      bool exclusive_minimum,
+      bool exclusive_maximum
+  );
+
+  /*! \brief Make a rule own compact runtime tracking for this many required object keys. */
+  void UpdateJSONObjectRequiredCount(int32_t rule_id, int32_t required_count);
+
+  /*! \brief Mark a property-wrapper rule as setting one bit in an owning object rule. */
+  void UpdateJSONObjectRequiredProperty(
+      int32_t rule_id, int32_t owner_rule_id, int32_t property_index
+  );
+
   /*!
    * \brief Update the capture group name of the rule referred by the given rule_id. An empty
    * string means no capture.

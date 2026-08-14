@@ -240,6 +240,72 @@ def test_shared_character_class_repeat_masks_survive_compiler_cache_clear():
             torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
 
 
+def test_shared_repeat_masks_preserve_runtime_json_length_states_concurrently():
+    vocabulary = ['"', "é", "ê", "a", "éa", "êa", "éaêa", "êaéa"]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    schema = {"type": "string", "pattern": "^(?:[éê]a){1,3}$", "minLength": 4, "maxLength": 4}
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_json_schema(schema)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(schema)
+    inputs = ['"éaêa"', '"êaéa"']
+    expected = {input_string: _mask_trace(eager, input_string) for input_string in inputs}
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(_mask_trace, dynamic, input_string)
+            for _ in range(16)
+            for input_string in inputs
+        ]
+    for index, future in enumerate(futures):
+        input_string = inputs[index % len(inputs)]
+        actual = future.result()
+        for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(
+            expected[input_string], actual
+        ):
+            assert actual_apply == expected_apply
+            torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
+def test_streaming_literal_pattern_masks_are_shared_concurrently():
+    alternatives = ["bcd", "abce", "he", "she", "his", "hers"] + [
+        f"region-{index:03d}" for index in range(96)
+    ]
+    vocabulary = [chr(value) for value in range(32, 127)] + [
+        "abcd",
+        "ushers",
+        "prefix-region-095-suffix",
+        r"\u0061bcd",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    schema = {"type": "string", "pattern": "|".join(alternatives), "minLength": 4, "maxLength": 32}
+    eager = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=False
+    ).compile_json_schema(schema)
+    dynamic = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(schema)
+    inputs = ['"abcd"', '"ushers"', '"prefix-region-095-suffix"', r'"\u0061bcd"']
+    expected = {input_string: _mask_trace(eager, input_string) for input_string in inputs}
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(_mask_trace, dynamic, input_string)
+            for _ in range(8)
+            for input_string in inputs
+        ]
+    for index, future in enumerate(futures):
+        input_string = inputs[index % len(inputs)]
+        actual = future.result()
+        for (expected_apply, expected_mask), (actual_apply, actual_mask) in zip(
+            expected[input_string], actual
+        ):
+            assert actual_apply == expected_apply
+            torch.testing.assert_close(actual_mask, expected_mask, rtol=0, atol=0)
+
+
 def test_limited_compiler_cache_does_not_retain_growing_grammar():
     tokenizer_info = xgr.TokenizerInfo(VOCABULARY, stop_token_ids=[])
     cache_limit = 64 * 1024
@@ -495,3 +561,120 @@ def test_shared_parser_features_preserve_budget_and_capture_behavior():
             matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
             assert matcher.accept_string(value) and matcher.is_terminated()
             assert matcher.get_captures() == expected_captures
+
+
+@pytest.mark.parametrize("enable_dynamic_compilation", [False, True])
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_number_multiple_of_runtime_mask_matches_completion(
+    enable_dynamic_compilation: bool, cache_enabled: bool
+):
+    vocabulary = [
+        '{"v":',
+        "0.1",
+        "0.25",
+        "}",
+        "e1}",
+        "0.1}",
+        "0.25}",
+        "1e9999999999}",
+        "1e-9999999999}",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiler = xgr.GrammarCompiler(
+        tokenizer_info,
+        max_threads=1,
+        cache_enabled=cache_enabled,
+        enable_dynamic_compilation=enable_dynamic_compilation,
+    )
+    compiled = compiler.compile_json_schema(
+        {
+            "type": "object",
+            "properties": {"v": {"type": "number", "multipleOf": 0.25}},
+            "required": ["v"],
+            "additionalProperties": False,
+        },
+        any_whitespace=False,
+        separators=(",", ":"),
+    )
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    assert matcher.accept_token(0)
+    matcher.fill_next_token_bitmask(bitmask)
+    allowed = bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+    assert allowed[1] and allowed[2]
+    assert not allowed[5]
+    assert allowed[6]
+    assert allowed[7]
+    assert not allowed[8]
+
+    # A non-multiple prefix remains extendable, but its delimiter is masked until an exponent
+    # makes the completed number divisible by 0.25.
+    assert matcher.accept_token(1)
+    matcher.fill_next_token_bitmask(bitmask)
+    allowed = bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+    assert not allowed[3]
+    assert allowed[4]
+
+    stop_vocabulary = ["0.1", "0.25", "e1", "<eos>"]
+    stop_tokenizer_info = xgr.TokenizerInfo(stop_vocabulary, stop_token_ids=[3])
+    stop_compiled = xgr.GrammarCompiler(
+        stop_tokenizer_info,
+        max_threads=1,
+        cache_enabled=cache_enabled,
+        enable_dynamic_compilation=enable_dynamic_compilation,
+    ).compile_json_schema({"type": "number", "multipleOf": 0.25}, any_whitespace=False)
+    for first_token, stop_allowed in ((0, False), (1, True)):
+        stop_matcher = xgr.GrammarMatcher(stop_compiled)
+        assert stop_matcher.accept_token(first_token)
+        stop_bitmask = xgr.allocate_token_bitmask(1, stop_tokenizer_info.vocab_size)
+        stop_matcher.fill_next_token_bitmask(stop_bitmask)
+        allowed = bitmask_to_bool_mask(stop_bitmask, stop_tokenizer_info.vocab_size)[0]
+        assert bool(allowed[3]) == stop_allowed
+        assert stop_matcher.accept_token(3) == stop_allowed
+
+
+@pytest.mark.parametrize("enable_dynamic_compilation", [False, True])
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_number_range_runtime_mask_matches_completion(
+    enable_dynamic_compilation: bool, cache_enabled: bool
+):
+    vocabulary = [
+        '{"v":',
+        "0.0160425",
+        "0.01604248",
+        "}",
+        "0.0160425}",
+        "0.01604248}",
+        "160425e-7}",
+        "160424e-7}",
+    ]
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info,
+        max_threads=1,
+        cache_enabled=cache_enabled,
+        enable_dynamic_compilation=enable_dynamic_compilation,
+    ).compile_json_schema(
+        {
+            "type": "object",
+            "properties": {"v": {"type": "number", "minimum": 0.01604249, "maximum": 0.01604251}},
+            "required": ["v"],
+            "additionalProperties": False,
+        },
+        any_whitespace=False,
+        separators=(",", ":"),
+    )
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    assert matcher.accept_token(0)
+    matcher.fill_next_token_bitmask(bitmask)
+    allowed = bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+    assert allowed[1] and allowed[2]
+    assert allowed[4] and allowed[6]
+    assert not allowed[5] and not allowed[7]
+
+    # The out-of-range prefix is structurally extendable, but completing it is rejected.
+    assert matcher.accept_token(2)
+    matcher.fill_next_token_bitmask(bitmask)
+    allowed = bitmask_to_bool_mask(bitmask, tokenizer_info.vocab_size)[0]
+    assert not allowed[3]

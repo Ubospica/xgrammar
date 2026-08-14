@@ -325,7 +325,9 @@ TokenizerInfo::Impl::Impl(
 }
 
 void TokenizerInfo::Impl::BuildTokenCharData() {
+  constexpr int32_t kMaxPrecomputedJSONStringContentSafeLength = 256;
   token_char_counts_.assign(sorted_decoded_vocab_.size(), 0);
+  token_is_json_string_content_safe_.assign(sorted_decoded_vocab_.size(), false);
   ascii_string_safe_indices_.clear();
   ascii_string_safe_indices_.reserve(sorted_decoded_vocab_.size() / 2);
   int32_t max_chars = 0;
@@ -344,6 +346,72 @@ void TokenizerInfo::Impl::BuildTokenCharData() {
     max_chars = std::max(max_chars, count);
   }
   max_token_chars_ = max_chars;
+
+  int32_t max_json_string_content_chars = 0;
+  for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab_.size()); ++index) {
+    const auto& token = sorted_decoded_vocab_[index].second;
+    int32_t decoded_chars = 0;
+    bool safe = !token.empty();
+    for (size_t position = 0; safe && position < token.size();) {
+      const uint8_t first = static_cast<uint8_t>(token[position]);
+      if (first < 0x80) {
+        safe = first >= 0x20 && first != '"' && first != '\\';
+        ++position;
+        ++decoded_chars;
+        continue;
+      }
+      int32_t width = 0;
+      if (0xC2 <= first && first <= 0xDF) {
+        width = 2;
+      } else if (0xE0 <= first && first <= 0xEF) {
+        width = 3;
+      } else if (0xF0 <= first && first <= 0xF4) {
+        width = 4;
+      } else {
+        safe = false;
+        break;
+      }
+      if (position + width > token.size()) {
+        safe = false;
+        break;
+      }
+      const uint8_t second = static_cast<uint8_t>(token[position + 1]);
+      if ((second & 0xC0) != 0x80 || (first == 0xE0 && second < 0xA0) ||
+          (first == 0xED && second > 0x9F) || (first == 0xF0 && second < 0x90) ||
+          (first == 0xF4 && second > 0x8F)) {
+        safe = false;
+        break;
+      }
+      for (int32_t offset = 2; offset < width; ++offset) {
+        if ((static_cast<uint8_t>(token[position + offset]) & 0xC0) != 0x80) {
+          safe = false;
+          break;
+        }
+      }
+      position += width;
+      ++decoded_chars;
+    }
+    if (safe) {
+      token_is_json_string_content_safe_[index] = true;
+      token_char_counts_[index] = decoded_chars;
+      max_json_string_content_chars = std::max(max_json_string_content_chars, decoded_chars);
+    }
+  }
+
+  const int32_t precomputed_max =
+      std::min(max_json_string_content_chars, kMaxPrecomputedJSONStringContentSafeLength);
+  json_string_content_safe_up_to_length_.clear();
+  json_string_content_safe_up_to_length_.reserve(precomputed_max + 1);
+  DynamicBitset cumulative(vocab_size_);
+  json_string_content_safe_up_to_length_.push_back(cumulative);
+  for (int32_t length = 1; length <= precomputed_max; ++length) {
+    for (int32_t index = 0; index < static_cast<int32_t>(sorted_decoded_vocab_.size()); ++index) {
+      if (token_is_json_string_content_safe_[index] && token_char_counts_[index] == length) {
+        cumulative.Set(sorted_decoded_vocab_[index].first);
+      }
+    }
+    json_string_content_safe_up_to_length_.push_back(cumulative);
+  }
 }
 
 const std::vector<int32_t>& TokenizerInfo::Impl::GetTokenCharCounts() const {
@@ -351,6 +419,15 @@ const std::vector<int32_t>& TokenizerInfo::Impl::GetTokenCharCounts() const {
 }
 
 int32_t TokenizerInfo::Impl::GetMaxTokenChars() const { return max_token_chars_; }
+
+const DynamicBitset& TokenizerInfo::Impl::GetJSONStringContentSafeUpToLength(int32_t max_length
+) const {
+  XGRAMMAR_DCHECK(!json_string_content_safe_up_to_length_.empty());
+  const int32_t bounded = std::clamp(
+      max_length, 0, static_cast<int32_t>(json_string_content_safe_up_to_length_.size()) - 1
+  );
+  return json_string_content_safe_up_to_length_[bounded];
+}
 
 std::string TokenizerInfo::Impl::DumpMetadata() const {
   return DumpMetadataValue().serialize(false);

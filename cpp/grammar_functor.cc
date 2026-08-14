@@ -25,6 +25,7 @@
 #include "fsm_builder.h"
 #include "grammar_builder.h"
 #include "grammar_impl.h"
+#include "json_schema_converter.h"
 #include "support/container.h"
 #include "support/encoding.h"
 #include "support/logging.h"
@@ -74,6 +75,31 @@ class SubGrammarAdderImpl : public GrammarMutator {
       builder_->UpdateJSONStringLengthBounds(
           new_rule_ids_names[i].first, rule.json_string_min_chars, rule.json_string_max_chars
       );
+      builder_->UpdateJSONStringPattern(new_rule_ids_names[i].first, rule.json_string_pattern);
+      builder_->UpdateJSONNumberMultipleOf(
+          new_rule_ids_names[i].first,
+          rule.json_number_multiple_of_coefficient,
+          rule.json_number_multiple_of_decimal_scale
+      );
+      builder_->UpdateJSONNumberRange(
+          new_rule_ids_names[i].first,
+          rule.json_number_minimum,
+          rule.json_number_maximum,
+          rule.json_number_exclusive_minimum,
+          rule.json_number_exclusive_maximum
+      );
+      if (rule.HasJSONObjectRequiredConstraint()) {
+        builder_->UpdateJSONObjectRequiredCount(
+            new_rule_ids_names[i].first, rule.json_object_required_count
+        );
+      }
+      if (rule.IsJSONObjectRequiredProperty()) {
+        builder_->UpdateJSONObjectRequiredProperty(
+            new_rule_ids_names[i].first,
+            new_rule_ids_names[rule.json_object_required_owner_rule_id].first,
+            rule.json_object_required_property_index
+        );
+      }
       builder_->UpdateCaptureName(new_rule_ids_names[i].first, rule.capture_name);
       if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
         auto remapped_info = *suffix_stop_info;
@@ -294,6 +320,25 @@ class StructureNormalizerImpl : public GrammarMutator {
       builder_->UpdateJSONStringLengthBounds(
           i, rule.json_string_min_chars, rule.json_string_max_chars
       );
+      builder_->UpdateJSONStringPattern(i, rule.json_string_pattern);
+      builder_->UpdateJSONNumberMultipleOf(
+          i, rule.json_number_multiple_of_coefficient, rule.json_number_multiple_of_decimal_scale
+      );
+      builder_->UpdateJSONNumberRange(
+          i,
+          rule.json_number_minimum,
+          rule.json_number_maximum,
+          rule.json_number_exclusive_minimum,
+          rule.json_number_exclusive_maximum
+      );
+      if (rule.HasJSONObjectRequiredConstraint()) {
+        builder_->UpdateJSONObjectRequiredCount(i, rule.json_object_required_count);
+      }
+      if (rule.IsJSONObjectRequiredProperty()) {
+        builder_->UpdateJSONObjectRequiredProperty(
+            i, rule.json_object_required_owner_rule_id, rule.json_object_required_property_index
+        );
+      }
       builder_->UpdateCaptureName(i, rule.capture_name);
       if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
         builder_->UpdateSuffixStopInfo(i, *suffix_stop_info);
@@ -805,6 +850,8 @@ class RuleInlinerImpl : public InPlaceGrammarRewriter {
     // would never be recorded. Inlining a lazy rule would erase its committed-shortest semantics.
     // Inlining a temperature rule would erase the rule its sampling temperature applies to.
     if (rule.max_tokens >= 0 || rule.max_chars >= 0 || rule.json_string_min_chars >= 0 ||
+        !rule.json_string_pattern.empty() || rule.HasJSONNumberConstraint() ||
+        rule.HasJSONObjectRequiredConstraint() || rule.IsJSONObjectRequiredProperty() ||
         !rule.capture_name.empty() || (*grammar_)->GetSuffixStopInfo(rule_id) != nullptr ||
         rule.is_lazy || rule.temperature.has_value()) {
       can_rule_be_inlined_[rule_id] = false;
@@ -930,6 +977,31 @@ class DeadCodeEliminatorImpl : public GrammarMutator {
       builder_->UpdateJSONStringLengthBounds(
           rule_id_map_[rule_id], rule.json_string_min_chars, rule.json_string_max_chars
       );
+      builder_->UpdateJSONStringPattern(rule_id_map_[rule_id], rule.json_string_pattern);
+      builder_->UpdateJSONNumberMultipleOf(
+          rule_id_map_[rule_id],
+          rule.json_number_multiple_of_coefficient,
+          rule.json_number_multiple_of_decimal_scale
+      );
+      builder_->UpdateJSONNumberRange(
+          rule_id_map_[rule_id],
+          rule.json_number_minimum,
+          rule.json_number_maximum,
+          rule.json_number_exclusive_minimum,
+          rule.json_number_exclusive_maximum
+      );
+      if (rule.HasJSONObjectRequiredConstraint()) {
+        builder_->UpdateJSONObjectRequiredCount(
+            rule_id_map_[rule_id], rule.json_object_required_count
+        );
+      }
+      if (rule.IsJSONObjectRequiredProperty()) {
+        builder_->UpdateJSONObjectRequiredProperty(
+            rule_id_map_[rule_id],
+            rule_id_map_.at(rule.json_object_required_owner_rule_id),
+            rule.json_object_required_property_index
+        );
+      }
       builder_->UpdateCaptureName(rule_id_map_[rule_id], rule.capture_name);
       if (const auto* suffix_stop_info = grammar->GetSuffixStopInfo(rule_id)) {
         auto remapped_info = *suffix_stop_info;
@@ -1198,7 +1270,9 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
       auto grammar_expr = base_grammar_->GetGrammarExpr(rule.body_expr_id);
       if (grammar_expr.type == GrammarExprType::kTagDispatch ||
           grammar_expr.type == GrammarExprType::kTokenTagDispatch) {
-        empty_rule_id_set->insert(i);
+        if (RuntimeConstraintsAllowEmpty(rule)) {
+          empty_rule_id_set->insert(i);
+        }
         continue;
       }
 
@@ -1227,7 +1301,7 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
             return regex_fsm.IsEndState(state);
           });
         }
-        if (allows_empty && rule.json_string_min_chars <= 0) {
+        if (allows_empty && RuntimeConstraintsAllowEmpty(rule)) {
           empty_rule_id_set->insert(i);
         }
         continue;
@@ -1235,7 +1309,9 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
 
       XGRAMMAR_DCHECK(grammar_expr.type == GrammarExprType::kChoices);
       if (base_grammar_->GetGrammarExpr(grammar_expr[0]).type == GrammarExprType::kEmptyStr) {
-        empty_rule_id_set->insert(i);
+        if (RuntimeConstraintsAllowEmpty(rule)) {
+          empty_rule_id_set->insert(i);
+        }
         continue;
       }
 
@@ -1244,11 +1320,35 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
         if (std::all_of(seq_expr.begin(), seq_expr.end(), [&](int32_t i) {
               return base_grammar_->GetGrammarExpr(i).type == GrammarExprType::kCharacterClassStar;
             })) {
-          empty_rule_id_set->insert(i);
+          if (RuntimeConstraintsAllowEmpty(rule)) {
+            empty_rule_id_set->insert(i);
+          }
           break;
         }
       }
     }
+  }
+
+  bool RuntimeConstraintsAllowEmpty(const Grammar::Impl::Rule& rule) {
+    if (rule.json_string_min_chars > 0) {
+      return false;
+    }
+    if (rule.json_string_pattern.empty()) {
+      return true;
+    }
+    const std::string rewritten_pattern =
+        RewriteJSONSchemaPatternForFullMatch(rule.json_string_pattern);
+    const std::string cache_key = MakeRegexFSMCacheKey(rewritten_pattern, /*json_string=*/false);
+    auto cached = regex_fsm_cache_->find(cache_key);
+    if (cached == regex_fsm_cache_->end()) {
+      auto built = BuildJSONSchemaPatternFSM(rule.json_string_pattern, 4096);
+      if (built.IsErr()) {
+        return false;
+      }
+      cached = regex_fsm_cache_->emplace(cache_key, std::move(built).Unwrap()).first;
+    }
+    if (!cached->second.IsDFA()) return false;
+    return cached->second.IsEndState(cached->second.GetStart());
   }
 
   bool SeqExprIsEpsilon(
@@ -1299,7 +1399,7 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
           return SeqExprIsEpsilon(seq_expr, *empty_rule_id_set);
         });
 
-        if (is_epsilon) {
+        if (is_epsilon && RuntimeConstraintsAllowEmpty(rule)) {
           empty_rule_id_set->insert(referer_rule_id);
           queue.push(referer_rule_id);
         }
@@ -2490,6 +2590,8 @@ int32_t RepetitionRangeExpanderImpl::HandleRepetitionRange(
   // Keep the reference to budgeted, suffix/stop, lazy, and temperature rules: replacing it with
   // the rule's content would erase the rule that the runtime semantics apply to.
   if (ref_rule.max_tokens < 0 && ref_rule.max_chars < 0 && ref_rule.json_string_min_chars < 0 &&
+      ref_rule.json_string_pattern.empty() && !ref_rule.HasJSONNumberConstraint() &&
+      !ref_rule.HasJSONObjectRequiredConstraint() && !ref_rule.IsJSONObjectRequiredProperty() &&
       base_grammar_->GetSuffixStopInfo(rule_id) == nullptr && !ref_rule.is_lazy &&
       !ref_rule.temperature.has_value() &&
       ref_rule_body.type == GrammarBuilder::GrammarExprType::kChoices &&
@@ -2664,6 +2766,25 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
       builder_->UpdateJSONStringLengthBounds(
           i, rule.json_string_min_chars, rule.json_string_max_chars
       );
+      builder_->UpdateJSONStringPattern(i, rule.json_string_pattern);
+      builder_->UpdateJSONNumberMultipleOf(
+          i, rule.json_number_multiple_of_coefficient, rule.json_number_multiple_of_decimal_scale
+      );
+      builder_->UpdateJSONNumberRange(
+          i,
+          rule.json_number_minimum,
+          rule.json_number_maximum,
+          rule.json_number_exclusive_minimum,
+          rule.json_number_exclusive_maximum
+      );
+      if (rule.HasJSONObjectRequiredConstraint()) {
+        builder_->UpdateJSONObjectRequiredCount(i, rule.json_object_required_count);
+      }
+      if (rule.IsJSONObjectRequiredProperty()) {
+        builder_->UpdateJSONObjectRequiredProperty(
+            i, rule.json_object_required_owner_rule_id, rule.json_object_required_property_index
+        );
+      }
       builder_->UpdateCaptureName(i, rule.capture_name);
       if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
         builder_->UpdateSuffixStopInfo(i, *suffix_stop_info);

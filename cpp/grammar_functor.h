@@ -75,6 +75,25 @@ class GrammarFunctor {
         builder_->UpdateJSONStringLengthBounds(
             i, rule.json_string_min_chars, rule.json_string_max_chars
         );
+        builder_->UpdateJSONStringPattern(i, rule.json_string_pattern);
+        builder_->UpdateJSONNumberMultipleOf(
+            i, rule.json_number_multiple_of_coefficient, rule.json_number_multiple_of_decimal_scale
+        );
+        builder_->UpdateJSONNumberRange(
+            i,
+            rule.json_number_minimum,
+            rule.json_number_maximum,
+            rule.json_number_exclusive_minimum,
+            rule.json_number_exclusive_maximum
+        );
+        if (rule.HasJSONObjectRequiredConstraint()) {
+          builder_->UpdateJSONObjectRequiredCount(i, rule.json_object_required_count);
+        }
+        if (rule.IsJSONObjectRequiredProperty()) {
+          builder_->UpdateJSONObjectRequiredProperty(
+              i, rule.json_object_required_owner_rule_id, rule.json_object_required_property_index
+          );
+        }
         builder_->UpdateCaptureName(i, rule.capture_name);
         if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
           builder_->UpdateSuffixStopInfo(i, *suffix_stop_info);

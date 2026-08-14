@@ -90,6 +90,45 @@ TEST(XGrammarRegexFSMCacheTest, JSONSchemaAlternativesShareSearchWildcards) {
   EXPECT_TRUE(regex_fsm_cache.begin()->second.IsDFA());
 }
 
+TEST(XGrammarRegexFSMCacheTest, ASCIILiteralSearchFSMHandlesOverlappingPrefixesAndSuffixes) {
+  auto result = BuildJSONSchemaPatternFSM(R"(bcd|abce|he|she|his|hers|a\.b|x\-y|c\/d|p\+q)", 4096);
+  ASSERT_TRUE(result.IsOk());
+  auto fsm = std::move(result).Unwrap();
+  EXPECT_TRUE(fsm.IsDFA());
+  EXPECT_TRUE(fsm.AcceptString("abcd"));    // bcd starts inside the failed abce branch.
+  EXPECT_TRUE(fsm.AcceptString("ushers"));  // she and hers overlap through failure links.
+  EXPECT_TRUE(fsm.AcceptString("prefix-a.b-suffix"));
+  EXPECT_TRUE(fsm.AcceptString("prefix-x-y-suffix"));
+  EXPECT_TRUE(fsm.AcceptString("prefix-c/d-suffix"));
+  EXPECT_TRUE(fsm.AcceptString("prefix-p+q-suffix"));
+  EXPECT_FALSE(fsm.AcceptString("abcf"));
+  EXPECT_FALSE(fsm.AcceptString("prefix-aXb-suffix"));
+}
+
+TEST(XGrammarRegexFSMCacheTest, DecodedPatternFSMCountsUnicodeCodepoints) {
+  auto one_result = BuildJSONSchemaPatternFSM("^.$", 4096);
+  ASSERT_TRUE(one_result.IsOk());
+  auto one = std::move(one_result).Unwrap();
+  EXPECT_TRUE(one.IsDFA());
+  EXPECT_TRUE(one.AcceptString("é"));
+  EXPECT_TRUE(one.AcceptString("😀"));
+  EXPECT_FALSE(one.AcceptString("éa"));
+
+  auto two_result = BuildJSONSchemaPatternFSM("^..$", 4096);
+  ASSERT_TRUE(two_result.IsOk());
+  auto two = std::move(two_result).Unwrap();
+  EXPECT_TRUE(two.AcceptString("éa"));
+  EXPECT_TRUE(two.AcceptString("😀é"));
+  EXPECT_FALSE(two.AcceptString("é"));
+
+  auto class_result = BuildJSONSchemaPatternFSM("^[éê]$", 4096);
+  ASSERT_TRUE(class_result.IsOk());
+  auto character_class = std::move(class_result).Unwrap();
+  EXPECT_TRUE(character_class.AcceptString("é"));
+  EXPECT_TRUE(character_class.AcceptString("ê"));
+  EXPECT_FALSE(character_class.AcceptString("a"));
+}
+
 TEST(XGrammarRegexFSMCacheTest, PatternLengthAvoidsProductFSM) {
   RegexFSMCache regex_fsm_cache;
   auto grammar = GrammarNormalizer::Apply(JSONSchemaToGrammar(
@@ -182,4 +221,68 @@ TEST(XGrammarRegexFSMCacheTest, JSONPatternRepeatRetainsRawCharacterClassFastPat
   EXPECT_TRUE((mask[0] & (1 << 2)) != 0);
   EXPECT_TRUE((mask[0] & (1 << 3)) != 0);
   EXPECT_TRUE((mask[0] & (1 << 4)) == 0);
+}
+
+TEST(XGrammarRegexFSMCacheTest, JSONNumberMultipleOfMetadataSurvivesOptimization) {
+  Grammar grammar =
+      Grammar::FromJSONSchema(R"({"type":"number","minimum":-20,"maximum":20,"multipleOf":0.25})");
+  int32_t constrained_rule = -1;
+  for (int32_t rule_id = 0; rule_id < grammar->NumRules(); ++rule_id) {
+    if (grammar->GetRule(rule_id).json_number_multiple_of_coefficient > 0) {
+      constrained_rule = rule_id;
+      break;
+    }
+  }
+  ASSERT_GE(constrained_rule, 0);
+  EXPECT_EQ(grammar->GetRule(constrained_rule).json_number_multiple_of_coefficient, 25);
+  EXPECT_EQ(grammar->GetRule(constrained_rule).json_number_multiple_of_decimal_scale, 2);
+
+  Grammar expanded = RepetitionRangeExpander::Apply(grammar);
+  constrained_rule = -1;
+  for (int32_t rule_id = 0; rule_id < expanded->NumRules(); ++rule_id) {
+    if (expanded->GetRule(rule_id).json_number_multiple_of_coefficient > 0) {
+      constrained_rule = rule_id;
+      break;
+    }
+  }
+  ASSERT_GE(constrained_rule, 0);
+  EXPECT_EQ(expanded->GetRule(constrained_rule).json_number_multiple_of_coefficient, 25);
+
+  Grammar optimized = GrammarOptimizer::Apply(grammar);
+  constrained_rule = -1;
+  for (int32_t rule_id = 0; rule_id < optimized->NumRules(); ++rule_id) {
+    if (optimized->GetRule(rule_id).json_number_multiple_of_coefficient > 0) {
+      constrained_rule = rule_id;
+      break;
+    }
+  }
+  ASSERT_GE(constrained_rule, 0);
+  EXPECT_EQ(optimized->GetRule(constrained_rule).json_number_multiple_of_coefficient, 25);
+  EXPECT_EQ(optimized->GetRule(constrained_rule).json_number_multiple_of_decimal_scale, 2);
+
+  TokenizerInfo tokenizer_info(std::vector<std::string>{});
+  for (bool cache_enabled : {false, true}) {
+    GrammarCompiler compiler(tokenizer_info, /*max_threads=*/1, cache_enabled);
+    CompiledGrammar compiled_grammar = compiler.CompileGrammar(grammar);
+    Grammar compiled = compiled_grammar.GetGrammar();
+    constrained_rule = -1;
+    for (int32_t rule_id = 0; rule_id < compiled->NumRules(); ++rule_id) {
+      if (compiled->GetRule(rule_id).json_number_multiple_of_coefficient > 0) {
+        constrained_rule = rule_id;
+        break;
+      }
+    }
+    ASSERT_GE(constrained_rule, 0) << "cache_enabled=" << cache_enabled;
+    EXPECT_EQ(compiled->GetRule(constrained_rule).json_number_multiple_of_coefficient, 25);
+    EXPECT_EQ(compiled->GetRule(constrained_rule).json_number_multiple_of_decimal_scale, 2);
+    GrammarMatcher accepted_matcher(
+        compiled_grammar, std::nullopt, /*terminate_without_stop_token=*/true
+    );
+    EXPECT_TRUE(accepted_matcher.AcceptString("0.25"));
+    GrammarMatcher rejected_matcher(
+        compiled_grammar, std::nullopt, /*terminate_without_stop_token=*/true
+    );
+    EXPECT_TRUE(rejected_matcher.AcceptString("0.1"));
+    EXPECT_FALSE(rejected_matcher.IsTerminated());
+  }
 }

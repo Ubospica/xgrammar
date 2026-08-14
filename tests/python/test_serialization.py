@@ -44,7 +44,7 @@ def construct_compiled_grammar():
 
 def test_get_serialization_version():
     """Test the version of the serialized JSON string."""
-    assert xgr.get_serialization_version() == "v17"
+    assert xgr.get_serialization_version() == "v21"
 
 
 def test_serialize_grammar():
@@ -53,8 +53,52 @@ def test_serialize_grammar():
     serialized = grammar.serialize_json()
     expected_json = {
         "rules": [
-            ["rule1", 4, -1, False, -1, -1, -1, -1, "", False, None],
-            ["root", 8, -1, False, -1, -1, -1, -1, "", False, None],
+            [
+                "rule1",
+                4,
+                -1,
+                False,
+                -1,
+                -1,
+                -1,
+                -1,
+                "",
+                0,
+                0,
+                "",
+                "",
+                False,
+                False,
+                -1,
+                -1,
+                -1,
+                "",
+                False,
+                None,
+            ],
+            [
+                "root",
+                8,
+                -1,
+                False,
+                -1,
+                -1,
+                -1,
+                -1,
+                "",
+                0,
+                0,
+                "",
+                "",
+                False,
+                False,
+                -1,
+                -1,
+                -1,
+                "",
+                False,
+                None,
+            ],
         ],
         "suffix_stop_infos": [],
         "grammar_expr_data": [0, 5, 8, 12, 14, 18, 21, 24, 28],
@@ -68,7 +112,7 @@ def test_serialize_grammar():
         "per_rule_fsms": [],
         "allow_empty_rule_ids": [],
         "optimized": False,
-        "__VERSION__": "v17",
+        "__VERSION__": "v21",
     }
     # The fsms are the same one, but the start state and end states are different.
     assert json.loads(serialized) == expected_json
@@ -78,8 +122,52 @@ def test_serialize_grammar_exception():
     """Test Grammar serialization produces expected JSON string."""
     expected_json = {
         "rules": [
-            ["rule1", 4, 9, True, -1, -1, -1, -1, "", False, None],
-            ["root", 8, -1, False, -1, -1, -1, -1, "", False, None],
+            [
+                "rule1",
+                4,
+                9,
+                True,
+                -1,
+                -1,
+                -1,
+                -1,
+                "",
+                0,
+                0,
+                "",
+                "",
+                False,
+                False,
+                -1,
+                -1,
+                -1,
+                "",
+                False,
+                None,
+            ],
+            [
+                "root",
+                8,
+                -1,
+                False,
+                -1,
+                -1,
+                -1,
+                -1,
+                "",
+                0,
+                0,
+                "",
+                "",
+                False,
+                False,
+                -1,
+                -1,
+                -1,
+                "",
+                False,
+                None,
+            ],
         ],
         "suffix_stop_infos": [],
         "grammar_expr_data": [0, 2, 7, 10, 14, 18, 21, 24, 28, 31],
@@ -92,14 +180,14 @@ def test_serialize_grammar_exception():
         "allow_empty_rule_ids": [],
         "complete_fsm": None,
         "per_rule_fsms": [],
-        "__VERSION__": "v17",
+        "__VERSION__": "v21",
     }
 
     expected_json["__VERSION__"] = "v1"  # Change version to trigger error
     with pytest.raises(xgr.DeserializeVersionError):
         xgr.Grammar.deserialize_json(json.dumps(expected_json))
 
-    expected_json["__VERSION__"] = "v17"
+    expected_json["__VERSION__"] = "v21"
     expected_json.pop("rules")  # Remove required field to trigger error
     with pytest.raises(xgr.DeserializeFormatError):
         xgr.Grammar.deserialize_json(json.dumps(expected_json))
@@ -151,7 +239,7 @@ def test_serialize_tokenizer_info():
         '"decoded_vocab":["1","212","a","A","b","\\u00e4\\u00b8\\u0080","-","aBc","abc"],'
         '"sorted_decoded_vocab":[[6,"-"],[3,"A"],[2,"a"],[7,"aBc"],[8,"abc"],[4,"b"],[5,"\\u00e4\\u00b8\\u0080"]],'
         '"trie_subtree_nodes_range":[1,2,5,4,5,6,7],'
-        '"__VERSION__":"v17"}'
+        '"__VERSION__":"v21"}'
     )
     assert json.loads(serialized) == json.loads(expected_json)
 
@@ -206,8 +294,52 @@ def test_serialize_compiled_grammar():
     expected_json = {
         "grammar": {
             "rules": [
-                ["rule1", 4, 9, True, -1, -1, -1, -1, "", False, None],
-                ["root", 8, -1, False, -1, -1, -1, -1, "", False, None],
+                [
+                    "rule1",
+                    4,
+                    9,
+                    True,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    "",
+                    0,
+                    0,
+                    "",
+                    "",
+                    False,
+                    False,
+                    -1,
+                    -1,
+                    -1,
+                    "",
+                    False,
+                    None,
+                ],
+                [
+                    "root",
+                    8,
+                    -1,
+                    False,
+                    -1,
+                    -1,
+                    -1,
+                    -1,
+                    "",
+                    0,
+                    0,
+                    "",
+                    "",
+                    False,
+                    False,
+                    -1,
+                    -1,
+                    -1,
+                    "",
+                    False,
+                    None,
+                ],
             ],
             "suffix_stop_infos": [],
             "grammar_expr_data": [0, 2, 7, 10, 14, 18, 21, 24, 28, 31],
@@ -270,7 +402,7 @@ def test_serialize_compiled_grammar():
             "add_prefix_space": True,
             "stop_token_ids": [0, 1],
         },
-        "__VERSION__": "v17",
+        "__VERSION__": "v21",
     }
 
     class AdaptiveTokenMask(BaseModel):
@@ -327,6 +459,68 @@ def test_serialize_compiled_grammar_functional():
     test_input = "aaa"
     assert matcher_original.accept_string(test_input) == matcher_recovered.accept_string(test_input)
     assert matcher_original.is_terminated() == matcher_recovered.is_terminated()
+
+
+def test_serialize_exact_number_range_roundtrip():
+    grammar = xgr.Grammar.from_json_schema(
+        '{"type":"number","minimum":0.01604249,"maximum":0.01604251}', any_whitespace=False
+    )
+    recovered_grammar = xgr.Grammar.deserialize_json(grammar.serialize_json())
+    for candidate, expected in [
+        ("0.0160425", True),
+        ("160425e-7", True),
+        ("0.01604248", False),
+        ("0.01604252", False),
+    ]:
+        assert _is_grammar_accept_string(recovered_grammar, candidate) == expected
+
+    tokenizer_info = xgr.TokenizerInfo(["0.0160425", "0.01604248", "<eos>"], stop_token_ids=[2])
+    compiled = xgr.GrammarCompiler(tokenizer_info, max_threads=1).compile_grammar(grammar)
+    recovered_compiled = xgr.CompiledGrammar.deserialize_json(
+        compiled.serialize_json(), tokenizer_info
+    )
+    for candidate_token, stop_allowed in [(0, True), (1, False)]:
+        for compiled_grammar in [compiled, recovered_compiled]:
+            matcher = xgr.GrammarMatcher(compiled_grammar)
+            assert matcher.accept_token(candidate_token)
+            bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+            matcher.fill_next_token_bitmask(bitmask)
+            allowed = xgr.testing._get_masked_tokens_from_bitmask(
+                bitmask, tokenizer_info.vocab_size
+            )
+            assert (2 not in allowed) == stop_allowed
+
+
+def test_serialize_large_required_runtime_state_roundtrip():
+    required = [f"key_{index}" for index in range(13)]
+    schema = {
+        "type": "object",
+        "properties": {
+            **{key: {"type": "integer"} for key in required},
+            "optional": {"type": "boolean"},
+        },
+        "required": required,
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    recovered_grammar = xgr.Grammar.deserialize_json(grammar.serialize_json())
+
+    tokenizer_info = construct_tokenizer_info()
+    compiled = xgr.GrammarCompiler(tokenizer_info).compile_grammar(grammar)
+    recovered_compiled = xgr.CompiledGrammar.deserialize_json(
+        compiled.serialize_json(), tokenizer_info
+    )
+
+    valid = {key: index for index, key in reversed(list(enumerate(required)))}
+    missing_one = dict(valid)
+    del missing_one[required[-1]]
+    missing_one["optional"] = True
+    for instance, expected in [(valid, True), (missing_one, False)]:
+        candidate = json.dumps(instance)
+        for candidate_grammar in [grammar, recovered_grammar]:
+            assert _is_grammar_accept_string(candidate_grammar, candidate) == expected
+        for compiled_grammar in [compiled, recovered_compiled]:
+            matcher = xgr.GrammarMatcher(compiled_grammar)
+            assert matcher.accept_string(candidate) == expected
 
 
 @pytest.mark.hf_token_required

@@ -29,6 +29,18 @@ namespace xgrammar {
 class RuleLevelCache;
 class CharacterClassTokenSummaryCache;
 
+std::shared_ptr<CharacterClassTokenSummaryCache> CreateCharacterClassTokenSummaryCache();
+
+struct IntVectorHash {
+  size_t operator()(const std::vector<int32_t>& values) const {
+    size_t result = values.size();
+    for (int32_t value : values) {
+      result ^= std::hash<int32_t>{}(value) + 0x9e3779b9 + (result << 6) + (result >> 2);
+    }
+    return result;
+  }
+};
+
 /******************* CompiledGrammar Datastructures *******************/
 
 /*!
@@ -117,6 +129,13 @@ struct CharacterClassRepeatTokenMask {
   DynamicBitset accepted_prefix_tokens;
 };
 
+/*! \brief A structural token mask indexed for decoded JSON-string length filtering. */
+struct RuntimeJSONStringTokenSummary {
+  DynamicBitset structurally_accepted_bitset;
+  std::vector<int32_t> boundary_accepted_indices;
+  std::vector<int32_t> uncertain_indices;
+};
+
 /*!
  * \brief All information that we need to match tokens in the tokenizer to the specified grammar.
  * It is the result of preprocessing.
@@ -155,6 +174,35 @@ class CompiledGrammar::Impl {
       character_class_repeat_token_masks;
   mutable std::mutex character_class_repeat_token_masks_mutex;
 
+  struct RuntimeJSONStringTokenSummaryKey {
+    const AdaptiveTokenMask* adaptive_token_mask;
+    const DynamicBitset* additional_accepted_bitset;
+
+    bool operator==(const RuntimeJSONStringTokenSummaryKey& other) const {
+      return adaptive_token_mask == other.adaptive_token_mask &&
+             additional_accepted_bitset == other.additional_accepted_bitset;
+    }
+  };
+  struct RuntimeJSONStringTokenSummaryKeyHash {
+    size_t operator()(const RuntimeJSONStringTokenSummaryKey& key) const {
+      size_t result = std::hash<const void*>{}(key.adaptive_token_mask);
+      result ^= std::hash<const void*>{}(key.additional_accepted_bitset) + 0x9e3779b9 +
+                (result << 6) + (result >> 2);
+      return result;
+    }
+  };
+  std::unordered_map<
+      RuntimeJSONStringTokenSummaryKey,
+      std::shared_ptr<const RuntimeJSONStringTokenSummary>,
+      RuntimeJSONStringTokenSummaryKeyHash>
+      runtime_json_string_token_summaries;
+  mutable std::mutex runtime_json_string_token_summaries_mutex;
+
+  /*! \brief Final masks for stable character-class repeat configurations, shared by matchers. */
+  std::unordered_map<std::vector<int32_t>, DynamicBitset, IntVectorHash>
+      character_class_repeat_runtime_masks;
+  mutable std::mutex character_class_repeat_runtime_masks_mutex;
+
   /*! \brief Grammar-wide flags and nullable rules shared by Earley parsers. */
   std::shared_ptr<const EarleyParserGrammarFeatures> earley_parser_grammar_features;
   /*! \brief Tag-dispatch data retained for on-demand token mask generation. */
@@ -164,6 +212,17 @@ class CompiledGrammar::Impl {
 
   const CharacterClassRepeatTokenMask& GetCharacterClassRepeatTokenMask(
       int32_t character_class_expr_id, int32_t max_characters
+  );
+
+  const RuntimeJSONStringTokenSummary& GetRuntimeJSONStringTokenSummary(
+      const AdaptiveTokenMask& adaptive_token_mask,
+      const DynamicBitset* additional_accepted_bitset = nullptr
+  );
+
+  bool GetCharacterClassRepeatRuntimeMask(const std::vector<int32_t>& key, DynamicBitset* output)
+      const;
+  void AddCharacterClassRepeatRuntimeMask(
+      const std::vector<int32_t>& key, const DynamicBitset& mask
   );
 
   void MaterializeAdaptiveTokenMaskCache();

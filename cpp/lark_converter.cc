@@ -1197,9 +1197,6 @@ std::string Trim(std::string value) {
 }
 
 std::string RewriteRegexDots(const std::string& pattern, bool dot_matches_newline) {
-  if (dot_matches_newline) {
-    return pattern;
-  }
   std::string result;
   result.reserve(pattern.size());
   bool escaped = false;
@@ -1220,7 +1217,7 @@ std::string RewriteRegexDots(const std::string& pattern, bool dot_matches_newlin
       result.push_back(c);
       in_character_class = false;
     } else if (c == '.' && !in_character_class) {
-      result += "[^\\n]";
+      result += dot_matches_newline ? "[\\s\\S]" : "[^\\n]";
     } else {
       result.push_back(c);
     }

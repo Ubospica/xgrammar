@@ -262,6 +262,10 @@ std::variant<CompiledGrammar, SerializationError> CompiledGrammar::DeserializeJS
   if (auto error = DeserializeJSONValue(impl.get(), json_value, tokenizer_info)) {
     return error.value();
   }
+  // Bounded JSON-string rules may build structural character-class masks lazily even when the
+  // serialized grammar itself was compiled eagerly.  These summaries are derived from the
+  // grammar and vocabulary, so recreate their cache after deserialization.
+  impl->character_class_token_summary_cache = CreateCharacterClassTokenSummaryCache();
   impl->earley_parser_grammar_features =
       std::make_shared<const EarleyParserGrammarFeatures>(impl->grammar);
   return CompiledGrammar(std::move(impl));

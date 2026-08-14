@@ -94,6 +94,38 @@ class Grammar::Impl {
      * spellings and UTF-16 surrogate pairs are decoded before code points are counted. */
     int32_t json_string_min_chars = -1;
     int32_t json_string_max_chars = -1;
+    /*! \brief A JSON Schema search pattern over decoded string contents, evaluated incrementally.
+     * Empty means no incremental pattern constraint. The pattern is stored only on rules whose
+     * deterministic automaton is total, so every valid decoded code point can be consumed and
+     * only rule completion needs an additional acceptance check. */
+    std::string json_string_pattern = {};
+    /*! \brief Exact JSON number multipleOf = coefficient * 10^(-decimal_scale).
+     * A zero coefficient means that no runtime number constraint is present. */
+    int32_t json_number_multiple_of_coefficient = 0;
+    int32_t json_number_multiple_of_decimal_scale = 0;
+    /*! \brief Exact JSON-number range bounds. Empty means unbounded on that side. */
+    std::string json_number_minimum = {};
+    std::string json_number_maximum = {};
+    bool json_number_exclusive_minimum = false;
+    bool json_number_exclusive_maximum = false;
+    bool HasJSONNumberRange() const {
+      return !json_number_minimum.empty() || !json_number_maximum.empty();
+    }
+    bool HasJSONNumberConstraint() const {
+      return json_number_multiple_of_coefficient > 0 || HasJSONNumberRange();
+    }
+    /*! \brief Compact runtime `required` tracking for a large any-order JSON object.
+     *
+     * A non-negative required count makes this rule the owner of a required-key bitset. A
+     * property wrapper identifies the owning rule and the bit it sets. These fields remain
+     * unused for ordinary grammars and for small objects represented exactly in the CFG. */
+    int32_t json_object_required_count = -1;
+    int32_t json_object_required_owner_rule_id = -1;
+    int32_t json_object_required_property_index = -1;
+    bool HasJSONObjectRequiredConstraint() const { return json_object_required_count >= 0; }
+    bool IsJSONObjectRequiredProperty() const {
+      return json_object_required_owner_rule_id >= 0 && json_object_required_property_index >= 0;
+    }
     /*! \brief The capture group name of the rule. When non-empty, the matcher records the input
      * span matched by this rule on every completion, retrievable via GrammarMatcher::GetCaptures.
      * Empty means no capture. */
@@ -415,6 +447,16 @@ XGRAMMAR_MEMBER_ARRAY(
     &Grammar::Impl::Rule::max_chars,
     &Grammar::Impl::Rule::json_string_min_chars,
     &Grammar::Impl::Rule::json_string_max_chars,
+    &Grammar::Impl::Rule::json_string_pattern,
+    &Grammar::Impl::Rule::json_number_multiple_of_coefficient,
+    &Grammar::Impl::Rule::json_number_multiple_of_decimal_scale,
+    &Grammar::Impl::Rule::json_number_minimum,
+    &Grammar::Impl::Rule::json_number_maximum,
+    &Grammar::Impl::Rule::json_number_exclusive_minimum,
+    &Grammar::Impl::Rule::json_number_exclusive_maximum,
+    &Grammar::Impl::Rule::json_object_required_count,
+    &Grammar::Impl::Rule::json_object_required_owner_rule_id,
+    &Grammar::Impl::Rule::json_object_required_property_index,
     &Grammar::Impl::Rule::capture_name,
     &Grammar::Impl::Rule::is_lazy,
     &Grammar::Impl::Rule::temperature

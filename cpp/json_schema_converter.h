@@ -27,6 +27,12 @@
 
 namespace xgrammar {
 
+/*! \brief Rewrite a JSON Schema search pattern as an equivalent full-match regex. */
+std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern);
+
+/*! \brief Build a deterministic byte FSM for a pattern over decoded JSON-string contents. */
+Result<FSMWithStartEnd> BuildJSONSchemaPatternFSM(const std::string& pattern, int max_num_states);
+
 // ==================== SchemaSpec: Intermediate Representation for JSON Schema ====================
 
 // Forward declaration
@@ -35,20 +41,25 @@ using SchemaSpecPtr = std::shared_ptr<SchemaSpec>;
 
 // Basic Type Specs
 struct IntegerSpec {
-  std::optional<int64_t> minimum;
-  std::optional<int64_t> maximum;
-  std::optional<int64_t> exclusive_minimum;
-  std::optional<int64_t> exclusive_maximum;
+  // Canonical decimal integers. Strings preserve JSON Schema bounds beyond int64 exactly.
+  std::optional<std::string> minimum;
+  std::optional<std::string> maximum;
+  std::optional<std::string> exclusive_minimum;
+  std::optional<std::string> exclusive_maximum;
   std::optional<int64_t> multiple_of;
 
   std::string ToString() const;
 };
 
 struct NumberSpec {
-  std::optional<double> minimum;
-  std::optional<double> maximum;
-  std::optional<double> exclusive_minimum;
-  std::optional<double> exclusive_maximum;
+  // Exact JSON-number lexemes. Keeping these as strings avoids rounding Schema bounds through
+  // picojson/double before the runtime range constraint is built.
+  std::optional<std::string> minimum;
+  std::optional<std::string> maximum;
+  std::optional<std::string> exclusive_minimum;
+  std::optional<std::string> exclusive_maximum;
+  /*! \brief Exact normalized multipleOf = coefficient * 10^(-decimal_scale). */
+  std::optional<std::pair<int32_t, int32_t>> multiple_of;
 
   std::string ToString() const;
 };
@@ -74,6 +85,11 @@ struct AnySpec {
   std::string ToString() const;
 };
 
+/*! \brief A schema that accepts no JSON value (the boolean schema false). */
+struct NeverSpec {
+  std::string ToString() const;
+};
+
 // Complex Type Specs
 struct ArraySpec {
   std::vector<SchemaSpecPtr> prefix_items;
@@ -94,6 +110,10 @@ struct ObjectSpec {
   struct PatternProperty {
     std::string pattern;  // regex pattern for key
     SchemaSpecPtr schema;
+    // Named properties whose value schema is already known to imply this pattern property's
+    // value schema. They must be removed from this regex-backed alternative; otherwise a named
+    // key could bypass its `properties` constraint by taking the `patternProperties` branch.
+    std::vector<std::string> excluded_property_names;
   };
 
   std::vector<Property> properties;
@@ -166,6 +186,7 @@ using SchemaSpecVariant = std::variant<
     ArraySpec,
     ObjectSpec,
     AnySpec,
+    NeverSpec,
     ConstSpec,
     EnumSpec,
     RefSpec,
@@ -310,7 +331,8 @@ class JSONSchemaConverter {
       std::optional<int> max_whitespace_cnt,
       RefResolver ref_resolver = nullptr,
       bool any_order = false,
-      RegexFSMCache* regex_fsm_cache = nullptr
+      RegexFSMCache* regex_fsm_cache = nullptr,
+      bool enable_runtime_json_string_constraints = true
   );
 
   virtual ~JSONSchemaConverter() = default;
@@ -345,6 +367,9 @@ class JSONSchemaConverter {
   virtual int32_t GenerateOneOf(const OneOfSpec& spec, const std::string& rule_name);
   virtual int32_t GenerateAllOf(const AllOfSpec& spec, const std::string& rule_name);
   virtual int32_t GenerateTypeArray(const TypeArraySpec& spec, const std::string& rule_name);
+
+  /*! \brief Generate a finite JSON value recursively with the active formatting policy. */
+  int32_t GenerateJSONValue(const picojson::value& value, const std::string& rule_name);
 
   // ==================== Hooks for customization ====================
 
@@ -459,9 +484,11 @@ class JSONSchemaConverter {
       const std::optional<int32_t>& additional_property_override = std::nullopt
   );
 
-  /*! \brief Generate the object rule in "any order" mode: an "item" alternation over all property
-   *  keys, repeated between max(min_properties, required.size()) and max_properties times. Only the
-   *  entry count is bounded, not which keys appear.
+  /*! \brief Generate the object rule in "any order" mode.
+   *
+   * For bounded common cases this tracks the subset of required named properties already seen,
+   * rather than treating any equally-sized set of keys as satisfying `required`. Larger cases use
+   * the count-only construction to keep grammar size bounded.
    */
   int32_t GetAnyOrderRuleForProperties(
       const std::vector<ObjectSpec::Property>& properties,
@@ -488,6 +515,10 @@ class JSONSchemaConverter {
   // Optional cache owned by the caller. It lets grammar optimization reuse the automata built
   // here to validate regex-backed schema constraints.
   RegexFSMCache* regex_fsm_cache_ = nullptr;
+  // Runtime rule metadata is not expressible in the public EBNF text format. The legacy text
+  // conversion path disables this optimization so parsing the emitted grammar preserves its
+  // language; direct Grammar and compiler APIs keep it enabled.
+  bool enable_runtime_json_string_constraints_ = true;
 
  public:
   // Basic rule names
@@ -518,6 +549,15 @@ class JSONSchemaConverter {
     std::map<uint8_t, TrieNode> children;
   };
   int32_t BuildTrieBody(const TrieNode& node, const std::string& rule_name);
+  int32_t BuildTrieContentBody(const TrieNode& node, int32_t generic_tail_rule_id);
+  int32_t PatternPropertyKeyExpression(
+      const ObjectSpec::PatternProperty& pattern_property, const std::string& rule_name
+  );
+
+  /*! \brief Match keys to which additionalProperties applies in a patternProperties object. */
+  int32_t AdditionalPropertyKeyExpressionExcludingPatterns(
+      const ObjectSpec& spec, const std::string& rule_name
+  );
 
   // Reused grammar expression ids
   std::optional<int32_t> empty_expr_id_;
@@ -530,6 +570,9 @@ class JSONSchemaConverter {
 
   // Helper for integer/number range regex generation
   static std::string GenerateRangeRegex(std::optional<int64_t> start, std::optional<int64_t> end);
+  static std::string GenerateRangeRegex(
+      const std::optional<std::string>& start, const std::optional<std::string>& end
+  );
   int32_t GenerateIntegerMultipleOfDFA(int64_t multiple_of, const std::string& rule_name);
   static std::string GenerateFloatRangeRegex(
       std::optional<double> start,
