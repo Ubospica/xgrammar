@@ -94,12 +94,7 @@ picojson::value ConstStringFormat::ToJSON() const {
 picojson::value JSONSchemaFormat::ToJSON() const {
   picojson::object obj;
   obj["type"] = picojson::value(type);
-  picojson::value schema_val;
-  if (picojson::parse(schema_val, json_schema).empty()) {
-    obj["json_schema"] = schema_val;
-  } else {
-    obj["json_schema"] = picojson::value(json_schema);
-  }
+  obj["json_schema"] = *json_schema;
   obj["style"] = picojson::value(style);
   obj["any_order"] = picojson::value(any_order);
   if (max_whitespace_cnt.has_value()) {
@@ -319,6 +314,9 @@ class StructuralTagParser {
   static Result<StructuralTag, StructuralTagError> FromJSON(const std::string& json);
 
  private:
+  explicit StructuralTagParser(std::shared_ptr<const picojson::value> root_value)
+      : root_value_(std::move(root_value)) {}
+
   Result<StructuralTag, ISTError> ParseStructuralTag(const picojson::value& value);
 
   /*!
@@ -358,17 +356,18 @@ class StructuralTagParser {
   Result<DispatchFormat, ISTError> ParseDispatchFormat(const picojson::object& value);
   Result<TokenDispatchFormat, ISTError> ParseTokenDispatchFormat(const picojson::object& value);
 
+  std::shared_ptr<const picojson::value> root_value_;
   int parse_format_recursion_depth_ = 0;
 };
 
 Result<StructuralTag, StructuralTagError> StructuralTagParser::FromJSON(const std::string& json) {
-  picojson::value value;
-  std::string err = picojson::parse(value, json);
+  auto value = std::make_shared<picojson::value>();
+  std::string err = picojson::parse(*value, json);
   if (!err.empty()) {
     return ResultErr<InvalidJSONError>("Failed to parse JSON: " + err);
   }
   return Result<StructuralTag, StructuralTagError>::Convert(
-      StructuralTagParser().ParseStructuralTag(value)
+      StructuralTagParser(value).ParseStructuralTag(*value)
   );
 }
 
@@ -568,10 +567,11 @@ Result<JSONSchemaFormat, ISTError> StructuralTagParser::ParseJSONSchemaFormat(
     }
     max_whitespace_cnt = static_cast<int>(max_whitespace_cnt_it->second.get<int64_t>());
   }
-  // here introduces a serialization/deserialization overhead; try to avoid it in the future.
-  return ResultOk<JSONSchemaFormat>(
-      json_schema_it->second.serialize(false), style, any_order, max_whitespace_cnt
-  );
+  // Keep an alias to the already parsed schema. root_value_ owns the full document, so the nested
+  // value remains valid after this parser returns and can be consumed without another JSON parse.
+  auto json_schema =
+      std::shared_ptr<const picojson::value>(root_value_, std::addressof(json_schema_it->second));
+  return ResultOk<JSONSchemaFormat>(std::move(json_schema), style, any_order, max_whitespace_cnt);
 }
 
 Result<AnyTextFormat, ISTError> StructuralTagParser::ParseAnyTextFormat(const picojson::object& obj
@@ -1832,8 +1832,7 @@ Result<int, ISTError> StructuralTagGrammarConverter::Visit(const Format& format)
       [](const auto& value) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<T, JSONSchemaFormat>) {
-          // ParseStructuralTag already canonicalizes json_schema. Reusing that representation
-          // avoids reparsing it solely to build the converter's deduplication key.
+          // Reuse the parsed schema both for this fingerprint and for grammar conversion.
           std::string result = "json_schema\n" + value.style + "\n";
           result.push_back(value.any_order ? '1' : '0');
           result.push_back('\n');
@@ -1842,7 +1841,7 @@ Result<int, ISTError> StructuralTagGrammarConverter::Visit(const Format& format)
                                                    : std::string("null")
           );
           result.push_back('\n');
-          result.append(value.json_schema);
+          result.append(value.json_schema->serialize(false));
           return result;
         } else {
           return value.ToJSON().serialize();
@@ -1882,8 +1881,8 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const JSONSchemaFo
     return ResultErr<ISTError>("Unsupported parsing type: " + format.style);
   }
   // The whitespace cap comes from the JSONSchemaFormat node (per-tag).
-  auto sub_grammar = GrammarNormalizer::Apply(JSONSchemaToGrammar(
-      format.json_schema,
+  auto sub_grammar = GrammarNormalizer::Apply(JSONSchemaValueToGrammar(
+      *format.json_schema,
       /*any_whitespace=*/true,
       /*indent=*/std::nullopt,
       /*separators=*/std::nullopt,

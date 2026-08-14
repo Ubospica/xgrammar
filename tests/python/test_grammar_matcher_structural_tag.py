@@ -184,6 +184,35 @@ def test_structural_tag_compiler():
     compiled_grammar = compiler.compile_structural_tag(tags, triggers)
     assert str(compiled_grammar.grammar) == expected_grammar_test_structural_tag_after_optimization
 
+    # The deprecated tags-plus-triggers entry point serializes its equivalent payload directly to
+    # avoid constructing a second nested Pydantic object graph. Keep it exactly aligned with the
+    # modern StructuralTag entry point for string, dictionary, and Pydantic schema inputs.
+    modern_structural_tag = xgr.StructuralTag.from_legacy_structural_tag(tags, triggers)
+    modern_compiled_grammar = xgr.GrammarCompiler(xgr.TokenizerInfo([])).compile_structural_tag(
+        modern_structural_tag
+    )
+    assert str(compiled_grammar.grammar) == str(modern_compiled_grammar.grammar)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "properties": {"value": {"type": "integer"}}},
+        '{"type":"object","properties":{"value":{"type":"integer"}}}',
+        '  { "type": "object", "properties": { "value": { "type": "integer" } } }\n',
+    ],
+    ids=["dict", "json-string", "json-string-with-whitespace"],
+)
+def test_legacy_structural_tag_payload_matches_modern_entry(schema):
+    tags = [xgr.StructuralTagItem(begin="<call>", schema=schema, end="</call>")]
+    triggers = ["<call>"]
+    tokenizer_info = xgr.TokenizerInfo([])
+    legacy = xgr.GrammarCompiler(tokenizer_info).compile_structural_tag(tags, triggers)
+    modern = xgr.GrammarCompiler(tokenizer_info).compile_structural_tag(
+        xgr.StructuralTag.from_legacy_structural_tag(tags, triggers)
+    )
+    assert str(legacy.grammar) == str(modern.grammar)
+
 
 def test_structural_tag_overlapping_branch_prefixes():
     tags = [
