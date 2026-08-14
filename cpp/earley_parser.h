@@ -621,16 +621,61 @@ struct EarleyParserGrammarFeatures {
 
   struct JSONStringPatternDFA {
     static constexpr uint16_t kNoTransition = std::numeric_limits<uint16_t>::max();
+    // Runtime property-name exclusions share ParserState::json_string_pattern_state with the
+    // ordinary pattern DFA. The base DFA is limited to 4,096 states (12 bits); the remaining 19
+    // positive bits track a sparse exact-string trie, with state zero meaning the input has
+    // already diverged from every excluded string.
+    static constexpr uint32_t kExclusionStateBits = 19;
+    static constexpr uint32_t kExclusionStateMask = (1U << kExclusionStateBits) - 1;
 
     int32_t start = -1;
     std::vector<uint8_t> is_end_state;
     std::vector<uint16_t> dense_transitions;
+    std::vector<uint8_t> exclusion_is_terminal;
+    std::vector<std::vector<std::pair<uint8_t, uint32_t>>> exclusion_transitions;
 
     int32_t GetStart() const { return start; }
 
     bool IsEndState(int32_t state) const {
-      XGRAMMAR_DCHECK(state >= 0 && state < static_cast<int32_t>(is_end_state.size()));
-      return is_end_state[state];
+      XGRAMMAR_DCHECK(state >= 0);
+      uint32_t base_state = static_cast<uint32_t>(state);
+      uint32_t exclusion_state = 0;
+      if (!exclusion_transitions.empty()) {
+        exclusion_state = base_state & kExclusionStateMask;
+        base_state >>= kExclusionStateBits;
+      }
+      XGRAMMAR_DCHECK(base_state < is_end_state.size());
+      XGRAMMAR_DCHECK(exclusion_state == 0 || exclusion_state < exclusion_is_terminal.size());
+      return is_end_state[base_state] &&
+             (exclusion_state == 0 || !exclusion_is_terminal[exclusion_state]);
+    }
+
+    int32_t Advance(int32_t state, uint8_t byte) const {
+      XGRAMMAR_DCHECK(state >= 0);
+      uint32_t base_state = static_cast<uint32_t>(state);
+      uint32_t exclusion_state = 0;
+      if (!exclusion_transitions.empty()) {
+        exclusion_state = base_state & kExclusionStateMask;
+        base_state >>= kExclusionStateBits;
+      }
+      XGRAMMAR_DCHECK(base_state * 256 + byte < dense_transitions.size());
+      uint16_t next_base = dense_transitions[base_state * 256 + byte];
+      if (next_base == kNoTransition) return -1;
+      if (exclusion_transitions.empty()) return next_base;
+
+      uint32_t next_exclusion = 0;
+      if (exclusion_state != 0) {
+        XGRAMMAR_DCHECK(exclusion_state < exclusion_transitions.size());
+        for (const auto& [edge_byte, target] : exclusion_transitions[exclusion_state]) {
+          if (edge_byte == byte) {
+            next_exclusion = target;
+            break;
+          }
+        }
+      }
+      uint32_t packed = (static_cast<uint32_t>(next_base) << kExclusionStateBits) | next_exclusion;
+      XGRAMMAR_DCHECK(packed <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
+      return static_cast<int32_t>(packed);
     }
   };
 
@@ -721,10 +766,7 @@ struct EarleyParserGrammarFeatures {
   }
 
   int32_t GetJSONStringPatternTransition(int32_t rule_id, int32_t state, uint8_t byte) const {
-    const auto& transitions = json_string_pattern_dfas[rule_id]->dense_transitions;
-    XGRAMMAR_DCHECK(state >= 0 && state * 256 + byte < static_cast<int32_t>(transitions.size()));
-    const uint16_t result = transitions[state * 256 + byte];
-    return result == JSONStringPatternDFA::kNoTransition ? -1 : result;
+    return json_string_pattern_dfas[rule_id]->Advance(state, byte);
   }
 
   friend std::size_t MemorySize(const EarleyParserGrammarFeatures& features) {
@@ -738,8 +780,13 @@ struct EarleyParserGrammarFeatures {
              : features.json_object_required_states->MemorySizeBytes());
     for (const auto& pattern_dfa : features.json_string_pattern_dfas) {
       if (pattern_dfa.has_value()) {
-        result +=
-            MemorySize(pattern_dfa->is_end_state) + MemorySize(pattern_dfa->dense_transitions);
+        result += MemorySize(pattern_dfa->is_end_state) +
+                  MemorySize(pattern_dfa->dense_transitions) +
+                  MemorySize(pattern_dfa->exclusion_is_terminal) +
+                  MemorySize(pattern_dfa->exclusion_transitions);
+        for (const auto& transitions : pattern_dfa->exclusion_transitions) {
+          result += MemorySize(transitions);
+        }
       }
     }
     for (const auto& number_range : features.json_number_ranges) {

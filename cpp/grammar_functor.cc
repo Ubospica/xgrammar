@@ -1336,19 +1336,27 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
     if (rule.json_string_pattern.empty()) {
       return true;
     }
-    const std::string rewritten_pattern =
-        RewriteJSONSchemaPatternForFullMatch(rule.json_string_pattern);
+    std::string pattern = rule.json_string_pattern;
+    bool excludes_empty = false;
+    auto decoded_exclusion = DecodeJSONSchemaPatternStringExclusion(pattern);
+    if (decoded_exclusion.has_value()) {
+      auto [base_pattern, excluded_strings] = std::move(*decoded_exclusion);
+      pattern = std::move(base_pattern);
+      excludes_empty =
+          std::find(excluded_strings.begin(), excluded_strings.end(), "") != excluded_strings.end();
+    }
+    const std::string rewritten_pattern = RewriteJSONSchemaPatternForFullMatch(pattern);
     const std::string cache_key = MakeRegexFSMCacheKey(rewritten_pattern, /*json_string=*/false);
     auto cached = regex_fsm_cache_->find(cache_key);
     if (cached == regex_fsm_cache_->end()) {
-      auto built = BuildJSONSchemaPatternFSM(rule.json_string_pattern, 4096);
+      auto built = BuildJSONSchemaPatternFSM(pattern, 4096);
       if (built.IsErr()) {
         return false;
       }
       cached = regex_fsm_cache_->emplace(cache_key, std::move(built).Unwrap()).first;
     }
     if (!cached->second.IsDFA()) return false;
-    return cached->second.IsEndState(cached->second.GetStart());
+    return !excludes_empty && cached->second.IsEndState(cached->second.GetStart());
   }
 
   bool SeqExprIsEpsilon(

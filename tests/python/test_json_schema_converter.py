@@ -1526,6 +1526,7 @@ def test_untyped_object_combinator_preserves_non_objects_and_constrains_objects(
         "anyOf": [{"required": ["pool"]}, {"required": ["virtualServer"]}],
     }
     grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    assert "basic_non_object ::=" in str(grammar)
     # Object-specific keywords are conditional in JSON Schema, so non-objects remain valid.
     for instance in (None, 1, "text", [1]):
         assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
@@ -1706,7 +1707,10 @@ def test_pattern_properties_required_names_preserve_schema_order():
         json.dumps(schema), any_whitespace=False, strict_mode=True
     )
     assert _is_grammar_accept_string(ordered, '{"Normal": 1, "Fighting": 1}')
+    assert _is_grammar_accept_string(ordered, '{"Normal": 1, "Fighting": 1, "NormalX": 1}')
     assert not _is_grammar_accept_string(ordered, '{"Fighting": 1, "Normal": 1}')
+    assert not _is_grammar_accept_string(ordered, '{"Normal": 1, "Fighting": 1, "Normal": 1}')
+    assert not _is_grammar_accept_string(ordered, r'{"Normal": 1, "Fighting": 1, "Nor\u006dal": 1}')
 
     any_order = xgr.Grammar.from_json_schema(
         json.dumps(schema), any_whitespace=False, strict_mode=True, any_order=True
@@ -1714,6 +1718,40 @@ def test_pattern_properties_required_names_preserve_schema_order():
     assert _is_grammar_accept_string(any_order, '{"Fighting": 1, "Normal": 1}')
     assert not _is_grammar_accept_string(any_order, '{"Normal": 3, "Fighting": 1}')
     assert not _is_grammar_accept_string(any_order, '{"Normal": 1}')
+
+    prefix_schema = {
+        "type": "object",
+        "patternProperties": {"N": {"type": "number"}},
+        "required": ["Normal"],
+        "additionalProperties": False,
+    }
+    prefix_grammar = xgr.Grammar.from_json_schema(
+        json.dumps(prefix_schema), any_whitespace=False, strict_mode=True
+    )
+    assert _is_grammar_accept_string(prefix_grammar, '{"Normal": 1, "Norm": 2}')
+    assert not _is_grammar_accept_string(prefix_grammar, '{"Normal": 1, "Normal": 2}')
+    assert not _is_grammar_accept_string(prefix_grammar, r'{"Normal": 1, "Nor\u006dal": 2}')
+
+
+def test_large_pattern_property_exclusion_avoids_product_state_limit():
+    property_name = "a" * 4100
+    schema = {
+        "type": "object",
+        "properties": {property_name: {"type": "number"}},
+        "patternProperties": {".": {"type": "number"}},
+        "required": [property_name],
+        "additionalProperties": False,
+    }
+    grammar = xgr.Grammar.from_json_schema(
+        json.dumps(schema), any_whitespace=False, strict_mode=True
+    )
+
+    assert _is_grammar_accept_string(grammar, json.dumps({property_name: 1, "x": 2}))
+    assert not _is_grammar_accept_string(grammar, f'{{"{property_name}": 1, "{property_name}": 2}}')
+    escaped_duplicate = property_name[:-1] + r"\u0061"
+    assert not _is_grammar_accept_string(
+        grammar, f'{{"{property_name}": 1, "{escaped_duplicate}": 2}}'
+    )
 
 
 def test_unsatisfiable_items_schema_does_not_make_array_schema_uncompilable():

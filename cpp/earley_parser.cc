@@ -895,8 +895,13 @@ EarleyParserGrammarFeatures::EarleyParserGrammarFeatures(
       json_number_ranges[rule_id] = std::move(range);
     }
     if (!rule.json_string_pattern.empty()) {
-      const std::string rewritten_pattern =
-          RewriteJSONSchemaPatternForFullMatch(rule.json_string_pattern);
+      std::string pattern = rule.json_string_pattern;
+      std::vector<std::string> excluded_strings;
+      if (auto decoded = DecodeJSONSchemaPatternStringExclusion(pattern)) {
+        pattern = std::move(decoded->first);
+        excluded_strings = std::move(decoded->second);
+      }
+      const std::string rewritten_pattern = RewriteJSONSchemaPatternForFullMatch(pattern);
       const std::string cache_key = MakeRegexFSMCacheKey(rewritten_pattern, /*json_string=*/false);
       FSMWithStartEnd* pattern_fsm = nullptr;
       if (regex_fsm_cache != nullptr) {
@@ -907,7 +912,7 @@ EarleyParserGrammarFeatures::EarleyParserGrammarFeatures(
       }
       std::optional<FSMWithStartEnd> built_fsm;
       if (pattern_fsm == nullptr) {
-        auto built = BuildJSONSchemaPatternFSM(rule.json_string_pattern, 4096);
+        auto built = BuildJSONSchemaPatternFSM(pattern, 4096);
         XGRAMMAR_CHECK(built.IsOk())
             << "Failed to rebuild decoded JSON-string pattern for rule " << rule.name;
         built_fsm.emplace(std::move(built).Unwrap());
@@ -942,6 +947,43 @@ EarleyParserGrammarFeatures::EarleyParserGrammarFeatures(
         }
       }
       json_string_pattern_dfas[rule_id] = std::move(pattern_dfa);
+      if (!excluded_strings.empty()) {
+        auto& runtime_dfa = *json_string_pattern_dfas[rule_id];
+        // State zero means the decoded key has diverged from every excluded name. The trie root
+        // is one, allowing an empty excluded name to be represented as a terminal root.
+        runtime_dfa.exclusion_transitions.resize(2);
+        runtime_dfa.exclusion_is_terminal.resize(2, false);
+        for (const auto& excluded : excluded_strings) {
+          uint32_t state = 1;
+          for (uint8_t byte : excluded) {
+            auto& edges = runtime_dfa.exclusion_transitions[state];
+            auto edge = std::find_if(edges.begin(), edges.end(), [&](const auto& item) {
+              return item.first == byte;
+            });
+            uint32_t target;
+            if (edge != edges.end()) {
+              target = edge->second;
+            } else {
+              target = runtime_dfa.exclusion_transitions.size();
+              XGRAMMAR_CHECK(
+                  target <= EarleyParserGrammarFeatures::JSONStringPatternDFA::kExclusionStateMask
+              ) << "Decoded JSON-string exclusion trie has too many states";
+              edges.emplace_back(byte, target);
+              runtime_dfa.exclusion_transitions.emplace_back();
+              runtime_dfa.exclusion_is_terminal.push_back(false);
+            }
+            state = target;
+          }
+          runtime_dfa.exclusion_is_terminal[state] = true;
+        }
+        uint32_t packed_start =
+            (static_cast<uint32_t>(runtime_dfa.start)
+             << EarleyParserGrammarFeatures::JSONStringPatternDFA::kExclusionStateBits) |
+            1U;
+        XGRAMMAR_CHECK(packed_start <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
+            << "Decoded JSON-string pattern state does not fit ParserState";
+        runtime_dfa.start = static_cast<int32_t>(packed_start);
+      }
     }
     capture_tracking =
         capture_tracking || !rule.capture_name.empty() ||

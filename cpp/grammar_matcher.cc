@@ -13,8 +13,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <optional>
 #include <string>
 #include <thread>
@@ -35,6 +37,14 @@
 #include "testing.h"
 #include "tokenizer_info_impl.h"
 
+#if defined(_MSC_VER)
+#define XGRAMMAR_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define XGRAMMAR_NOINLINE __attribute__((noinline))
+#else
+#define XGRAMMAR_NOINLINE
+#endif
+
 namespace xgrammar {
 
 /******************* Tool functions for token mask *******************/
@@ -45,6 +55,53 @@ int32_t GetBitmaskSize(int vocab_size) { return DynamicBitset::GetBufferSize(voc
 DLDataType GetBitmaskDLType() { return DLDataType{kDLInt, 32, 1}; }
 
 namespace details {
+
+// Unlike std::optional in the supported optimized builds, this holder does not initialize its
+// inactive storage. It is used for large speculative parser helpers that are needed only on rare
+// mask paths; when engaged, the object still lives on the stack and incurs no heap allocation.
+template <typename T>
+class LazyStackObject {
+ public:
+  LazyStackObject() noexcept = default;
+  ~LazyStackObject() { Reset(); }
+
+  LazyStackObject(const LazyStackObject&) = delete;
+  LazyStackObject& operator=(const LazyStackObject&) = delete;
+
+  template <typename... Args>
+  T& Emplace(Args&&... args) {
+    XGRAMMAR_DCHECK(!engaged_);
+    T* result = ::new (static_cast<void*>(storage_)) T(std::forward<Args>(args)...);
+    engaged_ = true;
+    return *result;
+  }
+
+  bool HasValue() const noexcept { return engaged_; }
+  explicit operator bool() const noexcept { return engaged_; }
+
+  T& Value() {
+    XGRAMMAR_DCHECK(engaged_);
+    return *Ptr();
+  }
+
+  T* operator->() {
+    XGRAMMAR_DCHECK(engaged_);
+    return Ptr();
+  }
+
+ private:
+  T* Ptr() { return std::launder(reinterpret_cast<T*>(storage_)); }
+
+  void Reset() noexcept {
+    if (engaged_) {
+      Ptr()->~T();
+      engaged_ = false;
+    }
+  }
+
+  alignas(T) unsigned char storage_[sizeof(T)];
+  bool engaged_{false};
+};
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
@@ -647,6 +704,19 @@ class GrammarMatcher::Impl : public EarleyParser {
       const AdaptiveTokenMask& adaptive_token_mask, int32_t remaining_chars
   );
 
+  /*! \brief Apply the filters and caches needed only by runtime JSON string/number rules.
+   * \returns Whether this state is fully handled and needs no uncertain-token scan. */
+  bool PrepareRuntimeJSONMask(
+      const ParserState& state,
+      const AdaptiveTokenMask& adaptive_token_mask,
+      const DynamicBitset* additional_accepted_bitset,
+      const std::vector<ParserState>& latest_states,
+      const std::vector<int32_t>** indices_to_check,
+      std::optional<std::vector<int32_t>>* runtime_json_string_mask_key
+  );
+
+  void RememberRuntimeJSONStringMask(std::vector<int32_t>&& key, DynamicBitset&& mask);
+
   bool AdvanceWithCharacterBudget(uint8_t byte, bool debug_print = false);
 
   bool AdvanceAtomicTokenWithCharacterBudget(
@@ -777,6 +847,11 @@ class GrammarMatcher::Impl : public EarleyParser {
     bool requires_runtime_json_filter;
   };
   std::vector<StateWithTokenMask> tmp_latest_states_with_masks_;
+  // Reused while materializing virtual continuation-cache rows. A matcher fills masks
+  // serially, so retaining these capacities avoids allocating the same short rows for every
+  // parser state and every generated token.
+  std::vector<std::pair<int32_t, ParserState>> tmp_continuation_completable_states_;
+  std::vector<ParserState> tmp_continuation_scanable_states_;
   std::vector<int32_t> tmp_runtime_constraint_indices_;
   DynamicBitset tmp_runtime_uncertain_accepted_bitset_{tokenizer_info_.GetVocabSize()};
   bool repeat_mask_cache_enabled_{false};
@@ -808,6 +883,9 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       scratch.in_use = true;
       uses_thread_local_scratch_ = true;
       transition_table_ = scratch.transition_table.data();
+      rows_.swap(scratch.rows);
+      configurations_.swap(scratch.configurations);
+      absolute_rows_by_id_.swap(scratch.absolute_rows_by_id);
     } else {
       owned_transition_table_ = std::make_unique<uint16_t[]>(kMaxConfigurations * 256);
       transition_table_ = owned_transition_table_.get();
@@ -916,14 +994,18 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
 
   uint64_t Queries() const { return queries_; }
   uint64_t Hits() const { return hits_; }
-  size_t CanonicalRows() const { return rows_.size(); }
-  size_t CanonicalConfigurations() const { return configurations_.size(); }
+  size_t CanonicalRows() const { return row_count_; }
+  size_t CanonicalConfigurations() const { return configuration_count_; }
   bool IsEnabled() const { return enabled_; }
 
  private:
   void ReleaseThreadLocalScratch() noexcept {
     if (uses_thread_local_scratch_) {
-      GetThreadLocalScratch().in_use = false;
+      auto& scratch = GetThreadLocalScratch();
+      rows_.swap(scratch.rows);
+      configurations_.swap(scratch.configurations);
+      absolute_rows_by_id_.swap(scratch.absolute_rows_by_id);
+      scratch.in_use = false;
       uses_thread_local_scratch_ = false;
     }
   }
@@ -935,16 +1017,6 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   static constexpr int32_t kRowShift = 2;
   static constexpr int32_t kConfigurationShift = 9;
   static constexpr uint16_t kIdMask = 127;
-
-  struct ThreadLocalScratch {
-    std::array<uint16_t, kMaxConfigurations * 256> transition_table;
-    bool in_use{false};
-  };
-
-  static ThreadLocalScratch& GetThreadLocalScratch() {
-    static thread_local ThreadLocalScratch scratch;
-    return scratch;
-  }
 
   enum class RowRefKind : uint8_t { kNone, kExternal, kCanonical, kCurrent };
 
@@ -1002,6 +1074,19 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
              scanable_states == other.scanable_states;
     }
   };
+
+  struct ThreadLocalScratch {
+    std::array<uint16_t, kMaxConfigurations * 256> transition_table;
+    std::vector<CanonicalRow> rows;
+    std::vector<CanonicalConfiguration> configurations;
+    std::vector<std::vector<int32_t>> absolute_rows_by_id;
+    bool in_use{false};
+  };
+
+  static ThreadLocalScratch& GetThreadLocalScratch() {
+    static thread_local ThreadLocalScratch scratch;
+    return scratch;
+  }
 
   static uint16_t EncodeAccepted(int32_t row_id, int32_t configuration_id) {
     XGRAMMAR_DCHECK(
@@ -1105,7 +1190,11 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   std::optional<int32_t> InternCurrentCompletableRow() {
     const int32_t current_row = matcher_->rule_id_to_completable_states_.size() - 1;
     const auto row = matcher_->rule_id_to_completable_states_[current_row];
-    CanonicalRow normalized;
+    if (row_count_ == static_cast<int32_t>(rows_.size())) {
+      rows_.emplace_back();
+    }
+    CanonicalRow& normalized = rows_[row_count_];
+    normalized.entries.clear();
     normalized.entries.reserve(row.size());
     for (const auto& [ref_rule_id, parent_state] : row) {
       const auto normalized_state = NormalizeState(parent_state, current_row);
@@ -1114,24 +1203,34 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
       }
       normalized.entries.emplace_back(ref_rule_id, *normalized_state);
     }
-    for (int32_t i = 0; i < static_cast<int32_t>(rows_.size()); ++i) {
+    for (int32_t i = 0; i < row_count_; ++i) {
       if (rows_[i] == normalized) {
         return i;
       }
     }
-    if (rows_.size() >= kMaxRows) {
+    if (row_count_ >= kMaxRows) {
       return std::nullopt;
     }
-    rows_.push_back(std::move(normalized));
-    absolute_rows_by_id_.emplace_back();
-    return rows_.size() - 1;
+    const int32_t new_row_id = row_count_++;
+    if (new_row_id == static_cast<int32_t>(absolute_rows_by_id_.size())) {
+      absolute_rows_by_id_.emplace_back();
+    } else {
+      absolute_rows_by_id_[new_row_id].clear();
+    }
+    return new_row_id;
   }
 
   std::optional<int32_t> InternCurrentConfiguration(int32_t current_row_id) {
     XGRAMMAR_DCHECK(current_row_id >= 0 && current_row_id < kMaxRows);
     const int32_t current_row = matcher_->scanable_state_history_.size() - 1;
     const auto scanable_states = matcher_->scanable_state_history_[current_row];
-    CanonicalConfiguration normalized{current_row_id, matcher_->is_completed_.back(), {}};
+    if (configuration_count_ == static_cast<int32_t>(configurations_.size())) {
+      configurations_.push_back(CanonicalConfiguration{});
+    }
+    CanonicalConfiguration& normalized = configurations_[configuration_count_];
+    normalized.current_row_id = current_row_id;
+    normalized.is_completed = matcher_->is_completed_.back();
+    normalized.scanable_states.clear();
     normalized.scanable_states.reserve(scanable_states.size());
     for (const auto& state : scanable_states) {
       const auto normalized_state = NormalizeState(state, current_row);
@@ -1146,11 +1245,10 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
         return i;
       }
     }
-    if (configurations_.size() >= kMaxConfigurations) {
+    if (configuration_count_ >= kMaxConfigurations) {
       return std::nullopt;
     }
-    const int32_t new_configuration_id = configurations_.size();
-    configurations_.push_back(std::move(normalized));
+    const int32_t new_configuration_id = configuration_count_++;
     next_configuration_for_row_[new_configuration_id] =
         first_configuration_for_row_[current_row_id];
     first_configuration_for_row_[current_row_id] = new_configuration_id;
@@ -1166,25 +1264,25 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   void MaterializeTransition(int32_t row_id, int32_t configuration_id) {
     const int32_t current_row = matcher_->rule_id_to_completable_states_.size();
     const auto& cached_row = rows_[row_id];
-    tmp_completable_states_.clear();
-    tmp_completable_states_.reserve(cached_row.entries.size());
+    auto& completable_states = matcher_->tmp_continuation_completable_states_;
+    completable_states.clear();
+    completable_states.reserve(cached_row.entries.size());
     for (const auto& [ref_rule_id, parent_state] : cached_row.entries) {
-      tmp_completable_states_.emplace_back(
-          ref_rule_id, MaterializeState(parent_state, current_row)
-      );
+      completable_states.emplace_back(ref_rule_id, MaterializeState(parent_state, current_row));
     }
 
     const auto& cached_configuration = configurations_[configuration_id];
     XGRAMMAR_DCHECK(cached_configuration.current_row_id == row_id);
-    tmp_scanable_states_.clear();
-    tmp_scanable_states_.reserve(cached_configuration.scanable_states.size());
+    auto& scanable_states = matcher_->tmp_continuation_scanable_states_;
+    scanable_states.clear();
+    scanable_states.reserve(cached_configuration.scanable_states.size());
     for (const auto& state : cached_configuration.scanable_states) {
-      tmp_scanable_states_.push_back(MaterializeState(state, current_row));
+      scanable_states.push_back(MaterializeState(state, current_row));
     }
 
-    matcher_->rule_id_to_completable_states_.PushBack(tmp_completable_states_);
+    matcher_->rule_id_to_completable_states_.PushBack(completable_states);
     matcher_->is_completed_.push_back(cached_configuration.is_completed);
-    matcher_->scanable_state_history_.PushBack(tmp_scanable_states_);
+    matcher_->scanable_state_history_.PushBack(scanable_states);
     matcher_->tmp_accept_stop_token_ = cached_configuration.is_completed;
     matcher_->tmp_states_to_be_added_.clear();
   }
@@ -1215,6 +1313,8 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   uint16_t* current_transition_row_{nullptr};
   std::vector<CanonicalRow> rows_;
   std::vector<CanonicalConfiguration> configurations_;
+  int32_t row_count_{0};
+  int32_t configuration_count_{0};
   static constexpr int16_t kNoConfiguration = -1;
   std::array<int16_t, kMaxRows> first_configuration_for_row_;
   std::array<int16_t, kMaxConfigurations> next_configuration_for_row_;
@@ -1222,8 +1322,6 @@ class GrammarMatcher::Impl::ContinuationTransitionCache {
   std::array<uint16_t, kMaxVirtualDepth> transition_history_;
   size_t transition_depth_{0};
   size_t materialized_depth_{0};
-  std::vector<std::pair<int32_t, ParserState>> tmp_completable_states_;
-  std::vector<ParserState> tmp_scanable_states_;
 };
 
 std::optional<GrammarMatcher::Impl::CharacterClassRepeat>
@@ -2544,6 +2642,119 @@ void GrammarMatcher::Impl::FillBitmaskForCharBudgetBoundary(
   temporary_input_bytes_ = std::move(saved_temporary_input_bytes);
 }
 
+void GrammarMatcher::Impl::RememberRuntimeJSONStringMask(
+    std::vector<int32_t>&& key, DynamicBitset&& mask
+) {
+  constexpr size_t kMaxRuntimeJSONStringMaskCacheEntries = 32;
+  RuntimeJSONStringUncertainCacheEntry entry{std::move(key), std::move(mask)};
+  if (runtime_json_string_mask_cache_.size() < kMaxRuntimeJSONStringMaskCacheEntries) {
+    runtime_json_string_mask_cache_.push_back(std::move(entry));
+    return;
+  }
+  runtime_json_string_mask_cache_[runtime_json_string_mask_cache_next_replacement_] =
+      std::move(entry);
+  runtime_json_string_mask_cache_next_replacement_ =
+      (runtime_json_string_mask_cache_next_replacement_ + 1) %
+      kMaxRuntimeJSONStringMaskCacheEntries;
+}
+
+XGRAMMAR_NOINLINE bool GrammarMatcher::Impl::PrepareRuntimeJSONMask(
+    const ParserState& state,
+    const AdaptiveTokenMask& adaptive_token_mask,
+    const DynamicBitset* additional_accepted_bitset,
+    const std::vector<ParserState>& latest_states,
+    const std::vector<int32_t>** indices_to_check,
+    std::optional<std::vector<int32_t>>* runtime_json_string_mask_key
+) {
+  const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
+  const auto& runtime_summary = compiled_grammar_->GetRuntimeJSONStringTokenSummary(
+      adaptive_token_mask, additional_accepted_bitset
+  );
+  const auto& runtime_rule = grammar_->GetRule(state.json_string_length_rule_id);
+  if (runtime_rule.HasJSONNumberConstraint()) {
+    tmp_runtime_constraint_indices_.clear();
+    tmp_runtime_constraint_indices_.reserve(
+        runtime_summary.structurally_accepted_bitset.Count() +
+        runtime_summary.uncertain_indices.size()
+    );
+    size_t uncertain_position = 0;
+    for (int32_t sorted_index = 0; sorted_index < static_cast<int32_t>(sorted_decoded_vocab.size());
+         ++sorted_index) {
+      const int32_t token_id = sorted_decoded_vocab[sorted_index].first;
+      while (uncertain_position < runtime_summary.uncertain_indices.size() &&
+             runtime_summary.uncertain_indices[uncertain_position] < sorted_index) {
+        ++uncertain_position;
+      }
+      if (runtime_summary.structurally_accepted_bitset[token_id] ||
+          (uncertain_position < runtime_summary.uncertain_indices.size() &&
+           runtime_summary.uncertain_indices[uncertain_position] == sorted_index)) {
+        tmp_runtime_constraint_indices_.push_back(sorted_index);
+      }
+    }
+    *indices_to_check = &tmp_runtime_constraint_indices_;
+    return (*indices_to_check)->empty();
+  }
+
+  const int32_t remaining = runtime_rule.json_string_max_chars < 0
+                                ? std::numeric_limits<int32_t>::max()
+                                : runtime_rule.json_string_max_chars - state.json_string_char_count;
+  if (state.GetJSONStringDecodeState() == 0) {
+    if (remaining >= 0) {
+      tmp_accepted_bitset_.OrWithIntersection(
+          runtime_summary.structurally_accepted_bitset,
+          tokenizer_info_.ImplPtr()->GetJSONStringContentSafeUpToLength(remaining)
+      );
+    }
+    for (int32_t accepted_index : runtime_summary.boundary_accepted_indices) {
+      const int32_t token_id = sorted_decoded_vocab[accepted_index].first;
+      if (JSONStringRuntimeConstraintsAllowToken(
+              state, sorted_decoded_vocab[accepted_index].second
+          )) {
+        tmp_accepted_bitset_.Set(token_id);
+      }
+    }
+  } else {
+    for (int32_t accepted_index = 0;
+         accepted_index < static_cast<int32_t>(sorted_decoded_vocab.size());
+         ++accepted_index) {
+      const int32_t token_id = sorted_decoded_vocab[accepted_index].first;
+      if (runtime_summary.structurally_accepted_bitset[token_id] &&
+          JSONStringRuntimeConstraintsAllowToken(
+              state, sorted_decoded_vocab[accepted_index].second
+          )) {
+        tmp_accepted_bitset_.Set(token_id);
+      }
+    }
+  }
+  *indices_to_check = &runtime_summary.uncertain_indices;
+  *runtime_json_string_mask_key = GetStableRuntimeJSONStringMaskKey(
+      latest_states, state, runtime_summary.max_uncertain_token_chars
+  );
+  if (runtime_json_string_mask_key->has_value()) {
+    const auto cached = std::find_if(
+        runtime_json_string_mask_cache_.begin(),
+        runtime_json_string_mask_cache_.end(),
+        [&](const RuntimeJSONStringUncertainCacheEntry& entry) {
+          return entry.key == **runtime_json_string_mask_key;
+        }
+    );
+    if (cached != runtime_json_string_mask_cache_.end()) {
+      tmp_accepted_bitset_ |= cached->mask;
+      return true;
+    }
+    DynamicBitset shared_mask(tokenizer_info_.GetVocabSize());
+    if (compiled_grammar_->GetRuntimeJSONStringMask(**runtime_json_string_mask_key, &shared_mask)) {
+      tmp_accepted_bitset_ |= shared_mask;
+      RememberRuntimeJSONStringMask(
+          std::move(**runtime_json_string_mask_key), std::move(shared_mask)
+      );
+      return true;
+    }
+    tmp_runtime_uncertain_accepted_bitset_.Reset();
+  }
+  return (*indices_to_check)->empty();
+}
+
 void GrammarMatcher::Impl::FillBitmaskForStates(
     int32_t* bitmask_data_ptr, int index, bool skip_expired, bool debug_print
 ) {
@@ -2640,20 +2851,6 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     }
   }
 
-  constexpr size_t kMaxRuntimeJSONStringMaskCacheEntries = 32;
-  auto remember_runtime_json_string_mask = [&](std::vector<int32_t>&& key, DynamicBitset&& mask) {
-    RuntimeJSONStringUncertainCacheEntry entry{std::move(key), std::move(mask)};
-    if (runtime_json_string_mask_cache_.size() < kMaxRuntimeJSONStringMaskCacheEntries) {
-      runtime_json_string_mask_cache_.push_back(std::move(entry));
-    } else {
-      runtime_json_string_mask_cache_[runtime_json_string_mask_cache_next_replacement_] =
-          std::move(entry);
-      runtime_json_string_mask_cache_next_replacement_ =
-          (runtime_json_string_mask_cache_next_replacement_ + 1) %
-          kMaxRuntimeJSONStringMaskCacheEntries;
-    }
-  };
-
   for (const auto& state_with_mask : latest_states_with_masks) {
     const auto& state = state_with_mask.state;
     const auto& adaptive_token_mask = *state_with_mask.adaptive_token_mask;
@@ -2671,109 +2868,25 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     const bool runtime_json_length = state_with_mask.requires_runtime_json_filter;
     const std::vector<int32_t>* indices_to_check = &adaptive_token_mask.uncertain_indices;
     std::optional<std::vector<int32_t>> runtime_json_string_mask_key;
-    if (runtime_json_length) {
-      const auto& runtime_summary = compiled_grammar_->GetRuntimeJSONStringTokenSummary(
-          adaptive_token_mask, state_with_mask.additional_accepted_bitset
-      );
-      const auto& runtime_rule = grammar_->GetRule(state.json_string_length_rule_id);
-      if (runtime_rule.HasJSONNumberConstraint()) {
-        tmp_runtime_constraint_indices_.clear();
-        tmp_runtime_constraint_indices_.reserve(
-            runtime_summary.structurally_accepted_bitset.Count() +
-            runtime_summary.uncertain_indices.size()
-        );
-        size_t uncertain_position = 0;
-        for (int32_t sorted_index = 0;
-             sorted_index < static_cast<int32_t>(sorted_decoded_vocab.size());
-             ++sorted_index) {
-          const int32_t token_id = sorted_decoded_vocab[sorted_index].first;
-          while (uncertain_position < runtime_summary.uncertain_indices.size() &&
-                 runtime_summary.uncertain_indices[uncertain_position] < sorted_index) {
-            ++uncertain_position;
-          }
-          if (runtime_summary.structurally_accepted_bitset[token_id] ||
-              (uncertain_position < runtime_summary.uncertain_indices.size() &&
-               runtime_summary.uncertain_indices[uncertain_position] == sorted_index)) {
-            tmp_runtime_constraint_indices_.push_back(sorted_index);
-          }
-        }
-        indices_to_check = &tmp_runtime_constraint_indices_;
-      } else {
-        const int32_t remaining =
-            runtime_rule.json_string_max_chars < 0
-                ? std::numeric_limits<int32_t>::max()
-                : runtime_rule.json_string_max_chars - state.json_string_char_count;
-        if (state.GetJSONStringDecodeState() == 0) {
-          if (remaining >= 0) {
-            tmp_accepted_bitset_.OrWithIntersection(
-                runtime_summary.structurally_accepted_bitset,
-                tokenizer_info_.ImplPtr()->GetJSONStringContentSafeUpToLength(remaining)
-            );
-          }
-          for (int32_t accepted_index : runtime_summary.boundary_accepted_indices) {
-            const int32_t token_id = sorted_decoded_vocab[accepted_index].first;
-            if (JSONStringRuntimeConstraintsAllowToken(
-                    state, sorted_decoded_vocab[accepted_index].second
-                )) {
-              tmp_accepted_bitset_.Set(token_id);
-            }
-          }
-        } else {
-          for (int32_t accepted_index = 0;
-               accepted_index < static_cast<int32_t>(sorted_decoded_vocab.size());
-               ++accepted_index) {
-            const int32_t token_id = sorted_decoded_vocab[accepted_index].first;
-            if (runtime_summary.structurally_accepted_bitset[token_id] &&
-                JSONStringRuntimeConstraintsAllowToken(
-                    state, sorted_decoded_vocab[accepted_index].second
-                )) {
-              tmp_accepted_bitset_.Set(token_id);
-            }
-          }
-        }
-        indices_to_check = &runtime_summary.uncertain_indices;
-        runtime_json_string_mask_key = GetStableRuntimeJSONStringMaskKey(
-            latest_states, state, runtime_summary.max_uncertain_token_chars
-        );
-        if (runtime_json_string_mask_key.has_value()) {
-          const auto cached = std::find_if(
-              runtime_json_string_mask_cache_.begin(),
-              runtime_json_string_mask_cache_.end(),
-              [&](const RuntimeJSONStringUncertainCacheEntry& entry) {
-                return entry.key == *runtime_json_string_mask_key;
-              }
-          );
-          if (cached != runtime_json_string_mask_cache_.end()) {
-            tmp_accepted_bitset_ |= cached->mask;
-            continue;
-          }
-          DynamicBitset shared_mask(tokenizer_info_.GetVocabSize());
-          if (compiled_grammar_->GetRuntimeJSONStringMask(
-                  *runtime_json_string_mask_key, &shared_mask
-              )) {
-            tmp_accepted_bitset_ |= shared_mask;
-            remember_runtime_json_string_mask(
-                std::move(*runtime_json_string_mask_key), std::move(shared_mask)
-            );
-            continue;
-          }
-          tmp_runtime_uncertain_accepted_bitset_.Reset();
-        }
-      }
-    }
-
-    if (runtime_json_length && indices_to_check->empty()) {
+    if (runtime_json_length && PrepareRuntimeJSONMask(
+                                   state,
+                                   adaptive_token_mask,
+                                   state_with_mask.additional_accepted_bitset,
+                                   latest_states,
+                                   &indices_to_check,
+                                   &runtime_json_string_mask_key
+                               )) {
       continue;
     }
 
     // Examine only the current one ParserState
-    std::optional<Impl> atomic_trial_base;
+    details::LazyStackObject<Impl> atomic_trial_base;
     if (has_char_budget_rules_ && !adaptive_token_mask.uncertain_indices.empty()) {
-      atomic_trial_base.emplace(*this);
+      atomic_trial_base.Emplace(*this);
       atomic_trial_base->capture_recording_ = false;
     }
     PushOneStateToCheck(state);
-    std::optional<ContinuationTransitionCache> continuation_cache;
+    details::LazyStackObject<ContinuationTransitionCache> continuation_cache;
     constexpr size_t kMinUncertainTokensForContinuationCache = 128;
     // The canonical configuration includes every runtime JSON-string field, so constrained
     // strings can safely reuse continuation transitions when a complete runtime mask was not
@@ -2781,7 +2894,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
     if (!has_budget_rules_ && !has_char_budget_rules_ && !capture_tracking_ &&
         adaptive_token_mask.store_type != StoreType::kRejected &&
         indices_to_check->size() >= kMinUncertainTokensForContinuationCache) {
-      continuation_cache.emplace(this);
+      continuation_cache.Emplace(this);
     }
     bool track_temporary_input = has_char_budget_rules_ && has_budget_marker_rules_;
     int32_t saved_temporary_input_start_row = -1;
@@ -2875,8 +2988,8 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
         for (uint8_t byte : cur_token) {
           token_char_count += StartsUTF8Codepoint(byte);
         }
-        XGRAMMAR_DCHECK(atomic_trial_base.has_value());
-        Impl atomic_trial(atomic_trial_base.value());
+        XGRAMMAR_DCHECK(atomic_trial_base.HasValue());
+        Impl atomic_trial(atomic_trial_base.Value());
         atomic_trial.PushOneStateToCheck(state);
         accepted = atomic_trial.AdvanceAtomicTokenWithCharacterBudget(
             sorted_decoded_vocab[cur_token_idx].first, token_char_count
@@ -2938,7 +3051,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
       DynamicBitset owned_mask(tokenizer_info_.GetVocabSize());
       owned_mask = tmp_runtime_uncertain_accepted_bitset_;
       compiled_grammar_->AddRuntimeJSONStringMask(*runtime_json_string_mask_key, owned_mask);
-      remember_runtime_json_string_mask(
+      RememberRuntimeJSONStringMask(
           std::move(*runtime_json_string_mask_key), std::move(owned_mask)
       );
     }

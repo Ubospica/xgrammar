@@ -33,6 +33,10 @@ std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern);
 /*! \brief Build a deterministic byte FSM for a pattern over decoded JSON-string contents. */
 Result<FSMWithStartEnd> BuildJSONSchemaPatternFSM(const std::string& pattern, int max_num_states);
 
+/*! \brief Decode an internal pattern plus exact decoded strings excluded from its language. */
+std::optional<std::pair<std::string, std::vector<std::string>>>
+DecodeJSONSchemaPatternStringExclusion(const std::string& pattern);
+
 // ==================== SchemaSpec: Intermediate Representation for JSON Schema ====================
 
 // Forward declaration
@@ -533,6 +537,7 @@ class JSONSchemaConverter {
   static const std::string kBasicNull;
   static const std::string kBasicArray;
   static const std::string kBasicObject;
+  static const std::string kBasicNonObject;
   static const std::string kBasicEscape;
   static const std::string kBasicStringSub;
 
@@ -541,6 +546,7 @@ class JSONSchemaConverter {
 
  private:
   void AddHelperRules();
+  int32_t GetBasicNonObjectRule();
 
   std::unordered_map<std::string, int32_t> uri_to_rule_id_;  // For circular reference handling
   RefResolver ref_resolver_;  // Resolves $ref URI to SchemaSpecPtr at generate time
@@ -570,6 +576,7 @@ class JSONSchemaConverter {
   std::unordered_map<std::string, int32_t> regex_expr_ids_;
   std::unordered_map<std::string, int32_t> json_schema_pattern_expr_ids_;
   std::optional<int32_t> whitespace_expr_id_;
+  std::optional<int32_t> basic_non_object_rule_id_;
 
   // Helper for integer/number range regex generation
   static std::string GenerateRangeRegex(std::optional<int64_t> start, std::optional<int64_t> end);

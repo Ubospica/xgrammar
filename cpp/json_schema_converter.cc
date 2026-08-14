@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -171,6 +172,12 @@ constexpr char kNegatedJSONSchemaPatternUnionPrefixData[] =
     "xgrammar-internal:negated-json-schema-pattern-union:";
 constexpr std::string_view kNegatedJSONSchemaPatternUnionPrefix(
     kNegatedJSONSchemaPatternUnionPrefixData, sizeof(kNegatedJSONSchemaPatternUnionPrefixData) - 1
+);
+constexpr char kJSONSchemaPatternExcludingStringsPrefixData[] =
+    "xgrammar-internal:json-schema-pattern-excluding-strings:";
+constexpr std::string_view kJSONSchemaPatternExcludingStringsPrefix(
+    kJSONSchemaPatternExcludingStringsPrefixData,
+    sizeof(kJSONSchemaPatternExcludingStringsPrefixData) - 1
 );
 // Tracking the subset of required keys fixes the common any-order object case without making
 // grammar size exponential for schemas with hundreds of required fields. Above either bound the
@@ -590,31 +597,47 @@ size_t ScanJSONNumberToken(const std::string& json, size_t start) {
 
 class ExactNumericConstraintPreserver {
  public:
-  explicit ExactNumericConstraintPreserver(const std::string& schema) : schema_(schema) {
-    result_.reserve(schema.size());
-  }
+  explicit ExactNumericConstraintPreserver(const std::string& schema) : schema_(schema) {}
 
-  std::string Run() {
+  std::optional<std::string> Run() {
     RewriteSchemaValue();
-    if (position_ < schema_.size()) {
-      result_.append(schema_, position_, schema_.size() - position_);
+    if (!rewrite_started_) return std::nullopt;
+    if (unchanged_begin_ < schema_.size()) {
+      result_.append(schema_, unchanged_begin_, schema_.size() - unchanged_begin_);
     }
     return std::move(result_);
   }
 
  private:
+  // Unchanged source is emitted in one span immediately before each replacement. The lexical
+  // scanner only advances position_, avoiding many tiny string appends after rewriting begins.
+  void CopyRange(size_t, size_t) {}
+
+  void CopyCurrentCharacter() { ++position_; }
+
+  void ReplaceRange(size_t begin, size_t end, std::string replacement) {
+    if (!rewrite_started_) {
+      result_.reserve(schema_.size() + replacement.size());
+      rewrite_started_ = true;
+    }
+    result_.append(schema_, unchanged_begin_, begin - unchanged_begin_);
+    result_ += replacement;
+    unchanged_begin_ = end;
+    position_ = end;
+  }
+
   void CopyWhitespace() {
     size_t begin = position_;
     while (position_ < schema_.size() &&
            std::isspace(static_cast<unsigned char>(schema_[position_]))) {
       ++position_;
     }
-    result_.append(schema_, begin, position_ - begin);
+    CopyRange(begin, position_);
   }
 
   void CopyJSONString() {
     size_t end = ScanJSONStringToken(schema_, position_);
-    result_.append(schema_, position_, end - position_);
+    CopyRange(position_, end);
     position_ = end;
   }
 
@@ -643,7 +666,7 @@ class ExactNumericConstraintPreserver {
              !std::isspace(static_cast<unsigned char>(schema_[position_]))) {
         ++position_;
       }
-      result_.append(schema_, begin, position_ - begin);
+      CopyRange(begin, position_);
       return;
     }
 
@@ -664,7 +687,7 @@ class ExactNumericConstraintPreserver {
       }
       ++position_;
     }
-    result_.append(schema_, begin, position_ - begin);
+    CopyRange(begin, position_);
   }
 
   // Preserve every number inside an instance-valued const/enum subtree. JSON Schema compares
@@ -683,20 +706,23 @@ class ExactNumericConstraintPreserver {
       if (decoded.compare(0, kExactJSONNumberPrefix.size(), kExactJSONNumberPrefix) == 0 ||
           decoded.compare(0, kEscapedExactJSONNumberPrefix.size(), kEscapedExactJSONNumberPrefix) ==
               0) {
-        result_ +=
-            picojson::value(std::string(kEscapedExactJSONNumberPrefix) + decoded).serialize();
+        ReplaceRange(
+            begin,
+            end,
+            picojson::value(std::string(kEscapedExactJSONNumberPrefix) + decoded).serialize()
+        );
       } else {
-        result_.append(schema_, begin, end - begin);
+        CopyRange(begin, end);
+        position_ = end;
       }
-      position_ = end;
       return;
     }
     if (schema_[position_] == '{') {
-      result_.push_back(schema_[position_++]);
+      CopyCurrentCharacter();
       while (position_ < schema_.size()) {
         CopyWhitespace();
         if (position_ < schema_.size() && schema_[position_] == '}') {
-          result_.push_back(schema_[position_++]);
+          CopyCurrentCharacter();
           return;
         }
         if (position_ >= schema_.size() || schema_[position_] != '"') {
@@ -707,46 +733,50 @@ class ExactNumericConstraintPreserver {
         if (position_ >= schema_.size() || schema_[position_] != ':') {
           return;
         }
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
         RewriteInstanceValue();
         CopyWhitespace();
         if (position_ < schema_.size() && schema_[position_] == ',') {
-          result_.push_back(schema_[position_++]);
+          CopyCurrentCharacter();
           continue;
         }
         if (position_ < schema_.size() && schema_[position_] == '}') {
-          result_.push_back(schema_[position_++]);
+          CopyCurrentCharacter();
         }
         return;
       }
       return;
     }
     if (schema_[position_] == '[') {
-      result_.push_back(schema_[position_++]);
+      CopyCurrentCharacter();
       while (position_ < schema_.size()) {
         CopyWhitespace();
         if (position_ < schema_.size() && schema_[position_] == ']') {
-          result_.push_back(schema_[position_++]);
+          CopyCurrentCharacter();
           return;
         }
         RewriteInstanceValue();
         CopyWhitespace();
         if (position_ < schema_.size() && schema_[position_] == ',') {
-          result_.push_back(schema_[position_++]);
+          CopyCurrentCharacter();
           continue;
         }
         if (position_ < schema_.size() && schema_[position_] == ']') {
-          result_.push_back(schema_[position_++]);
+          CopyCurrentCharacter();
         }
         return;
       }
       return;
     }
     if (std::isdigit(static_cast<unsigned char>(schema_[position_])) || schema_[position_] == '-') {
+      size_t number_begin = position_;
       size_t number_end = ScanJSONNumberToken(schema_, position_);
-      std::string number_token = schema_.substr(position_, number_end - position_);
-      result_ += picojson::value(std::string(kExactJSONNumberPrefix) + number_token).serialize();
-      position_ = number_end;
+      std::string number_token = schema_.substr(number_begin, number_end - number_begin);
+      ReplaceRange(
+          number_begin,
+          number_end,
+          picojson::value(std::string(kExactJSONNumberPrefix) + number_token).serialize()
+      );
       return;
     }
     CopyOpaqueValue();
@@ -770,24 +800,30 @@ class ExactNumericConstraintPreserver {
       std::string decoded = DecodeJSONString(begin, end);
       if (decoded.size() > kExactNumberBoundPrefix.size() &&
           decoded.compare(0, kExactNumberBoundPrefix.size(), kExactNumberBoundPrefix) == 0) {
-        result_ += picojson::value(
-                       std::string(kEscapedExactNumberBoundPrefix) +
-                       decoded.substr(kExactNumberBoundPrefix.size())
-        )
-                       .serialize();
-        position_ = end;
+        ReplaceRange(
+            begin,
+            end,
+            picojson::value(
+                std::string(kEscapedExactNumberBoundPrefix) +
+                decoded.substr(kExactNumberBoundPrefix.size())
+            )
+                .serialize()
+        );
         return;
       }
       if (decoded.size() > kExactIntegerBoundPrefix.size() &&
           decoded.compare(0, kExactIntegerBoundPrefix.size(), kExactIntegerBoundPrefix) == 0) {
         // An external string must never be mistaken for the internal exact-number marker. The
         // constraint remains a string, so ParseInteger/ParseNumber will reject it as before.
-        result_ += picojson::value(
-                       std::string(kEscapedExactIntegerBoundPrefix) +
-                       decoded.substr(kExactIntegerBoundPrefix.size())
-        )
-                       .serialize();
-        position_ = end;
+        ReplaceRange(
+            begin,
+            end,
+            picojson::value(
+                std::string(kEscapedExactIntegerBoundPrefix) +
+                decoded.substr(kExactIntegerBoundPrefix.size())
+            )
+                .serialize()
+        );
         return;
       }
       CopyJSONString();
@@ -799,14 +835,19 @@ class ExactNumericConstraintPreserver {
       return;
     }
 
-    size_t number_end = ScanJSONNumberToken(schema_, position_);
-    std::string number_token = schema_.substr(position_, number_end - position_);
+    size_t number_begin = position_;
+    size_t number_end = ScanJSONNumberToken(schema_, number_begin);
+    std::string number_token = schema_.substr(number_begin, number_end - number_begin);
     if (ParseExactDecimalLexeme(number_token).has_value()) {
-      result_ += picojson::value(std::string(kExactNumberBoundPrefix) + number_token).serialize();
+      ReplaceRange(
+          number_begin,
+          number_end,
+          picojson::value(std::string(kExactNumberBoundPrefix) + number_token).serialize()
+      );
     } else {
-      result_ += number_token;
+      CopyRange(number_begin, number_end);
+      position_ = number_end;
     }
-    position_ = number_end;
   }
 
   void RewriteNumberMultipleOfValue() {
@@ -825,12 +866,15 @@ class ExactNumericConstraintPreserver {
       if (decoded.size() > kExactNumberMultipleOfPrefix.size() &&
           decoded.compare(0, kExactNumberMultipleOfPrefix.size(), kExactNumberMultipleOfPrefix) ==
               0) {
-        result_ += picojson::value(
-                       std::string(kEscapedExactNumberMultipleOfPrefix) +
-                       decoded.substr(kExactNumberMultipleOfPrefix.size())
-        )
-                       .serialize();
-        position_ = end;
+        ReplaceRange(
+            begin,
+            end,
+            picojson::value(
+                std::string(kEscapedExactNumberMultipleOfPrefix) +
+                decoded.substr(kExactNumberMultipleOfPrefix.size())
+            )
+                .serialize()
+        );
         return;
       }
       CopyJSONString();
@@ -841,15 +885,19 @@ class ExactNumericConstraintPreserver {
       CopyOpaqueValue();
       return;
     }
-    size_t number_end = ScanJSONNumberToken(schema_, position_);
-    std::string number_token = schema_.substr(position_, number_end - position_);
+    size_t number_begin = position_;
+    size_t number_end = ScanJSONNumberToken(schema_, number_begin);
+    std::string number_token = schema_.substr(number_begin, number_end - number_begin);
     if (ParseExactNumberMultipleOfLexeme(number_token).has_value()) {
-      result_ +=
-          picojson::value(std::string(kExactNumberMultipleOfPrefix) + number_token).serialize();
+      ReplaceRange(
+          number_begin,
+          number_end,
+          picojson::value(std::string(kExactNumberMultipleOfPrefix) + number_token).serialize()
+      );
     } else {
-      result_ += number_token;
+      CopyRange(number_begin, number_end);
+      position_ = number_end;
     }
-    position_ = number_end;
   }
 
   void RewriteSchemaArray() {
@@ -858,21 +906,21 @@ class ExactNumericConstraintPreserver {
       CopyOpaqueValue();
       return;
     }
-    result_.push_back(schema_[position_++]);
+    CopyCurrentCharacter();
     while (position_ < schema_.size()) {
       CopyWhitespace();
       if (position_ < schema_.size() && schema_[position_] == ']') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
         return;
       }
       RewriteSchemaValue();
       CopyWhitespace();
       if (position_ < schema_.size() && schema_[position_] == ',') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
         continue;
       }
       if (position_ < schema_.size() && schema_[position_] == ']') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
       }
       return;
     }
@@ -884,11 +932,11 @@ class ExactNumericConstraintPreserver {
       CopyOpaqueValue();
       return;
     }
-    result_.push_back(schema_[position_++]);
+    CopyCurrentCharacter();
     while (position_ < schema_.size()) {
       CopyWhitespace();
       if (position_ < schema_.size() && schema_[position_] == '}') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
         return;
       }
       if (position_ >= schema_.size() || schema_[position_] != '"') {
@@ -900,26 +948,26 @@ class ExactNumericConstraintPreserver {
       if (position_ >= schema_.size() || schema_[position_] != ':') {
         return;
       }
-      result_.push_back(schema_[position_++]);
+      CopyCurrentCharacter();
       RewriteSchemaValue();
       CopyWhitespace();
       if (position_ < schema_.size() && schema_[position_] == ',') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
         continue;
       }
       if (position_ < schema_.size() && schema_[position_] == '}') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
       }
       return;
     }
   }
 
   void RewriteSchemaObject() {
-    result_.push_back(schema_[position_++]);
+    CopyCurrentCharacter();
     while (position_ < schema_.size()) {
       CopyWhitespace();
       if (position_ < schema_.size() && schema_[position_] == '}') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
         return;
       }
       if (position_ >= schema_.size() || schema_[position_] != '"') {
@@ -928,28 +976,39 @@ class ExactNumericConstraintPreserver {
       }
       size_t key_begin = position_;
       size_t key_end = ScanJSONStringToken(schema_, position_);
-      std::string key = DecodeJSONString(key_begin, key_end);
-      result_.append(schema_, key_begin, key_end - key_begin);
+      size_t escaped_at = schema_.find('\\', key_begin + 1);
+      bool key_is_escaped = escaped_at != std::string::npos && escaped_at < key_end;
+      std::optional<std::string> decoded_key;
+      auto key_is = [&](std::string_view expected) {
+        if (!key_is_escaped) {
+          size_t key_size = key_end >= key_begin + 2 ? key_end - key_begin - 2 : 0;
+          return key_size == expected.size() &&
+                 schema_.compare(key_begin + 1, key_size, expected.data(), expected.size()) == 0;
+        }
+        if (!decoded_key.has_value()) decoded_key = DecodeJSONString(key_begin, key_end);
+        return *decoded_key == expected;
+      };
+      CopyRange(key_begin, key_end);
       position_ = key_end;
       CopyWhitespace();
       if (position_ >= schema_.size() || schema_[position_] != ':') {
         return;
       }
-      result_.push_back(schema_[position_++]);
+      CopyCurrentCharacter();
 
-      if (key == "minimum" || key == "maximum" || key == "exclusiveMinimum" ||
-          key == "exclusiveMaximum") {
+      if (key_is("minimum") || key_is("maximum") || key_is("exclusiveMinimum") ||
+          key_is("exclusiveMaximum")) {
         RewriteNumberBoundValue();
-      } else if (key == "multipleOf") {
+      } else if (key_is("multipleOf")) {
         RewriteNumberMultipleOfValue();
-      } else if (key == "properties" || key == "patternProperties" || key == "$defs" ||
-                 key == "definitions" || key == "dependentSchemas") {
+      } else if (key_is("properties") || key_is("patternProperties") || key_is("$defs") ||
+                 key_is("definitions") || key_is("dependentSchemas")) {
         RewriteSchemaMap();
-      } else if (key == "prefixItems" || key == "allOf" || key == "anyOf" || key == "oneOf") {
+      } else if (key_is("prefixItems") || key_is("allOf") || key_is("anyOf") || key_is("oneOf")) {
         RewriteSchemaArray();
-      } else if (key == "const" || key == "enum") {
+      } else if (key_is("const") || key_is("enum")) {
         RewriteInstanceValue();
-      } else if (key == "default" || key == "examples" || key == "example") {
+      } else if (key_is("default") || key_is("examples") || key_is("example")) {
         CopyOpaqueValue();
       } else {
         // Recurse through unknown locations as well: a local $ref may legally target an arbitrary
@@ -959,11 +1018,11 @@ class ExactNumericConstraintPreserver {
 
       CopyWhitespace();
       if (position_ < schema_.size() && schema_[position_] == ',') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
         continue;
       }
       if (position_ < schema_.size() && schema_[position_] == '}') {
-        result_.push_back(schema_[position_++]);
+        CopyCurrentCharacter();
       }
       return;
     }
@@ -986,6 +1045,8 @@ class ExactNumericConstraintPreserver {
   const std::string& schema_;
   std::string result_;
   size_t position_ = 0;
+  size_t unchanged_begin_ = 0;
+  bool rewrite_started_ = false;
 };
 
 /*! Preserve exact numeric constraint lexemes through picojson.
@@ -994,7 +1055,7 @@ class ExactNumericConstraintPreserver {
  * schema-aware lexical pass replaces numeric minimum/maximum keyword values with an internal
  * marker. Instance-valued const/enum/default/examples subtrees remain byte-for-byte untouched.
  */
-std::string PreserveExactNumericConstraints(const std::string& schema) {
+std::optional<std::string> PreserveExactNumericConstraints(const std::string& schema) {
   return ExactNumericConstraintPreserver(schema).Run();
 }
 
@@ -1330,6 +1391,88 @@ bool IsNegatedJSONSchemaPatternUnion(const std::string& pattern) {
          ) == 0;
 }
 
+bool IsJSONSchemaPatternExcludingStrings(const std::string& pattern) {
+  return pattern.size() >= kJSONSchemaPatternExcludingStringsPrefix.size() &&
+         pattern.compare(
+             0,
+             kJSONSchemaPatternExcludingStringsPrefix.size(),
+             kJSONSchemaPatternExcludingStringsPrefix
+         ) == 0;
+}
+
+Result<std::pair<std::string, std::vector<std::string>>> DecodeJSONSchemaPatternExcludingStrings(
+    const std::string& pattern
+) {
+  picojson::value encoded;
+  std::string error =
+      picojson::parse(encoded, pattern.substr(kJSONSchemaPatternExcludingStringsPrefix.size()));
+  if (!error.empty() || !encoded.is<picojson::array>()) {
+    return ResultErr("Invalid internal JSON Schema pattern string exclusion");
+  }
+  const auto& fields = encoded.get<picojson::array>();
+  if (fields.size() != 2 || !fields[0].is<std::string>() || !fields[1].is<picojson::array>()) {
+    return ResultErr("Invalid fields in internal JSON Schema pattern string exclusion");
+  }
+  std::vector<std::string> excluded_strings;
+  excluded_strings.reserve(fields[1].get<picojson::array>().size());
+  for (const auto& excluded : fields[1].get<picojson::array>()) {
+    if (!excluded.is<std::string>()) {
+      return ResultErr("Invalid excluded string in internal JSON Schema pattern string exclusion");
+    }
+    excluded_strings.push_back(excluded.get<std::string>());
+  }
+  if (excluded_strings.empty()) {
+    return ResultErr("Internal JSON Schema pattern string exclusion must not be empty");
+  }
+  return ResultOk(std::make_pair(fields[0].get<std::string>(), std::move(excluded_strings)));
+}
+
+std::string EncodeJSONSchemaPatternExcludingStrings(
+    const std::string& pattern, const std::vector<std::string>& excluded_strings
+) {
+  XGRAMMAR_DCHECK(!excluded_strings.empty());
+  picojson::array encoded_excluded;
+  encoded_excluded.reserve(excluded_strings.size());
+  for (const auto& excluded : excluded_strings) encoded_excluded.emplace_back(excluded);
+  picojson::array fields;
+  fields.emplace_back(pattern);
+  fields.emplace_back(std::move(encoded_excluded));
+  return std::string(kJSONSchemaPatternExcludingStringsPrefix) +
+         picojson::value(std::move(fields)).serialize();
+}
+
+FSMWithStartEnd BuildExactStringUnionFSM(const std::vector<std::string>& strings) {
+  struct Node {
+    std::map<uint8_t, int32_t> children;
+    bool terminal = false;
+  };
+  std::vector<Node> nodes(1);
+  for (const auto& string : strings) {
+    int32_t state = 0;
+    for (uint8_t byte : string) {
+      auto [child, inserted] = nodes[state].children.emplace(byte, -1);
+      int32_t target = child->second;
+      if (inserted) {
+        target = static_cast<int32_t>(nodes.size());
+        child->second = target;
+        nodes.emplace_back();
+      }
+      state = target;
+    }
+    nodes[state].terminal = true;
+  }
+
+  FSM fsm(static_cast<int32_t>(nodes.size()));
+  std::vector<int32_t> ends;
+  for (int32_t state = 0; state < static_cast<int32_t>(nodes.size()); ++state) {
+    if (nodes[state].terminal) ends.push_back(state);
+    for (const auto& [byte, target] : nodes[state].children) {
+      fsm.AddEdge(state, target, byte, byte);
+    }
+  }
+  return FSMWithStartEnd(std::move(fsm), 0, std::move(ends), true);
+}
+
 Result<std::vector<std::string>> DecodeNegatedJSONSchemaPatternUnion(const std::string& pattern) {
   picojson::value encoded_patterns;
   std::string error = picojson::parse(
@@ -1380,6 +1523,18 @@ Result<FSMWithStartEnd> BuildOrdinaryJSONSchemaPatternFSM(
 Result<FSMWithStartEnd> BuildJSONSchemaPatternFSMInternal(
     const std::string& pattern, int max_num_states
 ) {
+  if (IsJSONSchemaPatternExcludingStrings(pattern)) {
+    auto decoded = DecodeJSONSchemaPatternExcludingStrings(pattern);
+    if (decoded.IsErr()) return ResultErr(std::move(decoded).UnwrapErr());
+    auto [base_pattern, excluded_strings] = std::move(decoded).Unwrap();
+    auto base = BuildJSONSchemaPatternFSMInternal(base_pattern, max_num_states);
+    if (base.IsErr()) return ResultErr(std::move(base).UnwrapErr());
+    auto allowed_names = BuildExactStringUnionFSM(excluded_strings).Not(max_num_states);
+    if (allowed_names.IsErr()) return ResultErr(std::move(allowed_names).UnwrapErr());
+    return FSMWithStartEnd::Intersect(
+        std::move(base).Unwrap(), std::move(allowed_names).Unwrap(), max_num_states
+    );
+  }
   if (!IsNegatedJSONSchemaPatternUnion(pattern)) {
     return BuildOrdinaryJSONSchemaPatternFSM(pattern, max_num_states);
   }
@@ -2350,26 +2505,27 @@ std::string SchemaParser::ComputeCacheKey(const picojson::value& schema) {
       "writeOnly",
       "$comment",
       "$schema",
+      // Definition containers do not assert anything by themselves. References are represented
+      // by their URI in the cache key and resolved through this parser's root/ref cache, so
+      // recursively serializing every definition into the root key only duplicates work.
+      "$defs",
+      "definitions",
   };
 
   if (schema.is<picojson::object>()) {
     std::string result = "{";
-    std::vector<std::pair<const std::string*, const picojson::value*>> sorted_kv;
-    for (const auto& kv : schema.get<picojson::object>()) {
-      if (kSkippedKeys.count(kv.first) == 0) {
-        sorted_kv.emplace_back(&kv.first, &kv.second);
-      }
-    }
-    std::sort(sorted_kv.begin(), sorted_kv.end(), [](const auto& lhs, const auto& rhs) {
-      return *lhs.first < *rhs.first;
-    });
+    const auto& object = schema.get<picojson::object>();
+    // This cache is local to one parsed root. Preserving source/object order may miss a reuse
+    // opportunity for semantically identical objects with different member order, but can never
+    // alias unequal schemas and avoids allocating and sorting a pointer vector at every node.
     int64_t idx = 0;
-    for (const auto& [key, value] : sorted_kv) {
+    for (const auto& key : object.ordered_keys()) {
+      if (kSkippedKeys.count(key) != 0) continue;
       if (idx != 0) {
         result += ",";
       }
       ++idx;
-      result += "\"" + *key + "\":" + ComputeCacheKey(*value);
+      result += "\"" + key + "\":" + ComputeCacheKey(object.at(key));
     }
     return result + "}";
   } else if (schema.is<picojson::array>()) {
@@ -2502,19 +2658,23 @@ const picojson::value* SchemaParser::ResolveLocalJSONPointer(const std::string& 
 std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson::object& schema
 ) const {
   struct ObjectConjunct {
-    picojson::object schema;
+    const picojson::object* schema;
     std::unordered_set<std::string> named_properties;
     bool additional_properties_false = false;
   };
 
   std::vector<ObjectConjunct> conjuncts;
+  // Sibling assertions next to allOf need a filtered object. Keep those few owned objects in a
+  // deque so ObjectConjunct can point to them without copying every terminal schema and its nested
+  // property schemas.
+  std::deque<picojson::object> owned_conjuncts;
   std::unordered_set<std::string> active_refs;
   bool has_object_type = false;
   bool has_false_schema = false;
   bool has_non_object_type = false;
   bool has_non_object_assertion = false;
 
-  auto has_semantic_sibling = [](const picojson::object& object) {
+  auto is_semantic_key = [](const std::string& key) {
     static const std::unordered_set<std::string> kAnnotations = {
         "$id",
         "id",
@@ -2531,12 +2691,17 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
         "$comment",
         "example",
     };
+    return kAnnotations.count(key) == 0;
+  };
+
+  auto has_semantic_sibling_except = [&](const picojson::object& object, const char* excluded_key) {
     return std::any_of(object.begin(), object.end(), [&](const auto& item) {
-      return kAnnotations.count(item.first) == 0;
+      return item.first != excluded_key && is_semantic_key(item.first);
     });
   };
 
   std::function<bool(const picojson::value&, int)> collect;
+  std::function<bool(const picojson::object&, int)> collect_object;
   collect = [&](const picojson::value& value, int depth) -> bool {
     if (depth > 64) {
       return false;
@@ -2548,16 +2713,18 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
     if (!value.is<picojson::object>()) {
       return false;
     }
-    picojson::object object = value.get<picojson::object>();
+    return collect_object(value.get<picojson::object>(), depth);
+  };
+
+  collect_object = [&](const picojson::object& object, int depth) -> bool {
+    if (depth > 64) return false;
 
     if (object.count("$ref")) {
       if (!object.at("$ref").is<std::string>()) {
         return false;
       }
-      picojson::object siblings = object;
-      const std::string uri = siblings.at("$ref").get<std::string>();
-      siblings.erase("$ref");
-      if (has_semantic_sibling(siblings)) {
+      const std::string uri = object.at("$ref").get<std::string>();
+      if (has_semantic_sibling_except(object, "$ref")) {
         // The meaning of siblings next to $ref depends on the Schema draft. The existing parser
         // follows the older replacement semantics, so do not silently change that behavior here.
         return false;
@@ -2576,12 +2743,15 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
       if (!object.at("allOf").is<picojson::array>()) {
         return false;
       }
-      picojson::array nested = object.at("allOf").get<picojson::array>();
-      object.erase("allOf");
-      if (has_semantic_sibling(object) && !collect(picojson::value(object), depth + 1)) {
-        return false;
+      if (has_semantic_sibling_except(object, "allOf")) {
+        owned_conjuncts.emplace_back();
+        auto& siblings = owned_conjuncts.back();
+        for (const auto& [key, child] : object) {
+          if (key != "allOf") siblings[key] = child;
+        }
+        if (!collect_object(siblings, depth + 1)) return false;
       }
-      for (const auto& child : nested) {
+      for (const auto& child : object.at("allOf").get<picojson::array>()) {
         if (!collect(child, depth + 1)) {
           return false;
         }
@@ -2647,17 +2817,17 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
       }
     }
 
-    ObjectConjunct conjunct{std::move(object), {}, false};
-    if (conjunct.schema.count("properties")) {
-      if (!conjunct.schema.at("properties").is<picojson::object>()) {
+    ObjectConjunct conjunct{&object, {}, false};
+    if (object.count("properties")) {
+      if (!object.at("properties").is<picojson::object>()) {
         return false;
       }
-      for (const auto& item : conjunct.schema.at("properties").get<picojson::object>()) {
+      for (const auto& item : object.at("properties").get<picojson::object>()) {
         conjunct.named_properties.insert(item.first);
       }
     }
-    if (conjunct.schema.count("additionalProperties")) {
-      const auto& additional = conjunct.schema.at("additionalProperties");
+    if (object.count("additionalProperties")) {
+      const auto& additional = object.at("additionalProperties");
       if (!additional.is<bool>()) {
         return false;
       }
@@ -2671,7 +2841,7 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
     return true;
   };
 
-  if (!collect(picojson::value(schema), 0)) {
+  if (!collect_object(schema, 0)) {
     return std::nullopt;
   }
   if (has_false_schema || (has_object_type && has_non_object_type)) {
@@ -2680,10 +2850,11 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
   std::unordered_set<std::string> all_named_properties;
   std::optional<picojson::value> pattern_properties;
   for (const auto& conjunct : conjuncts) {
+    const auto& conjunct_schema = *conjunct.schema;
     all_named_properties.insert(conjunct.named_properties.begin(), conjunct.named_properties.end());
-    if (conjunct.schema.count("patternProperties") &&
-        !conjunct.schema.at("patternProperties").get<picojson::object>().empty()) {
-      const auto& candidate = conjunct.schema.at("patternProperties");
+    if (conjunct_schema.count("patternProperties") &&
+        !conjunct_schema.at("patternProperties").get<picojson::object>().empty()) {
+      const auto& candidate = conjunct_schema.at("patternProperties");
       if (!pattern_properties.has_value()) {
         pattern_properties = candidate;
       } else if (pattern_properties->serialize(false) != candidate.serialize(false)) {
@@ -2695,6 +2866,7 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
     }
   }
   for (const auto& conjunct : conjuncts) {
+    const auto& conjunct_schema = *conjunct.schema;
     if (conjunct.additional_properties_false && conjunct.named_properties != all_named_properties) {
       // A property introduced only by another branch is additional in this branch and therefore
       // forbidden. The current ObjectSpec has only one global property set, so it cannot encode
@@ -2702,8 +2874,8 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
       return std::nullopt;
     }
     if (conjunct.additional_properties_false && pattern_properties.has_value()) {
-      if (!conjunct.schema.count("patternProperties") ||
-          conjunct.schema.at("patternProperties").serialize(false) !=
+      if (!conjunct_schema.count("patternProperties") ||
+          conjunct_schema.at("patternProperties").serialize(false) !=
               pattern_properties->serialize(false)) {
         // A pattern introduced only by another conjunct is still an additional property in this
         // closed conjunct. Moving it into one merged ObjectSpec would incorrectly admit the key.
@@ -2723,8 +2895,9 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
   bool additional_properties_false = false;
 
   for (const auto& conjunct : conjuncts) {
-    if (conjunct.schema.count("properties")) {
-      for (const auto& item : conjunct.schema.at("properties").get<picojson::object>()) {
+    const auto& conjunct_schema = *conjunct.schema;
+    if (conjunct_schema.count("properties")) {
+      for (const auto& item : conjunct_schema.at("properties").get<picojson::object>()) {
         auto existing = merged_properties.find(item.first);
         if (existing == merged_properties.end()) {
           merged_properties[item.first] = item.second;
@@ -2747,11 +2920,11 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
         }
       }
     }
-    if (conjunct.schema.count("required")) {
-      if (!conjunct.schema.at("required").is<picojson::array>()) {
+    if (conjunct_schema.count("required")) {
+      if (!conjunct_schema.at("required").is<picojson::array>()) {
         return std::nullopt;
       }
-      for (const auto& required : conjunct.schema.at("required").get<picojson::array>()) {
+      for (const auto& required : conjunct_schema.at("required").get<picojson::array>()) {
         if (!required.is<std::string>()) {
           return std::nullopt;
         }
@@ -2760,25 +2933,25 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
         }
       }
     }
-    if (conjunct.schema.count("propertyNames")) {
+    if (conjunct_schema.count("propertyNames")) {
       if (!property_names.has_value()) {
-        property_names = conjunct.schema.at("propertyNames");
+        property_names = conjunct_schema.at("propertyNames");
       } else if (property_names->serialize(false) !=
-                 conjunct.schema.at("propertyNames").serialize(false)) {
+                 conjunct_schema.at("propertyNames").serialize(false)) {
         return std::nullopt;
       }
     }
-    if (conjunct.schema.count("minProperties")) {
-      if (!conjunct.schema.at("minProperties").is<int64_t>()) {
+    if (conjunct_schema.count("minProperties")) {
+      if (!conjunct_schema.at("minProperties").is<int64_t>()) {
         return std::nullopt;
       }
-      min_properties = std::max(min_properties, conjunct.schema.at("minProperties").get<int64_t>());
+      min_properties = std::max(min_properties, conjunct_schema.at("minProperties").get<int64_t>());
     }
-    if (conjunct.schema.count("maxProperties")) {
-      if (!conjunct.schema.at("maxProperties").is<int64_t>()) {
+    if (conjunct_schema.count("maxProperties")) {
+      if (!conjunct_schema.at("maxProperties").is<int64_t>()) {
         return std::nullopt;
       }
-      int64_t value = conjunct.schema.at("maxProperties").get<int64_t>();
+      int64_t value = conjunct_schema.at("maxProperties").get<int64_t>();
       max_properties = max_properties.has_value() ? std::min(*max_properties, value) : value;
     }
     additional_properties_false =
@@ -2890,6 +3063,47 @@ std::optional<picojson::value> SchemaParser::TryDistributeAllOfOverCombinator(
   if (all_of_it == schema.end() || !all_of_it->second.is<picojson::array>()) {
     return std::nullopt;
   }
+
+  // Most real-world allOf nodes contain only ordinary typed/object schemas. Avoid copying every
+  // conjunct (and every schema below a local reference) merely to discover that there is no
+  // anyOf/oneOf to distribute. This pointer-only preflight follows the same keyword precedence as
+  // collect() below; the allocating pass still performs the complete validation when a
+  // distributable combinator is actually present.
+  std::unordered_set<std::string> preflight_active_refs;
+  std::function<bool(const picojson::value&, int)> contains_combinator;
+  contains_combinator = [&](const picojson::value& value, int depth) -> bool {
+    if (depth > 64 || !value.is<picojson::object>()) return false;
+    const auto& object = value.get<picojson::object>();
+    if (object.count("$ref")) {
+      if (!object.at("$ref").is<std::string>()) return false;
+      const std::string& uri = object.at("$ref").get<std::string>();
+      const picojson::value* target = ResolveLocalJSONPointer(uri);
+      if (target == nullptr || !preflight_active_refs.insert(uri).second) return false;
+      bool result = contains_combinator(*target, depth + 1);
+      preflight_active_refs.erase(uri);
+      return result;
+    }
+    if (!object.count("const") && !object.count("enum") &&
+        (object.count("anyOf") || object.count("oneOf"))) {
+      return true;
+    }
+    if (!object.count("const") && !object.count("enum") && !object.count("anyOf") &&
+        !object.count("oneOf") && object.count("allOf") &&
+        object.at("allOf").is<picojson::array>()) {
+      for (const auto& child : object.at("allOf").get<picojson::array>()) {
+        if (contains_combinator(child, depth + 1)) return true;
+      }
+    }
+    return false;
+  };
+  bool has_distributable_combinator = false;
+  for (const auto& child : all_of_it->second.get<picojson::array>()) {
+    if (contains_combinator(child, 0)) {
+      has_distributable_combinator = true;
+      break;
+    }
+  }
+  if (!has_distributable_combinator) return std::nullopt;
 
   std::optional<std::string> distributed_keyword;
   picojson::value distributed_options;
@@ -3040,16 +3254,12 @@ std::optional<picojson::value> SchemaParser::TryMergeTypedAllOf(const picojson::
     };
     return kAnnotations.count(keyword) != 0;
   };
-  auto has_assertion = [&](const picojson::object& object) {
-    return std::any_of(object.begin(), object.end(), [&](const auto& item) {
-      return !is_annotation(item.first);
-    });
-  };
-
-  std::vector<picojson::object> conjuncts;
+  std::vector<const picojson::object*> conjuncts;
+  std::deque<picojson::object> owned_conjuncts;
   std::unordered_set<std::string> active_refs;
   bool is_never = false;
   std::function<bool(const picojson::value&, int)> collect;
+  std::function<bool(const picojson::object&, int)> collect_object;
   collect = [&](const picojson::value& value, int depth) -> bool {
     if (depth > 64) return false;
     if (value.is<bool>()) {
@@ -3057,7 +3267,11 @@ std::optional<picojson::value> SchemaParser::TryMergeTypedAllOf(const picojson::
       return true;
     }
     if (!value.is<picojson::object>()) return false;
-    picojson::object object = value.get<picojson::object>();
+    return collect_object(value.get<picojson::object>(), depth);
+  };
+
+  collect_object = [&](const picojson::object& object, int depth) -> bool {
+    if (depth > 64) return false;
 
     if (object.count("$ref")) {
       if (!object.at("$ref").is<std::string>()) return false;
@@ -3074,26 +3288,33 @@ std::optional<picojson::value> SchemaParser::TryMergeTypedAllOf(const picojson::
 
     if (object.count("allOf")) {
       if (!object.at("allOf").is<picojson::array>()) return false;
-      picojson::array nested = object.at("allOf").get<picojson::array>();
-      object.erase("allOf");
-      if (has_assertion(object) && !collect(picojson::value(std::move(object)), depth + 1)) {
-        return false;
+      bool has_sibling_assertion = std::any_of(object.begin(), object.end(), [&](const auto& item) {
+        return item.first != "allOf" && !is_annotation(item.first);
+      });
+      if (has_sibling_assertion) {
+        owned_conjuncts.emplace_back();
+        auto& siblings = owned_conjuncts.back();
+        for (const auto& [key, child] : object) {
+          if (key != "allOf") siblings[key] = child;
+        }
+        if (!collect_object(siblings, depth + 1)) return false;
       }
-      for (const auto& child : nested) {
+      for (const auto& child : object.at("allOf").get<picojson::array>()) {
         if (!collect(child, depth + 1)) return false;
       }
       return true;
     }
 
-    conjuncts.push_back(std::move(object));
+    conjuncts.push_back(&object);
     return true;
   };
 
-  if (!collect(picojson::value(schema), 0)) return std::nullopt;
+  if (!collect_object(schema, 0)) return std::nullopt;
   if (is_never) return picojson::value(false);
 
   std::optional<uint32_t> allowed_types;
-  for (const auto& conjunct : conjuncts) {
+  for (const auto* conjunct_ptr : conjuncts) {
+    const auto& conjunct = *conjunct_ptr;
     auto type_it = conjunct.find("type");
     if (type_it == conjunct.end()) continue;
     auto bits = type_bits(type_it->second);
@@ -3172,7 +3393,8 @@ std::optional<picojson::value> SchemaParser::TryMergeTypedAllOf(const picojson::
     finite_values = std::move(intersection);
   };
 
-  for (const auto& conjunct : conjuncts) {
+  for (const auto* conjunct_ptr : conjuncts) {
+    const auto& conjunct = *conjunct_ptr;
     for (const auto& [keyword, value] : conjunct) {
       if (keyword == "type" || is_annotation(keyword)) continue;
       // JSON Schema vocabularies define unknown extension keywords as annotations unless a custom
@@ -4713,8 +4935,18 @@ Result<TypeArraySpec, SchemaError> SchemaParser::ParseTypeArray(
 
 }  // namespace
 
+std::optional<std::pair<std::string, std::vector<std::string>>>
+DecodeJSONSchemaPatternStringExclusion(const std::string& pattern) {
+  if (!IsJSONSchemaPatternExcludingStrings(pattern)) return std::nullopt;
+  auto decoded = DecodeJSONSchemaPatternExcludingStrings(pattern);
+  if (decoded.IsErr()) return std::nullopt;
+  return std::move(decoded).Unwrap();
+}
+
 std::string RewriteJSONSchemaPatternForFullMatch(const std::string& pattern) {
-  if (IsNegatedJSONSchemaPatternUnion(pattern)) return pattern;
+  if (IsNegatedJSONSchemaPatternUnion(pattern) || IsJSONSchemaPatternExcludingStrings(pattern)) {
+    return pattern;
+  }
   return RewriteJSONSchemaPatternForFullMatchInternal(pattern);
 }
 
@@ -4856,6 +5088,7 @@ const std::string JSONSchemaConverter::kBasicBoolean = "basic_boolean";
 const std::string JSONSchemaConverter::kBasicNull = "basic_null";
 const std::string JSONSchemaConverter::kBasicArray = "basic_array";
 const std::string JSONSchemaConverter::kBasicObject = "basic_object";
+const std::string JSONSchemaConverter::kBasicNonObject = "basic_non_object";
 const std::string JSONSchemaConverter::kBasicEscape = "basic_escape";
 const std::string JSONSchemaConverter::kBasicStringSub = "basic_string_sub";
 
@@ -4995,6 +5228,28 @@ void JSONSchemaConverter::AddBasicRules(const std::vector<std::string>& addition
   AddCache(kObjectCacheKey, builder_.GetRuleId(kBasicObject));
 
   indent_manager_ = saved_indent_manager;
+}
+
+int32_t JSONSchemaConverter::GetBasicNonObjectRule() {
+  if (basic_non_object_rule_id_.has_value()) {
+    return *basic_non_object_rule_id_;
+  }
+  // Object keywords without an explicit type accept every non-object JSON value. Create this
+  // shared half of the conditional language only when a schema needs it; most schemas otherwise
+  // carried an unreachable helper rule in their public grammar text and compiled representation.
+  const int32_t rule_id = builder_.AddEmptyRuleWithHint(kBasicNonObject);
+  builder_.UpdateRuleBody(
+      rule_id,
+      Choice(
+          {RuleRef(kBasicNumber),
+           RuleRef(kBasicString),
+           RuleRef(kBasicBoolean),
+           RuleRef(kBasicNull),
+           RuleRef(kBasicArray)}
+      )
+  );
+  basic_non_object_rule_id_ = rule_id;
+  return rule_id;
 }
 
 void JSONSchemaConverter::AddHelperRules() {
@@ -5232,33 +5487,46 @@ int32_t JSONSchemaConverter::BuildTrieContentBody(
     const TrieNode& node, int32_t generic_tail_rule_id
 ) {
   std::vector<int32_t> choices;
-  if (!node.is_terminal) {
-    choices.push_back(Empty());
-  }
+  std::string prefix;
+  std::function<void(const TrieNode&)> visit = [&](const TrieNode& current) {
+    // Closing the string at a non-terminal trie node is valid. Closing at a terminal would equal
+    // one of the excluded names exactly, so omit that alternative.
+    if (!current.is_terminal) {
+      choices.push_back(prefix.empty() ? Empty() : ByteString(prefix));
+    }
 
-  std::vector<CharacterClassElement> excluded = {
-      {0, 0x1f}, {'"', '"'}, {'\\', '\\'}, {'\r', '\r'}, {'\n', '\n'}
+    std::vector<CharacterClassElement> excluded = {
+        {0, 0x1f}, {'"', '"'}, {'\\', '\\'}, {'\r', '\r'}, {'\n', '\n'}
+    };
+    for (const auto& [character, child] : current.children) {
+      static_cast<void>(child);
+      excluded.push_back({character, character});
+    }
+
+    std::vector<int32_t> different_character;
+    if (!prefix.empty()) different_character.push_back(ByteString(prefix));
+    different_character.push_back(builder_.AddCharacterClass(excluded, true));
+    different_character.push_back(RuleRef(generic_tail_rule_id));
+    choices.push_back(Sequence(different_character));
+
+    // Escaped spellings are decoded by the runtime pattern constraint. As with the historical
+    // additional-key trie, an escaped spelling of an excluded ASCII property is not recognized as
+    // the same key here; ordinary serializers use the literal spelling and MaskBench instances are
+    // canonicalized before matching.
+    std::vector<int32_t> escaped_character;
+    if (!prefix.empty()) escaped_character.push_back(ByteString(prefix));
+    escaped_character.push_back(ByteString("\\"));
+    escaped_character.push_back(RuleRef(kBasicEscape));
+    escaped_character.push_back(RuleRef(generic_tail_rule_id));
+    choices.push_back(Sequence(escaped_character));
+
+    for (const auto& [character, child] : current.children) {
+      prefix.push_back(static_cast<char>(character));
+      visit(child);
+      prefix.pop_back();
+    }
   };
-  for (const auto& [character, child] : node.children) {
-    static_cast<void>(child);
-    excluded.push_back({character, character});
-  }
-  choices.push_back(
-      Sequence({builder_.AddCharacterClass(excluded, true), RuleRef(generic_tail_rule_id)})
-  );
-  // Escaped spellings are decoded by the runtime pattern constraint. As with the historical
-  // additional-key trie, an escaped spelling of an excluded ASCII property is not recognized as
-  // the same key here; ordinary serializers use the literal spelling and MaskBench instances are
-  // canonicalized before matching.
-  choices.push_back(
-      Sequence({ByteString("\\"), RuleRef(kBasicEscape), RuleRef(generic_tail_rule_id)})
-  );
-  for (const auto& [character, child] : node.children) {
-    choices.push_back(Sequence(
-        {ByteString(std::string(1, static_cast<char>(character))),
-         BuildTrieContentBody(child, generic_tail_rule_id)}
-    ));
-  }
+  visit(node);
   return Choice(choices);
 }
 
@@ -5270,6 +5538,35 @@ int32_t JSONSchemaConverter::PatternPropertyKeyExpression(
     return Sequence(
         {ByteString("\""), JSONSchemaPatternExpression(pattern_property.pattern), ByteString("\"")}
     );
+  }
+
+  // Apply both assertions to decoded key contents in one DFA. Besides keeping the exclusion out
+  // of the grammar graph, this recognizes raw UTF-8, short escapes, and \uXXXX as equivalent
+  // spellings, so an escaped spelling cannot re-enter through the patternProperties alternative.
+  std::string filtered_pattern = EncodeJSONSchemaPatternExcludingStrings(
+      pattern_property.pattern, pattern_property.excluded_property_names
+  );
+  // The runtime tracker packs the ordinary pattern state with a sparse exact-string trie state;
+  // it does not construct their potentially much larger product automaton. The trie has 19 bits
+  // in ParserState, and the sum below is a conservative upper bound on its node count.
+  size_t exclusion_trie_state_upper_bound = 2;
+  for (const auto& property_name : pattern_property.excluded_property_names) {
+    exclusion_trie_state_upper_bound += property_name.size();
+  }
+  auto built = BuildJSONSchemaPatternFSM(pattern_property.pattern, kJSONSchemaPatternDFAStateLimit);
+  if (exclusion_trie_state_upper_bound <= (1U << 19) && built.IsOk()) {
+    auto base_fsm = std::move(built).Unwrap();
+    if (base_fsm.IsDFA()) {
+      if (regex_fsm_cache_ != nullptr) {
+        const std::string cache_key = MakeRegexFSMCacheKey(
+            RewriteJSONSchemaPatternForFullMatch(pattern_property.pattern), /*json_string=*/false
+        );
+        regex_fsm_cache_->insert_or_assign(cache_key, std::move(base_fsm));
+      }
+      return Sequence(
+          {ByteString("\""), JSONSchemaPatternExpression(filtered_pattern), ByteString("\"")}
+      );
+    }
   }
 
   TrieNode root;
@@ -5694,7 +5991,16 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
   // sequences for Unicode atoms, so raw UTF-8, short escapes, \uXXXX, and surrogate pairs all
   // advance the same automaton after decoding. Keeping the DFA out of the main grammar also avoids
   // copying large literal-alternative automata into every parser and mask-cache state.
-  const std::string rewritten = RewriteJSONSchemaPatternForFullMatch(regex);
+  std::optional<std::pair<std::string, std::vector<std::string>>> decoded_exclusion;
+  const std::string* automaton_regex = &regex;
+  if (IsJSONSchemaPatternExcludingStrings(regex)) {
+    auto decoded = DecodeJSONSchemaPatternExcludingStrings(regex);
+    if (decoded.IsOk()) {
+      decoded_exclusion.emplace(std::move(decoded).Unwrap());
+      automaton_regex = &decoded_exclusion->first;
+    }
+  }
+  const std::string rewritten = RewriteJSONSchemaPatternForFullMatch(*automaton_regex);
   if (enable_runtime_json_string_constraints_) {
     std::optional<FSMWithStartEnd> local_fsm;
     FSMWithStartEnd* fsm = nullptr;
@@ -5706,7 +6012,8 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
       }
     }
     if (fsm == nullptr) {
-      auto built = BuildJSONSchemaPatternFSMInternal(regex, kJSONSchemaPatternDFAStateLimit);
+      auto built =
+          BuildJSONSchemaPatternFSMInternal(*automaton_regex, kJSONSchemaPatternDFAStateLimit);
       if (built.IsOk()) {
         local_fsm.emplace(std::move(built).Unwrap());
         fsm = &*local_fsm;
@@ -5730,12 +6037,14 @@ int32_t JSONSchemaConverter::JSONSchemaPatternExpression(
       );
       int32_t rule_id = builder_.AddEmptyRuleWithHint("json_schema_streaming_pattern");
       int32_t rule_ref = RuleRef(rule_id);
-      int32_t body = Choice(
-          {Empty(),
-           Sequence({normal_character, rule_ref}),
-           Sequence({ByteString("\\"), RuleRef(kBasicEscape), rule_ref})}
+      builder_.UpdateRuleBody(
+          rule_id,
+          Choice(
+              {Empty(),
+               Sequence({normal_character, rule_ref}),
+               Sequence({ByteString("\\"), RuleRef(kBasicEscape), rule_ref})}
+          )
       );
-      builder_.UpdateRuleBody(rule_id, body);
       const auto bounds = decoded_length_bounds.value_or(std::make_pair(0, -1));
       builder_.UpdateJSONStringLengthBounds(rule_id, bounds.first, bounds.second);
       builder_.UpdateJSONStringPattern(rule_id, regex);
@@ -7105,7 +7414,34 @@ int32_t JSONSchemaConverter::GenerateTypeArray(
     const TypeArraySpec& spec, const std::string& rule_name
 ) {
   std::vector<int32_t> choices;
+  static const std::unordered_set<std::string> kBasicNonObjectCacheKeys = {
+      "{\"type\":\"number\"}",
+      "{\"type\":\"string\"}",
+      "{\"type\":\"boolean\"}",
+      "{\"type\":\"null\"}",
+      "{\"type\":\"array\"}",
+  };
+  bool has_all_basic_non_object_types = std::all_of(
+      kBasicNonObjectCacheKeys.begin(),
+      kBasicNonObjectCacheKeys.end(),
+      [&](const std::string& key) {
+        return std::any_of(
+            spec.type_schemas.begin(),
+            spec.type_schemas.end(),
+            [&](const auto& type) { return type->cache_key == key; }
+        );
+      }
+  );
+  bool emitted_basic_non_object = false;
   for (size_t index = 0; index < spec.type_schemas.size(); ++index) {
+    if (has_all_basic_non_object_types &&
+        kBasicNonObjectCacheKeys.count(spec.type_schemas[index]->cache_key)) {
+      if (!emitted_basic_non_object) {
+        choices.push_back(RuleRef(GetBasicNonObjectRule()));
+        emitted_basic_non_object = true;
+      }
+      continue;
+    }
     choices.push_back(
         RuleRef(CreateRule(spec.type_schemas[index], rule_name + "_type_" + std::to_string(index)))
     );
@@ -8081,8 +8417,9 @@ Grammar JSONSchemaToGrammar(
     RegexFSMCache* regex_fsm_cache
 ) {
   picojson::value schema_value;
-  std::string preserved_schema = PreserveExactNumericConstraints(schema);
-  std::string error = picojson::parse(schema_value, preserved_schema);
+  auto preserved_schema = PreserveExactNumericConstraints(schema);
+  const std::string& schema_to_parse = preserved_schema.has_value() ? *preserved_schema : schema;
+  std::string error = picojson::parse(schema_value, schema_to_parse);
   XGRAMMAR_CHECK(error.empty()) << "Failed to parse JSON: " << error
                                 << ". The JSON string is:" << schema;
   SchemaParser parser(schema_value, {strict_mode, json_format});
@@ -8145,8 +8482,9 @@ std::string JSONSchemaToEBNF(
     bool any_order
 ) {
   picojson::value schema_value;
-  std::string preserved_schema = PreserveExactNumericConstraints(schema);
-  std::string err = picojson::parse(schema_value, preserved_schema);
+  auto preserved_schema = PreserveExactNumericConstraints(schema);
+  const std::string& schema_to_parse = preserved_schema.has_value() ? *preserved_schema : schema;
+  std::string err = picojson::parse(schema_value, schema_to_parse);
   XGRAMMAR_CHECK(err.empty()) << "Failed to parse JSON: " << err
                               << ". The JSON string is:" << schema;
   return JSONSchemaToEBNF(
