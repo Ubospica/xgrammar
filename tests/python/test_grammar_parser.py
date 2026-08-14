@@ -8,6 +8,7 @@ from xgrammar.testing import (
     GrammarFunctor,
     _ebnf_to_grammar_no_normalization,
     _get_allow_empty_rule_ids,
+    _json_schema_to_ebnf,
 )
 
 
@@ -194,12 +195,13 @@ def test_repetition_range_unbounded_roundtrip():
 
 
 def test_repetition_range_unbounded_json_schema():
-    """JSON schema minLength produces {n, -1} which round-trips through the parser."""
+    """The text API emits an unbounded range that round-trips through the EBNF parser."""
     import json
 
     schema = json.dumps({"type": "string", "minLength": 2})
-    grammar_1 = xgr.Grammar.from_json_schema(schema)
-    output_1 = str(grammar_1)
+    # Direct Grammar conversion uses runtime string-length metadata that the EBNF text format
+    # cannot represent. The explicit text-conversion API deliberately retains the repetition.
+    output_1 = _json_schema_to_ebnf(schema)
     assert "{2, -1}" in output_1
     output_2 = str(xgr.Grammar.from_ebnf(output_1))
     assert output_1 == output_2

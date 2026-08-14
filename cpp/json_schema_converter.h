@@ -371,6 +371,9 @@ class JSONSchemaConverter {
   /*! \brief Generate a finite JSON value recursively with the active formatting policy. */
   int32_t GenerateJSONValue(const picojson::value& value, const std::string& rule_name);
 
+  /*! \brief Serialize an instance value while restoring internally preserved number lexemes. */
+  static std::string SerializeExactJSONValue(const picojson::value& value);
+
   // ==================== Hooks for customization ====================
 
   /*! \brief Format a property key. Override for different formats. */

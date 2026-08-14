@@ -3,7 +3,7 @@ import json
 import pytest
 
 import xgrammar as xgr
-from xgrammar.testing import _is_grammar_accept_string
+from xgrammar.testing import _get_matcher_from_grammar, _is_grammar_accept_string
 
 
 def _accepts(pattern: str, value: str) -> bool:
@@ -25,6 +25,11 @@ def _accepts(pattern: str, value: str) -> bool:
         (r"^\{.*\}$", '{"quoted": "value"}', "not-an-object"),
         (r"^[^\x01-\x1f]+$", "Microsoft.PowerToys", "line\nbreak"),
         (r"^$|(^(?:\S+\s+){0,99}\S+$)", "two words", " two words"),
+        (
+            r"^[a-zA-Z]{2,3}(-[a-zA-Z]{4})?(-([a-zA-Z]{2}|[0-9]{3}))?(-[a-zA-Z]{5,8})?(-x(-[a-zA-Z0-9]{1,8})+)?$",
+            "en-US",
+            "invalid",
+        ),
         (r"(^gs://(.+))|(^https://(.+))", "https://example.com/a", "ftp://example.com"),
         ("alpha|beta|gamma", "prefix-beta-suffix", "delta"),
         ("^alpha|^beta|gamma$|delta$", "beta-tail", "prefix-beta"),
@@ -36,6 +41,37 @@ def test_json_schema_pattern_search_and_anchor_semantics(
 ):
     assert _accepts(pattern, accepted)
     assert not _accepts(pattern, rejected)
+
+
+def test_empty_pattern_alternative_cannot_consume_json_structure_as_string_content():
+    schema = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "pattern": r"^$|(^(?:\S+\s+){0,99}\S+$)"},
+            "weight": {"type": "integer", "minimum": 5, "maximum": 20},
+        },
+        "required": ["text", "weight"],
+        "additionalProperties": False,
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    assert "json_schema_streaming_pattern" in str(grammar)
+
+    valid = _get_matcher_from_grammar(grammar)
+    assert valid.accept_string(r'{"text":"","weight":5}')
+    assert valid.is_terminated()
+
+    # The invalid number cannot complete its property.  In the old CFG fallback, the non-empty
+    # pattern arm started at the first empty string and swallowed both quotes plus the remaining
+    # object as `\S`/`\s` source characters, so every byte was accepted as an unfinished prefix.
+    invalid = _get_matcher_from_grammar(grammar)
+    assert not invalid.accept_string(r'{"text":"","weight":4}')
+
+
+def test_optional_wide_character_class_requires_one_character_when_present():
+    pattern = r"^[^:\s]+:[^:\s]+(:[^\s]+)?$"
+    assert _accepts(pattern, "chrome:latest")
+    assert _accepts(pattern, "chrome:latest:stable")
+    assert not _accepts(pattern, "chrome:latest:")
 
 
 def test_pattern_properties_use_search_semantics():

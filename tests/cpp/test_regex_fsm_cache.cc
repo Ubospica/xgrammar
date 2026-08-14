@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 
+#include "fsm_builder.h"
 #include "grammar_functor.h"
 #include "json_schema_converter.h"
 #include "regex_fsm_cache.h"
@@ -127,6 +128,39 @@ TEST(XGrammarRegexFSMCacheTest, DecodedPatternFSMCountsUnicodeCodepoints) {
   EXPECT_TRUE(character_class.AcceptString("é"));
   EXPECT_TRUE(character_class.AcceptString("ê"));
   EXPECT_FALSE(character_class.AcceptString("a"));
+}
+
+TEST(XGrammarRegexFSMCacheTest, OptionalWideCharacterClassDoesNotBecomeNullable) {
+  const std::string rewritten = RewriteJSONSchemaPatternForFullMatch(R"(^a(:[^x]+)?$)");
+  auto nfa_result = RegexFSMBuilder::Build(rewritten);
+  ASSERT_TRUE(nfa_result.IsOk());
+  auto nfa = std::move(nfa_result).Unwrap();
+  EXPECT_FALSE(nfa.AcceptString("a:")) << rewritten << "\n" << nfa;
+
+  auto result = BuildJSONSchemaPatternFSM(R"(^a(:[^x]+)?$)", 4096);
+  ASSERT_TRUE(result.IsOk());
+  auto fsm = std::move(result).Unwrap();
+  EXPECT_TRUE(fsm.IsDFA());
+  EXPECT_TRUE(fsm.AcceptString("a"));
+  EXPECT_TRUE(fsm.AcceptString("a:b"));
+  EXPECT_FALSE(fsm.AcceptString("a:"));
+
+  auto maskbench_result = BuildJSONSchemaPatternFSM(R"(^[^:\s]+:[^:\s]+(:[^\s]+)?$)", 4096);
+  ASSERT_TRUE(maskbench_result.IsOk());
+  auto maskbench_fsm = std::move(maskbench_result).Unwrap();
+  EXPECT_TRUE(maskbench_fsm.AcceptString("chrome:latest"));
+  EXPECT_TRUE(maskbench_fsm.AcceptString("chrome:latest:stable"));
+  EXPECT_FALSE(maskbench_fsm.AcceptString("chrome:latest:"));
+
+  auto locale_result = BuildJSONSchemaPatternFSM(
+      R"(^[a-zA-Z]{2,3}(-[a-zA-Z]{4})?(-([a-zA-Z]{2}|[0-9]{3}))?(-[a-zA-Z]{5,8})?(-x(-[a-zA-Z0-9]{1,8})+)?$)",
+      4096
+  );
+  ASSERT_TRUE(locale_result.IsOk());
+  auto locale_fsm = std::move(locale_result).Unwrap();
+  EXPECT_TRUE(locale_fsm.AcceptString("en-US"));
+  EXPECT_TRUE(locale_fsm.AcceptString("fr"));
+  EXPECT_FALSE(locale_fsm.AcceptString("invalid"));
 }
 
 TEST(XGrammarRegexFSMCacheTest, PatternLengthAvoidsProductFSM) {

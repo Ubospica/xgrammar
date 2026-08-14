@@ -420,6 +420,17 @@ void EarleyParser::Complete(const ParserState& state, bool debug_print, bool mar
     if (ref_id != state.rule_id) {
       continue;
     }
+    // The same structural rule can be predicted at the same input position both inside and
+    // outside a runtime string/number constraint.  Its completed Earley item must only resume a
+    // parent from the same constraint scope.  Otherwise an unconstrained `basic_number` branch,
+    // for example, can resume a sibling parent whose property has `minimum`, bypassing the bound
+    // before a later discriminator selects that sibling.  The one intentional scope mismatch is
+    // completion of the constraint owner itself, which exits back to its unconstrained parent.
+    if (parent_state.json_string_length_rule_id != state.json_string_length_rule_id &&
+        (parent_state.json_string_length_rule_id >= 0 ||
+         state.rule_id != state.json_string_length_rule_id)) {
+      continue;
+    }
     if (state.json_string_length_rule_id >= 0 &&
         parent_state.json_string_length_rule_id != state.json_string_length_rule_id &&
         !runtime_constraints_allow_completion()) {
@@ -1012,54 +1023,100 @@ void EarleyParser::PushLatestScanableStates() {
     return;
   }
 
+  const auto completable_row = rule_id_to_completable_states_.Back();
+  const bool has_active_required_state =
+      std::any_of(
+          tmp_states_to_be_added_.begin(),
+          tmp_states_to_be_added_.end(),
+          [](const ParserState* state) { return state->json_object_required_rule_id >= 0; }
+      ) ||
+      std::any_of(completable_row.begin(), completable_row.end(), [](const auto& entry) {
+        return entry.second.json_object_required_rule_id >= 0;
+      });
+  if (!has_active_required_state) {
+    scanable_state_history_.PushBackIndirect(tmp_states_to_be_added_);
+    return;
+  }
+
   using StateIndex = std::unordered_map<
       ParserState,
       size_t,
       JSONObjectRequiredMergeStateHash,
       JSONObjectRequiredMergeStateEqual>;
-  auto merge_state =
+  auto union_into = [&](const ParserState& state, ParserState* existing) {
+    if (state.json_object_required_rule_id >= 0) {
+      existing->json_object_required_state_id =
+          grammar_features_->json_object_required_states->Union(
+              existing->json_object_required_state_id, state.json_object_required_state_id
+          );
+    }
+  };
+  auto merge_state_hashed =
       [&](const ParserState& state, StateIndex* indices, std::vector<ParserState>* merged) {
         auto [iterator, inserted] = indices->emplace(state, merged->size());
         if (inserted) {
           merged->push_back(state);
           return;
         }
-        ParserState& existing = (*merged)[iterator->second];
-        if (state.json_object_required_rule_id >= 0) {
-          existing.json_object_required_state_id =
-              grammar_features_->json_object_required_states->Union(
-                  existing.json_object_required_state_id, state.json_object_required_state_id
-              );
-        }
+        union_into(state, &(*merged)[iterator->second]);
       };
 
+  constexpr size_t kLinearMergeThreshold = 50;
   tmp_merged_json_object_states_.clear();
   tmp_merged_json_object_states_.reserve(tmp_states_to_be_added_.size());
-  StateIndex scanable_indices;
-  scanable_indices.reserve(tmp_states_to_be_added_.size());
-  for (const ParserState* state : tmp_states_to_be_added_) {
-    merge_state(*state, &scanable_indices, &tmp_merged_json_object_states_);
+  if (tmp_states_to_be_added_.size() < kLinearMergeThreshold) {
+    for (const ParserState* state : tmp_states_to_be_added_) {
+      auto existing = std::find_if(
+          tmp_merged_json_object_states_.begin(),
+          tmp_merged_json_object_states_.end(),
+          [&](const ParserState& candidate) {
+            return JSONObjectRequiredMergeStateEqual{}(candidate, *state);
+          }
+      );
+      if (existing == tmp_merged_json_object_states_.end()) {
+        tmp_merged_json_object_states_.push_back(*state);
+      } else {
+        union_into(*state, &*existing);
+      }
+    }
+  } else {
+    StateIndex scanable_indices;
+    scanable_indices.reserve(tmp_states_to_be_added_.size());
+    for (const ParserState* state : tmp_states_to_be_added_) {
+      merge_state_hashed(*state, &scanable_indices, &tmp_merged_json_object_states_);
+    }
   }
   scanable_state_history_.PushBack(tmp_merged_json_object_states_);
 
-  const auto completable_row = rule_id_to_completable_states_.Back();
   tmp_merged_json_object_completable_states_.clear();
   tmp_merged_json_object_completable_states_.reserve(completable_row.size());
-  std::unordered_map<int32_t, StateIndex> completable_indices;
-  for (const auto& [ref_rule_id, state] : completable_row) {
-    StateIndex& indices = completable_indices[ref_rule_id];
-    auto [iterator, inserted] =
-        indices.emplace(state, tmp_merged_json_object_completable_states_.size());
-    if (inserted) {
-      tmp_merged_json_object_completable_states_.emplace_back(ref_rule_id, state);
-      continue;
+  if (static_cast<size_t>(completable_row.size()) < kLinearMergeThreshold) {
+    for (const auto& [ref_rule_id, state] : completable_row) {
+      auto existing = std::find_if(
+          tmp_merged_json_object_completable_states_.begin(),
+          tmp_merged_json_object_completable_states_.end(),
+          [&](const auto& candidate) {
+            return candidate.first == ref_rule_id &&
+                   JSONObjectRequiredMergeStateEqual{}(candidate.second, state);
+          }
+      );
+      if (existing == tmp_merged_json_object_completable_states_.end()) {
+        tmp_merged_json_object_completable_states_.emplace_back(ref_rule_id, state);
+      } else {
+        union_into(state, &existing->second);
+      }
     }
-    ParserState& existing = tmp_merged_json_object_completable_states_[iterator->second].second;
-    if (state.json_object_required_rule_id >= 0) {
-      existing.json_object_required_state_id =
-          grammar_features_->json_object_required_states->Union(
-              existing.json_object_required_state_id, state.json_object_required_state_id
-          );
+  } else {
+    std::unordered_map<int32_t, StateIndex> completable_indices;
+    for (const auto& [ref_rule_id, state] : completable_row) {
+      StateIndex& indices = completable_indices[ref_rule_id];
+      auto [iterator, inserted] =
+          indices.emplace(state, tmp_merged_json_object_completable_states_.size());
+      if (inserted) {
+        tmp_merged_json_object_completable_states_.emplace_back(ref_rule_id, state);
+      } else {
+        union_into(state, &tmp_merged_json_object_completable_states_[iterator->second].second);
+      }
     }
   }
   rule_id_to_completable_states_.PopBack(1);
@@ -1317,8 +1374,12 @@ void EarleyParser::ExpandNextRuleRefElementOnFSM(const ParserState& state, bool 
                          << ref_rule_id << ": " << grammar_->GetRule(ref_rule_id).name << ".";
     }
     const uint8_t target_flags = GetFsmStateFlags(state.rule_id, target);
+    const auto& current_rule = grammar_->GetRule(state.rule_id);
+    const bool completion_updates_json_object_required =
+        state.rule_id == state.json_object_required_rule_id ||
+        current_rule.IsJSONObjectRequiredProperty();
     const bool can_elide_parent_completion =
-        !tracks_json_string_length && state.json_object_required_rule_id < 0 && !is_repeat &&
+        !tracks_json_string_length && !completion_updates_json_object_required && !is_repeat &&
         !(target_flags & kFsmStateHasEdges) && (target_flags & kFsmStateEnd) &&
         state.rule_start_pos != static_cast<int32_t>(rule_id_to_completable_states_.size() - 1) &&
         !RuleNeedsCaptureEvent(state.rule_id) && !RuleNeedsCaptureEvent(ref_rule_id);

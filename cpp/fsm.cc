@@ -1051,10 +1051,16 @@ FSMWithStartEnd FSMWithStartEnd::Plus() const {
 
 FSMWithStartEnd FSMWithStartEnd::Optional() const {
   FSM fsm = fsm_.Copy();
-  if (!ends_.empty()) {
-    fsm.AddEpsilonEdge(start_, ends_.front());
+  // The child's accepting states may have outgoing transitions, for example the back edge in a
+  // `+` repetition. Jumping directly from the start to one of those states would let the skipped
+  // optional branch take those outgoing transitions and consume only a suffix of the child. Use
+  // a fresh terminal accepting state so the epsilon path really represents exactly zero input.
+  const int new_end = fsm.AddState();
+  fsm.AddEpsilonEdge(start_, new_end);
+  for (int end : ends_) {
+    fsm.AddEpsilonEdge(end, new_end);
   }
-  return FSMWithStartEnd(fsm, start_, ends_);
+  return FSMWithStartEnd(fsm, start_, {new_end});
 }
 
 Result<FSMWithStartEnd> FSMWithStartEnd::Not(int max_result_num_states) const {

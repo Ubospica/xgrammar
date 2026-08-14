@@ -67,10 +67,20 @@ Grammar XMLToolCallingConverter::Convert(const SchemaSpecPtr& spec) {
 std::string XMLToolCallingConverter::XMLValue(const std::string& json_value) const {
   picojson::value value;
   std::string error = picojson::parse(value, json_value);
-  if (error.empty() && value.is<std::string>()) {
-    return value.get<std::string>();
+  if (!error.empty()) {
+    return json_value;
   }
-  return json_value;
+
+  // Numeric const/enum values are represented internally as strings that retain the exact
+  // source lexeme. Restore those markers recursively before emitting XML content. Re-parse the
+  // restored text only to remove JSON quoting from an actual string value; numbers, booleans,
+  // null, arrays, and objects remain JSON-shaped inside the XML parameter wrapper.
+  std::string restored = SerializeExactJSONValue(value);
+  picojson::value restored_value;
+  if (picojson::parse(restored_value, restored).empty() && restored_value.is<std::string>()) {
+    return restored_value.get<std::string>();
+  }
+  return restored;
 }
 
 int32_t XMLToolCallingConverter::XMLKeySuffix() {

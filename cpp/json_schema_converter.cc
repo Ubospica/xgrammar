@@ -1159,15 +1159,24 @@ std::string RewriteJSONSchemaPatternForFullMatchInternal(const std::string& patt
     if ((group & 2) == 0) {
       rewritten += "(?:[\\s\\S]*)";
     }
+    // RegexFSMBuilder accepts an empty regex by itself, but an empty non-capturing group used as
+    // one arm of an alternation (for example the rewritten form of `^$|^a$`) is ambiguous to its
+    // bracket parser.  `x{0}` is an equivalent epsilon expression that remains well formed inside
+    // an alternation.  Keeping the empty branch in the DFA path is also important for JSON-string
+    // safety: falling back to decoded CFG character classes would let classes such as `\\S`
+    // consume an unescaped closing quote as source text.
+    const auto append_body = [&](const std::string& body) {
+      rewritten += body.empty() ? "(?:x{0})" : "(?:" + body + ")";
+    };
     if (grouped_bodies[group].size() == 1) {
-      rewritten += "(?:" + grouped_bodies[group][0] + ")";
+      append_body(grouped_bodies[group][0]);
     } else {
       rewritten += "(?:";
       for (size_t index = 0; index < grouped_bodies[group].size(); ++index) {
         if (index != 0) {
           rewritten.push_back('|');
         }
-        rewritten += "(?:" + grouped_bodies[group][index] + ")";
+        append_body(grouped_bodies[group][index]);
       }
       rewritten.push_back(')');
     }
@@ -2503,6 +2512,7 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
   bool has_object_type = false;
   bool has_false_schema = false;
   bool has_non_object_type = false;
+  bool has_non_object_assertion = false;
 
   auto has_semantic_sibling = [](const picojson::object& object) {
     static const std::unordered_set<std::string> kAnnotations = {
@@ -2610,16 +2620,31 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
         })) {
       return false;
     }
-    if (object.count("patternProperties")) {
-      // Distinct patterns can overlap, in which case their value schemas must themselves be
-      // intersected. Keep that case on the unsupported path until the object generator can
-      // represent overlapping pattern-property conjunctions.
+    if (object.count("patternProperties") &&
+        !object.at("patternProperties").is<picojson::object>()) {
       return false;
     }
     if (object.count("unevaluatedProperties") &&
         (!object.at("unevaluatedProperties").is<bool>() ||
          !object.at("unevaluatedProperties").get<bool>())) {
       return false;
+    }
+    static const std::unordered_set<std::string> kObjectConjunctionKeywords = {
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "unevaluatedProperties",
+        "patternProperties",
+        "propertyNames",
+        "minProperties",
+        "maxProperties",
+    };
+    for (const auto& [keyword, value] : object) {
+      static_cast<void>(value);
+      if (IsKnownSchemaAssertionKeyword(keyword) && !kObjectConjunctionKeywords.count(keyword)) {
+        has_non_object_assertion = true;
+      }
     }
 
     ObjectConjunct conjunct{std::move(object), {}, false};
@@ -2652,15 +2677,22 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
   if (has_false_schema || (has_object_type && has_non_object_type)) {
     return picojson::value(false);
   }
-  if (!has_object_type) {
-    // Object-only keywords do not constrain non-object instances. Without an explicit object
-    // type, replacing the conjunction with ObjectSpec would incorrectly reject those instances.
-    return std::nullopt;
-  }
-
   std::unordered_set<std::string> all_named_properties;
+  std::optional<picojson::value> pattern_properties;
   for (const auto& conjunct : conjuncts) {
     all_named_properties.insert(conjunct.named_properties.begin(), conjunct.named_properties.end());
+    if (conjunct.schema.count("patternProperties") &&
+        !conjunct.schema.at("patternProperties").get<picojson::object>().empty()) {
+      const auto& candidate = conjunct.schema.at("patternProperties");
+      if (!pattern_properties.has_value()) {
+        pattern_properties = candidate;
+      } else if (pattern_properties->serialize(false) != candidate.serialize(false)) {
+        // Combining distinct pattern sets can make one key match schemas from separate
+        // conjuncts, which requires a general schema intersection. An identical set (or a set
+        // present in only one conjunct) can be carried through unchanged.
+        return std::nullopt;
+      }
+    }
   }
   for (const auto& conjunct : conjuncts) {
     if (conjunct.additional_properties_false && conjunct.named_properties != all_named_properties) {
@@ -2668,6 +2700,15 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
       // forbidden. The current ObjectSpec has only one global property set, so it cannot encode
       // that distinction exactly.
       return std::nullopt;
+    }
+    if (conjunct.additional_properties_false && pattern_properties.has_value()) {
+      if (!conjunct.schema.count("patternProperties") ||
+          conjunct.schema.at("patternProperties").serialize(false) !=
+              pattern_properties->serialize(false)) {
+        // A pattern introduced only by another conjunct is still an additional property in this
+        // closed conjunct. Moving it into one merged ObjectSpec would incorrectly admit the key.
+        return std::nullopt;
+      }
     }
   }
 
@@ -2753,6 +2794,11 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
   if (property_names.has_value()) {
     merged["propertyNames"] = std::move(*property_names);
   }
+  if (pattern_properties.has_value()) {
+    // Keep the local copy available for the closed-object required-name satisfiability check
+    // below. picojson's moved-from value no longer retains the pattern object.
+    merged["patternProperties"] = *pattern_properties;
+  }
   if (min_properties != 0) {
     merged["minProperties"] = picojson::value(min_properties);
   }
@@ -2764,12 +2810,75 @@ std::optional<picojson::value> SchemaParser::TryMergeObjectAllOf(const picojson:
     merged["maxProperties"] = picojson::value(*max_properties);
   }
   if (additional_properties_false) {
-    if (std::any_of(seen_required.begin(), seen_required.end(), [&](const std::string& name) {
-          return all_named_properties.count(name) == 0;
-        })) {
+    std::unordered_map<std::string, FSMWithStartEnd> pattern_fsms;
+    std::unordered_set<std::string> failed_pattern_fsms;
+    auto pattern_matches_property = [&](const std::string& pattern,
+                                        const std::string& property) -> std::optional<bool> {
+      auto cached = pattern_fsms.find(pattern);
+      if (cached == pattern_fsms.end() && !failed_pattern_fsms.count(pattern)) {
+        auto built = BuildJSONSchemaPatternFSM(pattern, kJSONSchemaPatternDFAStateLimit);
+        if (built.IsOk()) {
+          cached = pattern_fsms.emplace(pattern, std::move(built).Unwrap()).first;
+        } else {
+          failed_pattern_fsms.insert(pattern);
+        }
+      }
+      if (cached == pattern_fsms.end()) {
+        return std::nullopt;
+      }
+      return cached->second.AcceptString(property);
+    };
+
+    for (const auto& name : seen_required) {
+      if (all_named_properties.count(name)) {
+        continue;
+      }
+
+      bool admitted_by_pattern = false;
+      bool pattern_match_unknown = false;
+      if (pattern_properties.has_value()) {
+        const auto& patterns = pattern_properties->get<picojson::object>();
+        for (const auto& pattern : patterns.ordered_keys()) {
+          auto matches = pattern_matches_property(pattern, name);
+          if (!matches.has_value()) {
+            pattern_match_unknown = true;
+          } else if (*matches) {
+            admitted_by_pattern = true;
+          }
+        }
+      }
+      if (admitted_by_pattern) {
+        continue;
+      }
+      if (pattern_match_unknown) {
+        // A failed pattern construction means that the fixed required name might still be
+        // admitted. Abandon this optimization instead of declaring a satisfiable branch empty.
+        return std::nullopt;
+      }
       return picojson::value(false);
     }
     merged["additionalProperties"] = picojson::value(false);
+  }
+  if (!has_object_type) {
+    if (has_non_object_type || has_non_object_assertion) {
+      return std::nullopt;
+    }
+    // Object keywords are conditional: a conjunction such as
+    // `allOf: [{required: ["name"]}, {properties: {...}}]` accepts every non-object value and
+    // applies the merged constraints only to objects. Preserve both halves explicitly instead of
+    // falling through to GenerateAllOf's unconstrained fallback.
+    picojson::array non_object_types;
+    for (const char* type : {"null", "boolean", "array", "string", "number"}) {
+      non_object_types.emplace_back(type);
+    }
+    picojson::object non_object_schema;
+    non_object_schema["type"] = picojson::value(std::move(non_object_types));
+    picojson::array alternatives;
+    alternatives.emplace_back(std::move(merged));
+    alternatives.emplace_back(std::move(non_object_schema));
+    picojson::object conditional_object;
+    conditional_object["anyOf"] = picojson::value(std::move(alternatives));
+    return picojson::value(std::move(conditional_object));
   }
   return picojson::value(std::move(merged));
 }
@@ -4011,7 +4120,8 @@ Result<ObjectSpec, SchemaError> SchemaParser::ParseObject(const picojson::object
   if (schema.count("patternProperties") && schema.at("patternProperties").is<picojson::object>()) {
     pattern_properties = &schema.at("patternProperties").get<picojson::object>();
   }
-  auto pattern_matches_property = [&](const std::string& pattern, const std::string& property) {
+  auto pattern_matches_property = [&](const std::string& pattern,
+                                      const std::string& property) -> std::optional<bool> {
     auto cached = pattern_fsms.find(pattern);
     if (cached == pattern_fsms.end() && !failed_pattern_fsms.count(pattern)) {
       auto built = BuildJSONSchemaPatternFSM(pattern, kJSONSchemaPatternDFAStateLimit);
@@ -4021,7 +4131,10 @@ Result<ObjectSpec, SchemaError> SchemaParser::ParseObject(const picojson::object
         failed_pattern_fsms.insert(pattern);
       }
     }
-    return cached != pattern_fsms.end() && cached->second.AcceptString(property);
+    if (cached == pattern_fsms.end()) {
+      return std::nullopt;
+    }
+    return cached->second.AcceptString(property);
   };
 
   if (schema.count("properties")) {
@@ -4037,7 +4150,7 @@ Result<ObjectSpec, SchemaError> SchemaParser::ParseObject(const picojson::object
       std::vector<std::string> matching_patterns;
       if (pattern_properties != nullptr) {
         for (const auto& pattern : pattern_properties->ordered_keys()) {
-          if (pattern_matches_property(pattern, key)) matching_patterns.push_back(pattern);
+          if (pattern_matches_property(pattern, key) == true) matching_patterns.push_back(pattern);
         }
       }
 
@@ -4199,11 +4312,14 @@ Result<ObjectSpec, SchemaError> SchemaParser::ParseObject(const picojson::object
     );
   }
 
-  // `required` names do not have to appear in `properties`. When there are no key-pattern
-  // constraints, materialize each undeclared required name as a named property whose value uses
-  // the applicable additional/unevaluated schema. This lets the any-order required-key state
-  // machine track the actual names instead of approximating them with an object-property count.
-  if (spec.pattern_properties.empty() && !spec.property_names) {
+  // `required` names do not have to appear in `properties`. Materialize every undeclared fixed
+  // name whose applicable value schema can be determined exactly. This lets the any-order
+  // required-key state machine track actual names instead of approximating them with an object-
+  // property count. A fixed name matching patternProperties uses the conjunction of every
+  // matching value schema and is then excluded from the regex-backed alternatives. With
+  // propertyNames present, a named branch would also have to prove that the fixed key itself
+  // satisfies that schema, so retain the conservative fallback for that case.
+  if (!spec.property_names) {
     std::unordered_set<std::string> named_properties;
     for (const auto& property : spec.properties) named_properties.insert(property.name);
     std::vector<std::string> undeclared_required;
@@ -4213,7 +4329,75 @@ Result<ObjectSpec, SchemaError> SchemaParser::ParseObject(const picojson::object
     std::sort(undeclared_required.begin(), undeclared_required.end());
     for (const auto& required_name : undeclared_required) {
       SchemaSpecPtr value_schema;
-      if (spec.allow_additional_properties) {
+      std::vector<std::string> matching_patterns;
+      bool all_pattern_matches_known = true;
+      if (pattern_properties != nullptr) {
+        for (const auto& pattern : pattern_properties->ordered_keys()) {
+          auto matches = pattern_matches_property(pattern, required_name);
+          if (!matches.has_value()) {
+            all_pattern_matches_known = false;
+          } else if (*matches) {
+            matching_patterns.push_back(pattern);
+          }
+        }
+      }
+      if (!all_pattern_matches_known) {
+        continue;
+      }
+
+      if (!matching_patterns.empty()) {
+        std::vector<picojson::value> effective_conjuncts;
+        for (const auto& pattern : matching_patterns) {
+          const picojson::value& pattern_schema = pattern_properties->at(pattern);
+          if (pattern_schema.is<bool>()) {
+            if (!pattern_schema.get<bool>()) {
+              effective_conjuncts.assign(1, picojson::value(false));
+              break;
+            }
+            continue;
+          }
+          effective_conjuncts.push_back(pattern_schema);
+        }
+
+        picojson::value effective_schema(true);
+        if (!effective_conjuncts.empty()) {
+          effective_schema = effective_conjuncts.front();
+          bool all_identical = std::all_of(
+              effective_conjuncts.begin() + 1,
+              effective_conjuncts.end(),
+              [&](const picojson::value& conjunct) {
+                return conjunct.serialize(false) == effective_schema.serialize(false);
+              }
+          );
+          if (effective_conjuncts.size() > 1 && !all_identical) {
+            picojson::object all_of_schema;
+            all_of_schema["allOf"] = picojson::value(
+                picojson::array(effective_conjuncts.begin(), effective_conjuncts.end())
+            );
+            auto merged_schema = TryMergeObjectAllOf(all_of_schema);
+            if (!merged_schema.has_value()) {
+              merged_schema = TryMergeTypedAllOf(all_of_schema);
+            }
+            if (!merged_schema.has_value()) {
+              continue;
+            }
+            effective_schema = std::move(*merged_schema);
+          }
+        }
+
+        auto required_result = Parse(effective_schema, required_name);
+        if (required_result.IsErr()) {
+          return ResultErr(std::move(required_result).UnwrapErr());
+        }
+        value_schema = std::move(required_result).Unwrap();
+        for (auto& pattern_property : spec.pattern_properties) {
+          if (std::find(
+                  matching_patterns.begin(), matching_patterns.end(), pattern_property.pattern
+              ) != matching_patterns.end()) {
+            pattern_property.excluded_property_names.push_back(required_name);
+          }
+        }
+      } else if (spec.allow_additional_properties) {
         value_schema = spec.additional_properties_schema;
       } else if (spec.allow_unevaluated_properties) {
         value_schema = spec.unevaluated_properties_schema;
@@ -5767,6 +5951,16 @@ int32_t JSONSchemaConverter::GenerateString(const StringSpec& spec, const std::s
   }
   // Check for length constraints
   if (has_length) {
+    if (!enable_runtime_json_string_constraints_) {
+      // Runtime decoded-length metadata is intentionally absent from the public EBNF text
+      // format. Preserve the historical text representation so converting a Schema to EBNF and
+      // parsing it again does not silently drop the length bound.
+      int32_t character = builder_.AddCharacterClass(
+          {{0, 0x1f}, {'"', '"'}, {'\\', '\\'}, {'\r', '\r'}, {'\n', '\n'}}, true
+      );
+      int32_t body = Repeat(rule_name + "_characters", character, spec.min_length, spec.max_length);
+      return Sequence({ByteString("\""), body, ByteString("\"")});
+    }
     int32_t normal_character = builder_.AddCharacterClass(
         {{0, 0x1f}, {'"', '"'}, {'\\', '\\'}, {'\r', '\r'}, {'\n', '\n'}}, true
     );
@@ -6074,27 +6268,42 @@ int32_t JSONSchemaConverter::GetAnyOrderRuleForProperties(
     return RuleRef(state_id(0, 0));
   }
 
-  // Large named required sets use a compact runtime bitset. Property wrappers set their owning
-  // object's bits, and the owner rule may complete only after every required key has appeared.
-  // This avoids both the exponential subset grammar and the old count-only approximation. The
-  // textual EBNF conversion cannot preserve rule metadata, so it retains the legacy bounded
-  // fallback; direct Grammar/compiler APIs use the exact runtime constraint.
+  // Large named required sets use a compact runtime bitset. A zero-width marker after each
+  // required property sets its owning object's bit, and the owner rule may complete only after
+  // every required key has appeared. Keeping the property itself inline lets the shared-choice
+  // trie merge common key prefixes just as it does for objects without runtime required state;
+  // wrapping the whole property in a metadata-bearing rule would leave one live parser branch per
+  // property throughout every value. This avoids both the exponential subset grammar and the old
+  // count-only approximation. The textual EBNF conversion cannot preserve rule metadata, so it
+  // retains the legacy bounded fallback; direct Grammar/compiler APIs use the exact runtime
+  // constraint.
   if (enable_runtime_json_string_constraints_ && all_required_are_named) {
     int32_t owner_rule_id = builder_.AddEmptyRuleWithHint(rule_name + "_required_runtime");
-    std::vector<int32_t> wrapped_items;
-    wrapped_items.reserve(items.size());
+    std::vector<int32_t> marked_items;
+    marked_items.reserve(items.size());
     for (size_t item_index = 0; item_index < items.size(); ++item_index) {
-      int32_t property_rule_id = builder_.AddRuleWithHint(
-          rule_name + "_required_property_" + std::to_string(item_index), items[item_index]
-      );
-      if (required_bits[item_index] >= 0) {
-        builder_.UpdateJSONObjectRequiredProperty(
-            property_rule_id, owner_rule_id, required_bits[item_index]
-        );
+      if (required_bits[item_index] < 0) {
+        marked_items.push_back(items[item_index]);
+        continue;
       }
-      wrapped_items.push_back(RuleRef(property_rule_id));
+
+      const auto& item = builder_.GetGrammarExpr(items[item_index]);
+      std::vector<int32_t> elements;
+      if (item.type == GrammarBuilder::GrammarExprType::kSequence) {
+        elements.assign(item.begin(), item.end());
+      } else {
+        elements.push_back(items[item_index]);
+      }
+      int32_t marker_rule_id = builder_.AddRuleWithHint(
+          rule_name + "_required_property_" + std::to_string(item_index), Empty()
+      );
+      builder_.UpdateJSONObjectRequiredProperty(
+          marker_rule_id, owner_rule_id, required_bits[item_index]
+      );
+      elements.push_back(RuleRef(marker_rule_id));
+      marked_items.push_back(Sequence(elements));
     }
-    int32_t item_rule_id = builder_.AddRuleWithHint(rule_name + "_item", Choice(wrapped_items));
+    int32_t item_rule_id = builder_.AddRuleWithHint(rule_name + "_item", Choice(marked_items));
     int minimum_count = std::max(min_properties, static_cast<int>(required.size()));
     int32_t repeated_items = GetPropertyWithNumberConstraints(
         Sequence({middle_separator, RuleRef(item_rule_id)}),
@@ -6629,6 +6838,40 @@ int32_t JSONSchemaConverter::GenerateAny(const AnySpec& spec, const std::string&
        RuleRef(kBasicArray),
        RuleRef(kBasicObject)}
   );
+}
+
+std::string JSONSchemaConverter::SerializeExactJSONValue(const picojson::value& value) {
+  if (auto number = DecodeExactJSONNumber(value)) {
+    return *number;
+  }
+  if (auto string = DecodeEscapedExactJSONNumberString(value)) {
+    return picojson::value(*string).serialize(false);
+  }
+  if (value.is<picojson::array>()) {
+    std::string result = "[";
+    const auto& array = value.get<picojson::array>();
+    for (size_t index = 0; index < array.size(); ++index) {
+      if (index != 0) result.push_back(',');
+      result += SerializeExactJSONValue(array[index]);
+    }
+    result.push_back(']');
+    return result;
+  }
+  if (value.is<picojson::object>()) {
+    std::string result = "{";
+    const auto& object = value.get<picojson::object>();
+    bool first = true;
+    for (const auto& key : object.ordered_keys()) {
+      if (!first) result.push_back(',');
+      first = false;
+      result += picojson::value(key).serialize(false);
+      result.push_back(':');
+      result += SerializeExactJSONValue(object.at(key));
+    }
+    result.push_back('}');
+    return result;
+  }
+  return value.serialize(false);
 }
 
 int32_t JSONSchemaConverter::GenerateJSONValue(

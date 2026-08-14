@@ -1213,9 +1213,11 @@ std::optional<GrammarMatcher::Impl::CharacterClassRepeat>
 GrammarMatcher::Impl::GetCharacterClassRepeat(const ParserState& state) const {
   using GrammarExprType = Grammar::Impl::GrammarExprType;
   const bool has_runtime_json_length = state.json_string_length_rule_id >= 0;
+  const bool has_runtime_json_object_required = state.json_object_required_rule_id >= 0;
   if (!repeat_mask_cache_enabled_ || state.rule_id < 0 || state.sub_element_id != 0 ||
       state.rule_id >= static_cast<int32_t>(compiled_grammar_->rule_level_cacheable.size()) ||
-      (!compiled_grammar_->rule_level_cacheable[state.rule_id] && !has_runtime_json_length) ||
+      (!compiled_grammar_->rule_level_cacheable[state.rule_id] && !has_runtime_json_length &&
+       !has_runtime_json_object_required) ||
       state.partial_codepoint != 0 || state.rule_start_pos < 0 ||
       state.rule_start_pos >= static_cast<int32_t>(rule_id_to_completable_states_.size()) ||
       state.element_id != grammar_->per_rule_fsms[state.rule_id]->GetFsm().GetStart()) {

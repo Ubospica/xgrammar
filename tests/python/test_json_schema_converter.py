@@ -1514,6 +1514,93 @@ def test_allof_distributes_common_object_constraints_over_combinators():
         assert not _is_grammar_accept_string(oneof_grammar, json.dumps(instance)), instance
 
 
+def test_untyped_object_combinator_preserves_non_objects_and_constrains_objects():
+    schema = {
+        "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "pool": {"type": "object"},
+            "virtualServer": {"type": "object"},
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+        "anyOf": [{"required": ["pool"]}, {"required": ["virtualServer"]}],
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    # Object-specific keywords are conditional in JSON Schema, so non-objects remain valid.
+    for instance in (None, 1, "text", [1]):
+        assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+    for instance in ({"name": "plan", "pool": {}}, {"virtualServer": {}, "name": "plan"}):
+        assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+    for instance in (
+        {"name": "plan"},
+        {"name": "", "pool": {}},
+        {"name": "plan", "pool": {}, "extra": True},
+    ):
+        assert not _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+
+
+def test_object_allof_preserves_single_pattern_properties_set():
+    schema = {
+        "$defs": {
+            "core": {
+                "type": "object",
+                "properties": {
+                    "styles": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"src": {"type": "string"}},
+                            "required": ["src"],
+                        },
+                    }
+                },
+                "patternProperties": {"^_": True},
+            },
+            "extension": {"type": "object", "properties": {"branding": {"type": "object"}}},
+        },
+        "allOf": [
+            {"$ref": "#/$defs/core"},
+            {"anyOf": [{"$ref": "#/$defs/extension"}]},
+            {"required": ["styles"]},
+        ],
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    assert _is_grammar_accept_string(
+        grammar, json.dumps({"styles": [{"src": "main.css"}], "_note": 1})
+    )
+    assert not _is_grammar_accept_string(grammar, json.dumps({"styles": [{"src": 42}], "_note": 1}))
+
+
+def test_oneof_does_not_mix_constrained_property_with_unconstrained_sibling_branch():
+    schema = {
+        "type": "object",
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {"state": {"const": "stopped"}},
+                "required": ["state"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "state": {"const": "running"},
+                    "current": {"type": "number", "minimum": 0},
+                },
+                "required": ["state"],
+            },
+        ],
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    for instance in (
+        {"state": "running", "current": 1},
+        {"current": 1, "state": "running"},
+        {"current": -1, "state": "stopped"},
+    ):
+        assert _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+    for instance in ({"state": "running", "current": -1}, {"current": -1, "state": "running"}):
+        assert not _is_grammar_accept_string(grammar, json.dumps(instance)), instance
+
+
 def test_required_properties_need_not_be_declared_in_properties():
     schema = {"type": "object", "required": ["left", "right"]}
     grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
@@ -1539,6 +1626,38 @@ def test_required_properties_need_not_be_declared_in_properties():
     )
     for instance in ({}, {"missing": None}, {"other": 1}):
         assert not _is_grammar_accept_string(forbidden_required_grammar, json.dumps(instance))
+
+
+def test_allof_pattern_properties_can_supply_exact_required_names():
+    schema = {
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "bridge_length": {"type": "integer"},
+                    "bridge_on": {"type": "string"},
+                    "debug": {"type": "boolean"},
+                },
+                "patternProperties": {"^bridge_(start|end)$": {"type": "number"}},
+                "additionalProperties": False,
+            },
+            {"required": ["bridge_start", "bridge_end", "bridge_length", "bridge_on"]},
+        ]
+    }
+    grammar = xgr.Grammar.from_json_schema(json.dumps(schema), strict_mode=False, any_order=True)
+    valid = {"bridge_start": 1, "bridge_end": 2.5, "bridge_length": 3, "bridge_on": "value"}
+    assert _is_grammar_accept_string(grammar, json.dumps(valid))
+
+    for missing_name in ("bridge_start", "bridge_end"):
+        invalid = dict(valid)
+        del invalid[missing_name]
+        # Keep the same property count. A count-only approximation of `required` would accept it.
+        invalid["debug"] = True
+        assert not _is_grammar_accept_string(grammar, json.dumps(invalid)), missing_name
+
+    wrong_value = dict(valid)
+    wrong_value["bridge_start"] = "not a number"
+    assert not _is_grammar_accept_string(grammar, json.dumps(wrong_value))
 
 
 def test_unsatisfiable_items_schema_does_not_make_array_schema_uncompilable():
