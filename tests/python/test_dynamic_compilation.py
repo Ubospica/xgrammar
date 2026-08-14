@@ -346,6 +346,50 @@ def test_runtime_json_string_mask_cache_matches_fresh_replay_across_contexts():
         torch.testing.assert_close(cached_mask, fresh_mask, rtol=0, atol=0)
 
 
+def test_runtime_json_string_mask_cache_replacement_matches_fresh_replay():
+    property_names = [f"value_{index:02d}" for index in range(40)]
+    first_property = f'{{"{property_names[0]}": "'
+    property_transitions = [f'", "{name}": "' for name in property_names[1:]]
+    vocabulary = [first_property, "a", r"\u0061", *property_transitions, '"}']
+    tokenizer_info = xgr.TokenizerInfo(vocabulary, stop_token_ids=[])
+    string_schema = {"type": "string", "minLength": 1, "maxLength": 64}
+    compiled = xgr.GrammarCompiler(
+        tokenizer_info, max_threads=1, enable_dynamic_compilation=True
+    ).compile_json_schema(
+        {
+            "type": "object",
+            "properties": {name: string_schema for name in property_names},
+            "required": property_names,
+            "additionalProperties": False,
+        },
+        any_whitespace=False,
+        strict_mode=True,
+    )
+
+    sequence = [0]
+    for index in range(len(property_names)):
+        sequence.extend([1, 2, 1])
+        sequence.append(3 + index if index + 1 < len(property_names) else len(vocabulary) - 1)
+
+    cached = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    cached_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    fresh_mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+    prefix = []
+    for token_id in sequence:
+        xgr.reset_token_bitmask(cached_mask)
+        cached.fill_next_token_bitmask(cached_mask)
+
+        fresh = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        assert all(fresh.accept_token(previous) for previous in prefix)
+        xgr.reset_token_bitmask(fresh_mask)
+        fresh.fill_next_token_bitmask(fresh_mask)
+        torch.testing.assert_close(cached_mask, fresh_mask, rtol=0, atol=0)
+
+        assert cached.accept_token(token_id)
+        prefix.append(token_id)
+    assert cached.is_terminated()
+
+
 def test_streaming_literal_pattern_masks_are_shared_concurrently():
     alternatives = ["bcd", "abce", "he", "she", "his", "hers"] + [
         f"region-{index:03d}" for index in range(96)
