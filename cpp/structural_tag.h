@@ -86,7 +86,8 @@ struct JSONSchemaFormat {
   // avoids serializing and reparsing every nested schema during grammar conversion; the aliasing
   // shared pointer keeps the complete JSON document alive.
   std::shared_ptr<const picojson::value> json_schema;
-  std::string style = "json";  // "json","qwen_xml","minimax_xml","deepseek_xml","glm_xml"
+  // "json","qwen_xml","minimax_xml","deepseek_xml","glm_xml","kimi_k3_xml"
+  std::string style = "json";
   // Whether to allow object properties to appear in any order. See
   // Grammar::FromJSONSchema / JSONSchemaToEBNF for the semantics.
   bool any_order = false;
