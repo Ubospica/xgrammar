@@ -151,8 +151,8 @@ EBNFLexer::Token EBNFLexer::Impl::ParseIdentifierOrBooleanToken() {
   // name[capture="x"] ::= ...,
   // name[capture_hidden_suffix_bytes=3] ::= ..., name[capture_hidden_stop_bytes=3] ::= ...,
   // name[capture_hidden_body_rule_id=1, capture_hidden_marker_rule_id=2] ::= ...,
-  // name[stop_capture="marker"] ::= ..., name[lazy] ::= ..., name[temperature=0.7] ::= ..., or a
-  // comma-separated combination.
+  // name[stop_capture="marker"] ::= ..., name[lazy] ::= ..., name[no_forcing] ::= ...,
+  // name[temperature=0.7] ::= ..., or a comma-separated combination.
   // The bracket group is treated as an attribute block only when it is followed by "::=";
   // otherwise it is left to be lexed as a character class.
   if (*cur_ == '[') {
@@ -184,6 +184,7 @@ EBNFLexer::Token EBNFLexer::Impl::ParseIdentifierOrBooleanToken() {
     bool has_capture_hidden_marker_rule_id = false;
     bool has_stop_capture = false;
     bool has_lazy = false;
+    bool has_no_forcing = false;
     bool has_temperature = false;
     double temperature_value = 0;
     int64_t max_tokens_value = -1;
@@ -296,6 +297,8 @@ EBNFLexer::Token EBNFLexer::Impl::ParseIdentifierOrBooleanToken() {
         }
       } else if (!has_lazy && match_keyword("lazy")) {
         has_lazy = true;
+      } else if (!has_no_forcing && match_keyword("no_forcing")) {
+        has_no_forcing = true;
       } else if (!has_temperature && match_keyword("temperature")) {
         has_temperature = true;
         matched = parse_float_value(&temperature_value);
@@ -381,6 +384,7 @@ EBNFLexer::Token EBNFLexer::Impl::ParseIdentifierOrBooleanToken() {
           static_cast<int32_t>(capture_hidden_marker_rule_id_value);
       token.stop_capture_name = stop_capture_value;
       token.is_lazy = has_lazy;
+      token.no_forcing = has_no_forcing;
       if (has_temperature) {
         token.temperature = static_cast<float>(temperature_value);
       }
@@ -564,6 +568,12 @@ std::variant<EBNFLexer::Token, std::vector<EBNFLexer::Token>> EBNFLexer::Impl::N
     case '|':
       Consume();
       return EBNFLexer::Token{TokenType::Pipe, "|", "", start_line, start_column};
+    case '&':
+      Consume();
+      return EBNFLexer::Token{TokenType::Amp, "&", "", start_line, start_column};
+    case '~':
+      Consume();
+      return EBNFLexer::Token{TokenType::Tilde, "~", "", start_line, start_column};
     case ',':
       Consume();
       return EBNFLexer::Token{TokenType::Comma, ",", "", start_line, start_column};
@@ -689,6 +699,7 @@ class EBNFParser {
   struct ParsedRule {
     Rule rule;
     SuffixStopInfo suffix_stop_info;
+    bool no_forcing = false;
   };
 
   // Parsing different parts of the grammar
@@ -702,6 +713,9 @@ class EBNFParser {
   int32_t ParseElementWithQuantifier();
   int32_t ParseLookaheadAssertion();
   int32_t ParseSequence();
+  /*! \brief Parse an intersection of sequences separated by '&'. The '&' operator binds
+   * tighter than '|' and looser than sequence concatenation. */
+  int32_t ParseIntersection();
   int32_t ParseChoices();
   ParsedRule ParseRule();
 
@@ -744,6 +758,7 @@ class EBNFParser {
   int32_t ParseTagDispatch();
   int32_t ParseTokenSet();
   int32_t ParseExcludeToken();
+  int32_t ParseEOS();
   int32_t ParseTokenTagDispatch();
   int32_t ParseRegexMacro();
   int32_t ParseSubstringMacro();
@@ -797,6 +812,7 @@ const std::unordered_map<std::string, std::function<int32_t(EBNFParser*)>>
         {"TagDispatch", [](EBNFParser* parser) { return parser->ParseTagDispatch(); }},
         {"Token", [](EBNFParser* parser) { return parser->ParseTokenSet(); }},
         {"ExcludeToken", [](EBNFParser* parser) { return parser->ParseExcludeToken(); }},
+        {"EOS", [](EBNFParser* parser) { return parser->ParseEOS(); }},
         {"TokenTagDispatch", [](EBNFParser* parser) { return parser->ParseTokenTagDispatch(); }},
         {"Regex", [](EBNFParser* parser) { return parser->ParseRegexMacro(); }},
         {"Substring", [](EBNFParser* parser) { return parser->ParseSubstringMacro(); }},
@@ -1042,7 +1058,16 @@ int32_t EBNFParser::HandleQuestionQuantifier(int32_t grammar_expr_id) {
 }
 
 int32_t EBNFParser::ParseElementWithQuantifier() {
+  // The prefix '~' complements the element that follows; a quantifier applies to the complement.
+  bool is_complement = false;
+  if (Peek().type == TokenType::Tilde) {
+    Consume();
+    is_complement = true;
+  }
   int32_t grammar_expr_id = ParseElement();
+  if (is_complement) {
+    grammar_expr_id = builder_.AddComplement(grammar_expr_id);
+  }
 
   if (Peek().type == TokenType::Star) {
     Consume();
@@ -1071,21 +1096,36 @@ int32_t EBNFParser::ParseSequence() {
 
   do {
     elements.push_back(ParseElementWithQuantifier());
-  } while (Peek().type != TokenType::Pipe && Peek().type != TokenType::RParen &&
-           Peek().type != TokenType::LookaheadLParen && Peek().type != TokenType::RuleName &&
-           Peek().type != TokenType::EndOfFile);
+  } while (Peek().type != TokenType::Pipe && Peek().type != TokenType::Amp &&
+           Peek().type != TokenType::RParen && Peek().type != TokenType::LookaheadLParen &&
+           Peek().type != TokenType::RuleName && Peek().type != TokenType::EndOfFile);
 
   return builder_.AddSequence(elements);
+}
+
+int32_t EBNFParser::ParseIntersection() {
+  int32_t first_operand = ParseSequence();
+
+  if (Peek().type != TokenType::Amp) {
+    return first_operand;
+  }
+
+  std::vector<int32_t> operands{first_operand};
+  while (Peek().type == TokenType::Amp) {
+    Consume();
+    operands.push_back(ParseSequence());
+  }
+  return builder_.AddIntersection(operands);
 }
 
 int32_t EBNFParser::ParseChoices() {
   std::vector<int32_t> choices;
 
-  choices.push_back(ParseSequence());
+  choices.push_back(ParseIntersection());
 
   while (Peek().type == TokenType::Pipe) {
     Consume();
-    choices.push_back(ParseSequence());
+    choices.push_back(ParseIntersection());
   }
 
   return builder_.AddChoices(choices);
@@ -1412,6 +1452,17 @@ int32_t EBNFParser::ParseExcludeToken() {
   return builder_.AddExcludeTokenSet(token_ids);
 }
 
+int32_t EBNFParser::ParseEOS() {
+  Consume();  // Consume EOS identifier.
+  auto start = current_token_;
+  auto args = ParseMacroArguments();
+  auto delta_element = start - current_token_;
+  if (!args.arguments.empty() || !args.named_arguments.empty()) {
+    ReportParseError("EOS() does not accept arguments", delta_element);
+  }
+  return builder_.AddEOS();
+}
+
 int32_t EBNFParser::ParseTokenTagDispatch() {
   Consume();
   auto start = current_token_;
@@ -1510,6 +1561,7 @@ EBNFParser::ParsedRule EBNFParser::ParseRule() {
   int32_t capture_hidden_marker_rule_id = Peek().capture_hidden_marker_rule_id;
   std::string stop_capture_name = Peek().stop_capture_name;
   bool is_lazy = Peek().is_lazy;
+  bool no_forcing = Peek().no_forcing;
   std::optional<float> temperature = Peek().temperature;
   Consume();
 
@@ -1534,6 +1586,7 @@ EBNFParser::ParsedRule EBNFParser::ParseRule() {
   result.suffix_stop_info.body_rule_id = capture_hidden_body_rule_id;
   result.suffix_stop_info.marker_rule_id = capture_hidden_marker_rule_id;
   result.suffix_stop_info.stop_capture_name = std::move(stop_capture_name);
+  result.no_forcing = no_forcing;
   return result;
 }
 
@@ -1580,6 +1633,7 @@ Grammar EBNFParser::Parse(
     builder_.UpdateSuffixStopInfo(rule.name, parsed_rule.suffix_stop_info);
     builder_.UpdateLazy(rule.name, rule.is_lazy);
     builder_.UpdateRuleTemperature(builder_.GetRuleId(rule.name), rule.temperature);
+    builder_.SetNoForcing(parsed_rule.no_forcing);
   }
 
   return builder_.Get(root_rule_name);

@@ -280,10 +280,24 @@ class StructureNormalizerImpl : public GrammarMutator {
     for (int i = 0; i < static_cast<int>(base_grammar_->NumRules()); ++i) {
       builder_->AddEmptyRule(base_grammar_->GetRule(i).name);
     }
+    // The suffix/stop helper rules must keep leaf FSM-compilable bodies, like lazy rules, so
+    // capture recovery can run their automata directly.
+    std::unordered_set<int32_t> suffix_stop_helper_rule_ids;
+    for (int i = 0; i < static_cast<int>(base_grammar_->NumRules()); ++i) {
+      if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
+        if (suffix_stop_info->body_rule_id != -1) {
+          suffix_stop_helper_rule_ids.insert(suffix_stop_info->body_rule_id);
+        }
+        if (suffix_stop_info->marker_rule_id != -1) {
+          suffix_stop_helper_rule_ids.insert(suffix_stop_info->marker_rule_id);
+        }
+      }
+    }
     for (int i = 0; i < static_cast<int>(base_grammar_->NumRules()); ++i) {
       auto rule = base_grammar_->GetRule(i);
       auto grammar_expr = base_grammar_->GetGrammarExpr(rule.body_expr_id);
       cur_rule_name_ = rule.name;
+      cur_rule_keeps_regex_inline_ = rule.is_lazy || suffix_stop_helper_rule_ids.count(i) > 0;
       auto new_body_expr_id = VisitRuleBody(grammar_expr);
       builder_->UpdateRuleBody(i, new_body_expr_id);
       builder_->UpdateLookaheadAssertion(i, VisitLookaheadAssertion(rule.lookahead_assertion_id));
@@ -318,6 +332,8 @@ class StructureNormalizerImpl : public GrammarMutator {
         XGRAMMAR_LOG(FATAL) << "TagDispatch should not be in lookahead assertion";
         XGRAMMAR_UNREACHABLE();
       case GrammarExprType::kRegex:
+      case GrammarExprType::kIntersect:
+      case GrammarExprType::kComplement:
         XGRAMMAR_LOG(FATAL) << "Regex should not be in lookahead assertion";
         XGRAMMAR_UNREACHABLE();
       case GrammarExprType::kSubstring:
@@ -331,6 +347,7 @@ class StructureNormalizerImpl : public GrammarMutator {
       case GrammarExprType::kToken:
       case GrammarExprType::kExcludeToken:
       case GrammarExprType::kTokenTagDispatch:
+      case GrammarExprType::kEOS:
         return builder_->AddSequence({builder_->AddGrammarExpr(assertion_expr)});
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected lookahead assertion type: "
@@ -355,6 +372,7 @@ class StructureNormalizerImpl : public GrammarMutator {
       case GrammarExprType::kRepeat:
       case GrammarExprType::kToken:
       case GrammarExprType::kExcludeToken:
+      case GrammarExprType::kEOS:
         return builder_->AddChoices({builder_->AddSequence({builder_->AddGrammarExpr(grammar_expr)})
         });
       case GrammarExprType::kTagDispatch:
@@ -366,8 +384,11 @@ class StructureNormalizerImpl : public GrammarMutator {
       }
       case GrammarExprType::kRegex:
       case GrammarExprType::kSubstring:
-        // A regex or substring is kept as the direct body of the rule, like a tag dispatch.
-        return builder_->AddGrammarExpr(grammar_expr);
+      case GrammarExprType::kIntersect:
+      case GrammarExprType::kComplement:
+        // A regular-language expression is kept as the direct body of the rule, like a tag
+        // dispatch. VisitExpr preserves nested intersection operands.
+        return VisitExpr(grammar_expr);
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected sequence type: " << static_cast<int>(grammar_expr.type);
         XGRAMMAR_UNREACHABLE();
@@ -400,6 +421,7 @@ class StructureNormalizerImpl : public GrammarMutator {
         case GrammarExprType::kRepeat:
         case GrammarExprType::kToken:
         case GrammarExprType::kExcludeToken:
+        case GrammarExprType::kEOS:
           VisitElementInChoices(choice_expr, &new_choice_ids);
           break;
         case GrammarExprType::kTagDispatch: {
@@ -417,9 +439,15 @@ class StructureNormalizerImpl : public GrammarMutator {
           break;
         }
         case GrammarExprType::kRegex:
-        case GrammarExprType::kSubstring: {
-          auto leaf_expr_id = builder_->AddGrammarExpr(choice_expr);
-          auto new_rule_id = builder_->AddRuleWithHint(cur_rule_name_, leaf_expr_id);
+        case GrammarExprType::kSubstring:
+        case GrammarExprType::kIntersect:
+        case GrammarExprType::kComplement: {
+          auto regex_expr_id = VisitExpr(choice_expr);
+          if (cur_rule_keeps_regex_inline_) {
+            new_choice_ids.push_back(builder_->AddSequence({regex_expr_id}));
+            break;
+          }
+          auto new_rule_id = builder_->AddRuleWithHint(cur_rule_name_, regex_expr_id);
           auto new_sequence_id = builder_->AddSequence({builder_->AddRuleRef(new_rule_id)});
           new_choice_ids.push_back(new_sequence_id);
           break;
@@ -496,6 +524,7 @@ class StructureNormalizerImpl : public GrammarMutator {
         case GrammarExprType::kRepeat:
         case GrammarExprType::kToken:
         case GrammarExprType::kExcludeToken:
+        case GrammarExprType::kEOS:
           VisitElementInSequence(element_expr, &new_sequence_ids);
           break;
         case GrammarExprType::kTagDispatch: {
@@ -511,9 +540,15 @@ class StructureNormalizerImpl : public GrammarMutator {
           break;
         }
         case GrammarExprType::kRegex:
-        case GrammarExprType::kSubstring: {
-          auto leaf_expr_id = builder_->AddGrammarExpr(element_expr);
-          auto new_rule_id = builder_->AddRuleWithHint(cur_rule_name_, leaf_expr_id);
+        case GrammarExprType::kSubstring:
+        case GrammarExprType::kIntersect:
+        case GrammarExprType::kComplement: {
+          auto regex_expr_id = VisitExpr(element_expr);
+          if (cur_rule_keeps_regex_inline_) {
+            new_sequence_ids.push_back(regex_expr_id);
+            break;
+          }
+          auto new_rule_id = builder_->AddRuleWithHint(cur_rule_name_, regex_expr_id);
           new_sequence_ids.push_back(builder_->AddRuleRef(new_rule_id));
           break;
         }
@@ -560,6 +595,11 @@ class StructureNormalizerImpl : public GrammarMutator {
   ) {
     new_sequence_ids->push_back(builder_->AddGrammarExpr(grammar_expr));
   }
+
+  /*! \brief Whether the rule being visited must keep regex-like elements inline (instead of
+   * hoisting them into helper rules), because its body must compile into a single leaf FSM:
+   * lazy rules and suffix/stop helper rules. */
+  bool cur_rule_keeps_regex_inline_ = false;
 };
 
 /*!
@@ -989,8 +1029,7 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
     auto root_grammar_expr = base_grammar_->GetGrammarExpr(root_rule.body_expr_id);
     if (root_grammar_expr.type == GrammarExprType::kTagDispatch ||
         root_grammar_expr.type == GrammarExprType::kTokenTagDispatch ||
-        root_grammar_expr.type == GrammarExprType::kRegex ||
-        root_grammar_expr.type == GrammarExprType::kSubstring) {
+        Grammar::Impl::IsRegexExpressionType(root_grammar_expr.type)) {
       return grammar;
     }
     BuildRuleLookaheadInfo();
@@ -1058,9 +1097,8 @@ class LookaheadAssertionAnalyzerImpl : public GrammarMutator {
         }
         continue;
       }
-      if (grammar_expr.type == GrammarExprType::kRegex ||
-          grammar_expr.type == GrammarExprType::kSubstring) {
-        // A regex or substring rule is a leaf: it references no other rules.
+      if (Grammar::Impl::IsRegexExpressionType(grammar_expr.type)) {
+        // A regular-language expression tree contains no rule references.
         continue;
       }
       XGRAMMAR_DCHECK(grammar_expr.type == GrammarExprType::kChoices);
@@ -1202,20 +1240,8 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
         continue;
       }
 
-      if (grammar_expr.type == GrammarExprType::kSubstring) {
-        // A substring automaton always accepts the empty string: every state is accepting.
-        empty_rule_id_set->insert(i);
-        continue;
-      }
-
-      if (grammar_expr.type == GrammarExprType::kRegex) {
-        // Nullability is checked syntactically on the parsed regex, so no FSM is built here.
-        // Parse errors are reported by GrammarFSMBuilder later.
-        auto matches_empty_result = RegexFSMBuilder::MatchesEmpty(
-            base_grammar_->GetRegexString(grammar_expr),
-            base_grammar_->GetRegexIsByteMode(grammar_expr)
-        );
-        if (matches_empty_result.IsOk() && std::move(matches_empty_result).Unwrap()) {
+      if (Grammar::Impl::IsRegexExpressionType(grammar_expr.type)) {
+        if (RegexLikeExprAllowsEmpty(grammar_expr)) {
           empty_rule_id_set->insert(i);
         }
         continue;
@@ -1230,12 +1256,66 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
       for (auto seq_id : grammar_expr) {
         auto seq_expr = base_grammar_->GetGrammarExpr(seq_id);
         if (std::all_of(seq_expr.begin(), seq_expr.end(), [&](int32_t i) {
-              return base_grammar_->GetGrammarExpr(i).type == GrammarExprType::kCharacterClassStar;
+              return ElementAllowsEmptyWithoutRules(base_grammar_->GetGrammarExpr(i));
             })) {
           empty_rule_id_set->insert(i);
           break;
         }
       }
+    }
+  }
+
+  /*! \brief Whether an element allows the empty string without considering rule references:
+   * a character class star, or a nullable regex-like expression. */
+  bool ElementAllowsEmptyWithoutRules(const GrammarExpr& expr) {
+    if (expr.type == GrammarExprType::kCharacterClassStar) {
+      return true;
+    }
+    if (Grammar::Impl::IsRegexExpressionType(expr.type)) {
+      return RegexLikeExprAllowsEmpty(expr);
+    }
+    return false;
+  }
+
+  /*! \brief Whether a regex, intersection or complement expr matches the empty string. A regex
+   * allows empty iff an end state is in the epsilon closure of the start state of its automaton
+   * (build errors are reported by GrammarFSMBuilder later); an intersection allows empty iff
+   * every operand does; a complement allows empty iff its operand does not. */
+  bool RegexLikeExprAllowsEmpty(const GrammarExpr& expr) {
+    switch (expr.type) {
+      case GrammarExprType::kRegex: {
+        auto matches_empty_result = RegexFSMBuilder::MatchesEmpty(
+            base_grammar_->GetRegexString(expr), base_grammar_->GetRegexIsByteMode(expr)
+        );
+        return matches_empty_result.IsOk() && std::move(matches_empty_result).Unwrap();
+      }
+      case GrammarExprType::kSubstring:
+        return true;
+      case GrammarExprType::kIntersect:
+        return std::all_of(expr.begin(), expr.end(), [&](int32_t operand_id) {
+          return RegexLikeExprAllowsEmpty(base_grammar_->GetGrammarExpr(operand_id));
+        });
+      case GrammarExprType::kComplement:
+        return !RegexLikeExprAllowsEmpty(base_grammar_->GetGrammarExpr(expr[0]));
+      case GrammarExprType::kEmptyStr:
+        return true;
+      case GrammarExprType::kByteString:
+        return expr.size() == 0;
+      case GrammarExprType::kCharacterClass:
+        return false;
+      case GrammarExprType::kCharacterClassStar:
+        return true;
+      case GrammarExprType::kSequence:
+        return std::all_of(expr.begin(), expr.end(), [&](int32_t element_id) {
+          return RegexLikeExprAllowsEmpty(base_grammar_->GetGrammarExpr(element_id));
+        });
+      case GrammarExprType::kChoices:
+        return std::any_of(expr.begin(), expr.end(), [&](int32_t choice_id) {
+          return RegexLikeExprAllowsEmpty(base_grammar_->GetGrammarExpr(choice_id));
+        });
+      default:
+        // Rule references etc. are not allowed inside intersection operands.
+        return false;
     }
   }
 
@@ -1251,7 +1331,7 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
       auto element_expr = base_grammar_->GetGrammarExpr(i);
       return (element_expr.type == GrammarExprType::kRuleRef &&
               empty_rule_id_set.count(element_expr[0])) ||
-             element_expr.type == GrammarExprType::kCharacterClassStar ||
+             ElementAllowsEmptyWithoutRules(element_expr) ||
              (element_expr.type == GrammarExprType::kRepeat &&
               (empty_rule_id_set.count(element_expr[0]) || element_expr[1] == 0));
     });
@@ -1387,6 +1467,8 @@ class GrammarFSMBuilderImpl {
   static Result<FSMWithStartEnd> Regex(
       const std::string& regex, bool json_string = false, bool byte_mode = false
   );
+  static Result<FSMWithStartEnd> Intersect(const GrammarExpr& expr, const Grammar& grammar);
+  static Result<FSMWithStartEnd> Complement(const GrammarExpr& expr, const Grammar& grammar);
   /* Building tool functions.*/
   static std::optional<FSMWithStartEnd> BuildTagDispatchFSM(
       const std::vector<std::pair<std::string, int>>& string_trigger_rules,
@@ -1408,6 +1490,19 @@ class GrammarFSMBuilderImpl {
       GrammarBuilder* grammar_builder = nullptr,
       RegexFSMCache* regex_fsm_cache = nullptr
   );
+  /*!
+   * \brief Build the leaf FSM of an intersection operand. Regexes are compiled through the
+   * regex-to-grammar converter, which is codepoint-aware, and the per-rule automata are then
+   * flattened into one leaf FSM. Rule references are not allowed.
+   */
+  static Result<FSMWithStartEnd> BuildLeafExprFSM(const GrammarExpr& expr, const Grammar& grammar);
+  /*! \brief Build the leaf FSM of a regex, preserving compact large-repeat handling. */
+  static Result<FSMWithStartEnd> RegexLeafFSM(const std::string& pattern);
+  /*! \brief Inline the rule references of the per-rule FSMs into one leaf FSM. */
+  static Result<FSMWithStartEnd> FlattenRuleFSMs(const Grammar& grammar, int32_t root_rule_id);
+  /*! \brief The DFA accepting every valid UTF-8 string (RFC 3629: no surrogates, no overlong
+   * encodings, at most U+10FFFF), including the empty string. */
+  static const FSMWithStartEnd& ValidUTF8UniverseFSM();
   void BuildExpression(
       const GrammarExpr& expr,
       const Grammar& grammar,
@@ -1415,6 +1510,7 @@ class GrammarFSMBuilderImpl {
       std::vector<int32_t>* end_states
   );
   void BuildEmptyString(int start_state, std::vector<int32_t>* end_states);
+  void BuildEOS(int start_state, std::vector<int32_t>* end_states);
   void BuildByteString(const GrammarExpr& expr, int start_state, std::vector<int32_t>* end_states);
   void BuildRuleRef(const GrammarExpr& expr, int start_state, std::vector<int32_t>* end_states);
   void BuildCharacterClass(
@@ -1438,6 +1534,18 @@ class GrammarFSMBuilderImpl {
   void BuildSubstring(
       const std::vector<std::string>& chunks, int start_state, std::vector<int32_t>* end_states
   );
+  void BuildIntersect(
+      const GrammarExpr& expr,
+      const Grammar& grammar,
+      int start_state,
+      std::vector<int32_t>* end_states
+  );
+  void BuildComplement(
+      const GrammarExpr& expr,
+      const Grammar& grammar,
+      int start_state,
+      std::vector<int32_t>* end_states
+  );
   void BuildTagDispatch(
       const Grammar::Impl::TagDispatch& tag_dispatch,
       int start_state,
@@ -1460,6 +1568,12 @@ class GrammarFSMBuilderImpl {
       int start_state,
       std::vector<int32_t>* end_states
   );
+  bool BuildByteStringChoices(
+      const GrammarExpr& expr,
+      const Grammar& grammar,
+      int start_state,
+      std::vector<int32_t>* end_states
+  );
   bool BuildByteStringRuleRefChoices(
       const GrammarExpr& expr,
       const Grammar& grammar,
@@ -1472,6 +1586,11 @@ class GrammarFSMBuilderImpl {
   void AppendCachedFSM(
       const FSMWithStartEnd& fsm, int start_state, std::vector<int32_t>* end_states
   );
+  void AddEpsilonEdge(int from, int to) {
+    has_epsilon_edges_ = true;
+    can_skip_epsilon_simplification_ = false;
+    target_fsm_.AddEpsilonEdge(from, to);
+  }
   void AddCharacterRange(int from, int to, uint32_t min, uint32_t max);
 
   FSM& target_fsm_;
@@ -1480,6 +1599,8 @@ class GrammarFSMBuilderImpl {
   GrammarBuilder* grammar_builder_ = nullptr;
   // If not null, regex FSMs are looked up in and stored into this cache; see Apply().
   RegexFSMCache* regex_fsm_cache_ = nullptr;
+  bool has_epsilon_edges_{false};
+  bool can_skip_epsilon_simplification_{false};
   bool skip_equivalent_state_merge_{false};
 };
 
@@ -1598,8 +1719,33 @@ FSMWithStartEnd GrammarFSMBuilderImpl::BuildExpressionFSM(
   GrammarFSMBuilderImpl builder(result_fsm, rule_name, grammar_builder, regex_fsm_cache);
   builder.BuildExpression(expr, grammar, start_state, &end_states);
   FSMWithStartEnd result(result_fsm, start_state, std::move(end_states));
+
+  // These expression shapes construct an epsilon-free FSM directly. Running the generic
+  // normalization passes would only copy and rescan the same automaton. In particular, Lark often
+  // wraps a large literal or substring in one-element sequences, so peel those wrappers here.
+  GrammarExpr direct_expr = expr;
+  while (direct_expr.type == ExprType::kSequence && direct_expr.size() == 1) {
+    direct_expr = grammar->GetGrammarExpr(direct_expr[0]);
+  }
+  switch (direct_expr.type) {
+    case ExprType::kByteString:
+    case ExprType::kCharacterClass:
+    case ExprType::kCharacterClassStar:
+    case ExprType::kEmptyStr:
+    case ExprType::kRuleRef:
+    case ExprType::kRepeat:
+    case ExprType::kToken:
+    case ExprType::kExcludeToken:
+    case ExprType::kSubstring:
+    case ExprType::kEOS:
+      return result;
+    default:
+      break;
+  }
   if (expr.type != ExprType::kTagDispatch && expr.type != ExprType::kTokenTagDispatch) {
-    result = result.SimplifyEpsilon();
+    if (!builder.can_skip_epsilon_simplification_) {
+      result = result.SimplifyEpsilon();
+    }
     if (!builder.skip_equivalent_state_merge_) {
       result = result.MergeEquivalentStates();
     }
@@ -1677,6 +1823,8 @@ void GrammarFSMBuilderImpl::BuildExpression(
   switch (expr.type) {
     case ExprType::kEmptyStr:
       return BuildEmptyString(start_state, end_states);
+    case ExprType::kEOS:
+      return BuildEOS(start_state, end_states);
     case ExprType::kByteString:
       return BuildByteString(expr, start_state, end_states);
     case ExprType::kCharacterClass:
@@ -1705,6 +1853,10 @@ void GrammarFSMBuilderImpl::BuildExpression(
       );
     case ExprType::kSubstring:
       return BuildSubstring(grammar->GetSubstringChunks(expr), start_state, end_states);
+    case ExprType::kIntersect:
+      return BuildIntersect(expr, grammar, start_state, end_states);
+    case ExprType::kComplement:
+      return BuildComplement(expr, grammar, start_state, end_states);
     case ExprType::kTagDispatch:
       return BuildTagDispatch(grammar->GetTagDispatch(expr), start_state, end_states);
     case ExprType::kTokenTagDispatch:
@@ -1716,6 +1868,13 @@ void GrammarFSMBuilderImpl::BuildExpression(
 void GrammarFSMBuilderImpl::BuildEmptyString(int start_state, std::vector<int32_t>* end_states) {
   end_states->clear();
   end_states->push_back(start_state);
+}
+
+void GrammarFSMBuilderImpl::BuildEOS(int start_state, std::vector<int32_t>* end_states) {
+  end_states->clear();
+  int end_state = target_fsm_.AddState();
+  target_fsm_.AddEOSEdge(start_state, end_state);
+  end_states->push_back(end_state);
 }
 
 void GrammarFSMBuilderImpl::BuildByteString(
@@ -1796,7 +1955,7 @@ void GrammarFSMBuilderImpl::BuildSequence(
     int element_start = target_fsm_.AddState();
     BuildExpression(grammar->GetGrammarExpr(expr[index]), grammar, element_start, &next_end_states);
     for (int32_t previous_end_state : *end_states) {
-      target_fsm_.AddEpsilonEdge(previous_end_state, element_start);
+      AddEpsilonEdge(previous_end_state, element_start);
     }
     end_states->swap(next_end_states);
   }
@@ -1839,6 +1998,10 @@ void GrammarFSMBuilderImpl::BuildChoices(
     return;
   }
 
+  if (BuildByteStringChoices(expr, grammar, start_state, end_states)) {
+    return;
+  }
+
   if (non_empty_choice_count == 1 && !nullable) {
     for (int32_t choice_id : expr) {
       const auto& choice_expr = grammar->GetGrammarExpr(choice_id);
@@ -1862,15 +2025,75 @@ void GrammarFSMBuilderImpl::BuildChoices(
     }
     int branch_start_state = target_fsm_.AddState();
     BuildExpression(choice_expr, grammar, branch_start_state, &branch_end_states);
-    target_fsm_.AddEpsilonEdge(start_state, branch_start_state);
+    AddEpsilonEdge(start_state, branch_start_state);
     end_states->insert(end_states->end(), branch_end_states.begin(), branch_end_states.end());
   }
 
   if (nullable) {
     int nullable_branch_state = target_fsm_.AddState();
-    target_fsm_.AddEpsilonEdge(start_state, nullable_branch_state);
+    AddEpsilonEdge(start_state, nullable_branch_state);
     end_states->push_back(nullable_branch_state);
   }
+}
+
+bool GrammarFSMBuilderImpl::BuildByteStringChoices(
+    const GrammarExpr& expr,
+    const Grammar& grammar,
+    int start_state,
+    std::vector<int32_t>* end_states
+) {
+  // Validate the entire choice before mutating the target. Normalized grammar alternatives are
+  // sequences, but accepting a bare byte string as well keeps this helper useful to direct callers.
+  for (int32_t choice_id : expr) {
+    const auto choice = grammar->GetGrammarExpr(choice_id);
+    if (choice.type == ExprType::kEmptyStr || choice.type == ExprType::kByteString) {
+      continue;
+    }
+    if (choice.type != ExprType::kSequence) {
+      return false;
+    }
+    for (int32_t element_id : choice) {
+      if (grammar->GetGrammarExpr(element_id).type != ExprType::kByteString) {
+        return false;
+      }
+    }
+  }
+
+  end_states->clear();
+  auto add_end_state = [&](int32_t state) {
+    if (std::find(end_states->begin(), end_states->end(), state) == end_states->end()) {
+      end_states->push_back(state);
+    }
+  };
+  for (int32_t choice_id : expr) {
+    const auto choice = grammar->GetGrammarExpr(choice_id);
+    int32_t current_state = start_state;
+    if (choice.type == ExprType::kEmptyStr) {
+      add_end_state(current_state);
+      continue;
+    }
+    auto append_bytes = [&](const GrammarExpr& bytes) {
+      for (int32_t byte : bytes) {
+        int32_t next_state = target_fsm_.GetNextState(current_state, byte);
+        if (next_state == FSM::kNoNextState) {
+          next_state = target_fsm_.AddState();
+          target_fsm_.AddEdge(current_state, next_state, byte, byte);
+        }
+        current_state = next_state;
+      }
+    };
+    if (choice.type == ExprType::kByteString) {
+      append_bytes(choice);
+    } else {
+      for (int32_t element_id : choice) {
+        append_bytes(grammar->GetGrammarExpr(element_id));
+      }
+    }
+    add_end_state(current_state);
+  }
+  can_skip_epsilon_simplification_ = !has_epsilon_edges_;
+  skip_equivalent_state_merge_ = true;
+  return true;
 }
 
 bool GrammarFSMBuilderImpl::BuildByteStringRuleRefChoices(
@@ -1922,7 +2145,7 @@ bool GrammarFSMBuilderImpl::BuildByteStringRuleRefChoices(
 
   std::vector<int> state_mapping;
   target_fsm_.AddFSM(trie->GetFsm(), &state_mapping);
-  target_fsm_.AddEpsilonEdge(start_state, state_mapping[trie->GetStart()]);
+  AddEpsilonEdge(start_state, state_mapping[trie->GetStart()]);
 
   std::unordered_map<std::string, int32_t> suffix_start_states;
   suffix_start_states.reserve(branches.size());
@@ -1966,7 +2189,7 @@ void GrammarFSMBuilderImpl::AppendFSM(
 
   std::vector<int> state_mapping;
   target_fsm_.AddFSM(fsm.GetFsm(), &state_mapping);
-  target_fsm_.AddEpsilonEdge(start_state, state_mapping[fsm.GetStart()]);
+  AddEpsilonEdge(start_state, state_mapping[fsm.GetStart()]);
   end_states->clear();
   end_states->reserve(fsm.GetEnds().size());
   for (int end_state : fsm.GetEnds()) {
@@ -1979,7 +2202,7 @@ void GrammarFSMBuilderImpl::AppendCachedFSM(
 ) {
   std::vector<int> state_mapping;
   target_fsm_.AddFSM(fsm.GetFsm(), &state_mapping);
-  target_fsm_.AddEpsilonEdge(start_state, state_mapping[fsm.GetStart()]);
+  AddEpsilonEdge(start_state, state_mapping[fsm.GetStart()]);
   end_states->clear();
   end_states->reserve(fsm.GetEnds().size());
   for (int end_state : fsm.GetEnds()) {
@@ -2029,6 +2252,42 @@ void GrammarFSMBuilderImpl::BuildSubstring(
     const std::vector<std::string>& chunks, int start_state, std::vector<int32_t>* end_states
 ) {
   AppendFSM(SuffixAutomata::Build(chunks), start_state, end_states);
+}
+
+void GrammarFSMBuilderImpl::BuildIntersect(
+    const GrammarExpr& expr,
+    const Grammar& grammar,
+    int start_state,
+    std::vector<int32_t>* end_states
+) {
+  auto build_result = Intersect(expr, grammar);
+  if (build_result.IsErr()) {
+    auto error = std::move(build_result).UnwrapErr();
+    if (rule_name_ != nullptr) {
+      XGRAMMAR_LOG(FATAL) << "Failed to build the automaton for the intersection in rule "
+                          << *rule_name_ << ": " << error.what();
+    }
+    XGRAMMAR_LOG(FATAL) << "Failed to build the automaton for an intersection: " << error.what();
+  }
+  AppendFSM(std::move(build_result).Unwrap(), start_state, end_states);
+}
+
+void GrammarFSMBuilderImpl::BuildComplement(
+    const GrammarExpr& expr,
+    const Grammar& grammar,
+    int start_state,
+    std::vector<int32_t>* end_states
+) {
+  auto build_result = Complement(expr, grammar);
+  if (build_result.IsErr()) {
+    auto error = std::move(build_result).UnwrapErr();
+    if (rule_name_ != nullptr) {
+      XGRAMMAR_LOG(FATAL) << "Failed to build the automaton for the complement in rule "
+                          << *rule_name_ << ": " << error.what();
+    }
+    XGRAMMAR_LOG(FATAL) << "Failed to build the automaton for a complement: " << error.what();
+  }
+  AppendFSM(std::move(build_result).Unwrap(), start_state, end_states);
 }
 
 void GrammarFSMBuilderImpl::BuildTagDispatch(
@@ -2155,6 +2414,286 @@ Result<FSMWithStartEnd> GrammarFSMBuilderImpl::Regex(
   result = result.SimplifyEpsilon();
   result = result.MergeEquivalentStates();
   return ResultOk(std::move(result));
+}
+
+namespace {
+
+/*! \brief A state of the flattened FSM: a rule, a state in its FSM, and the return stack. */
+struct RuleFSMConfiguration {
+  int32_t rule_id;
+  int32_t state;
+  std::vector<std::pair<int32_t, int32_t>> returns;
+
+  bool operator==(const RuleFSMConfiguration& other) const {
+    return rule_id == other.rule_id && state == other.state && returns == other.returns;
+  }
+};
+
+struct RuleFSMConfigurationHash {
+  size_t operator()(const RuleFSMConfiguration& configuration) const {
+    size_t result = std::hash<int32_t>{}(configuration.rule_id);
+    result ^=
+        std::hash<int32_t>{}(configuration.state) + 0x9e3779b9 + (result << 6) + (result >> 2);
+    for (const auto& [rule_id, state] : configuration.returns) {
+      result ^= std::hash<int32_t>{}(rule_id) + 0x9e3779b9 + (result << 6) + (result >> 2);
+      result ^= std::hash<int32_t>{}(state) + 0x9e3779b9 + (result << 6) + (result >> 2);
+    }
+    return result;
+  }
+};
+
+}  // namespace
+
+Result<FSMWithStartEnd> GrammarFSMBuilderImpl::FlattenRuleFSMs(
+    const Grammar& grammar, int32_t root_rule_id
+) {
+  static constexpr int32_t kMaxFlattenedStates = 100000;
+  FSM result_fsm;
+  std::vector<int32_t> end_states;
+  std::vector<RuleFSMConfiguration> configurations;
+  std::unordered_map<RuleFSMConfiguration, int32_t, RuleFSMConfigurationHash> state_by_config;
+  std::queue<int32_t> queue;
+
+  auto add_configuration = [&](RuleFSMConfiguration configuration) {
+    auto [it, inserted] = state_by_config.emplace(configuration, -1);
+    if (!inserted) {
+      return it->second;
+    }
+    if (static_cast<int32_t>(configurations.size()) >= kMaxFlattenedStates) {
+      state_by_config.erase(it);
+      return FSM::kNoNextState;
+    }
+    int32_t state = result_fsm.AddState();
+    it->second = state;
+    configurations.push_back(std::move(configuration));
+    queue.push(state);
+    return state;
+  };
+
+  const auto& root_fsm = grammar->per_rule_fsms.at(root_rule_id)->GetFsm();
+  int32_t start_state = add_configuration({root_rule_id, root_fsm.GetStart(), {}});
+  XGRAMMAR_DCHECK(start_state == 0);
+
+  while (!queue.empty()) {
+    int32_t result_state = queue.front();
+    queue.pop();
+    RuleFSMConfiguration configuration = configurations[result_state];
+    const auto& rule_fsm = grammar->per_rule_fsms.at(configuration.rule_id)->GetFsm();
+
+    if (rule_fsm.IsEndState(configuration.state)) {
+      if (configuration.returns.empty()) {
+        end_states.push_back(result_state);
+      } else {
+        auto return_configuration = configuration;
+        auto [return_rule_id, return_state] = return_configuration.returns.back();
+        return_configuration.returns.pop_back();
+        return_configuration.rule_id = return_rule_id;
+        return_configuration.state = return_state;
+        int32_t target = add_configuration(std::move(return_configuration));
+        if (target == FSM::kNoNextState) {
+          return ResultErr(
+              "The number of states needed to flatten a regular expression exceeds the limit "
+              "of " +
+              std::to_string(kMaxFlattenedStates)
+          );
+        }
+        result_fsm.AddEpsilonEdge(result_state, target);
+      }
+    }
+
+    for (const auto& edge : rule_fsm.GetFsm().GetEdges(configuration.state)) {
+      RuleFSMConfiguration next = configuration;
+      if (edge.IsRuleRef()) {
+        int32_t referenced_rule_id = edge.GetRefRuleId();
+        if (referenced_rule_id < 0 || referenced_rule_id >= grammar->NumRules() ||
+            !grammar->per_rule_fsms.at(referenced_rule_id).has_value()) {
+          return ResultErr("invalid rule reference while flattening a regular expression");
+        }
+        bool is_tail_call =
+            rule_fsm.IsEndState(edge.target) && rule_fsm.GetFsm().GetEdges(edge.target).size() == 0;
+        if (!is_tail_call) {
+          next.returns.push_back({configuration.rule_id, edge.target});
+        }
+        next.rule_id = referenced_rule_id;
+        next.state = grammar->per_rule_fsms.at(referenced_rule_id)->GetFsm().GetStart();
+      } else if (edge.IsEpsilon()) {
+        next.state = edge.target;
+      } else if (edge.IsCharRange()) {
+        next.state = edge.target;
+      } else {
+        return ResultErr("unsupported transition while flattening a regular expression");
+      }
+
+      int32_t target = add_configuration(std::move(next));
+      if (target == FSM::kNoNextState) {
+        return ResultErr(
+            "The number of states needed to flatten a regular expression exceeds the limit of " +
+            std::to_string(kMaxFlattenedStates)
+        );
+      }
+      if (edge.IsCharRange()) {
+        result_fsm.AddEdge(result_state, target, edge.min, edge.max);
+      } else {
+        result_fsm.AddEpsilonEdge(result_state, target);
+      }
+    }
+  }
+
+  FSMWithStartEnd result(result_fsm, start_state, std::move(end_states));
+  return ResultOk(result.SimplifyEpsilon().MergeEquivalentStates());
+}
+
+Result<FSMWithStartEnd> GrammarFSMBuilderImpl::RegexLeafFSM(const std::string& pattern) {
+  auto can_defer_result =
+      RegexFSMBuilder::CanDeferLargeRepeat(pattern, /*json_string=*/false, /*byte_mode=*/false);
+  if (can_defer_result.IsErr()) {
+    return ResultErr(std::move(can_defer_result).UnwrapErr());
+  }
+  if (!std::move(can_defer_result).Unwrap()) {
+    // The direct builder understands scoped flags and Unicode character classes. The legacy
+    // regex-to-grammar converter does not, so use it only when a large repetition needs the
+    // converter's compact rule representation.
+    return Regex(pattern);
+  }
+  try {
+    Grammar grammar = Grammar::FromRegex(pattern);
+    grammar = RepetitionRangeExpander::Apply(grammar);
+    GrammarFSMBuilder::Apply(&grammar);
+    return FlattenRuleFSMs(grammar, grammar->GetRootRuleId());
+  } catch (const std::exception& error) {
+    return ResultErr(error.what());
+  }
+}
+
+Result<FSMWithStartEnd> GrammarFSMBuilderImpl::BuildLeafExprFSM(
+    const GrammarExpr& expr, const Grammar& grammar
+) {
+  switch (expr.type) {
+    case ExprType::kRegex:
+      // JSON-string and explicit byte-mode regexes keep the direct byte-level build.
+      if (grammar->GetRegexIsJSONString(expr) || grammar->GetRegexIsByteMode(expr)) {
+        return Regex(
+            grammar->GetRegexString(expr),
+            grammar->GetRegexIsJSONString(expr),
+            grammar->GetRegexIsByteMode(expr)
+        );
+      }
+      return RegexLeafFSM(grammar->GetRegexString(expr));
+    case ExprType::kSubstring:
+      return ResultOk(SuffixAutomata::Build(grammar->GetSubstringChunks(expr)));
+    case ExprType::kIntersect:
+      return Intersect(expr, grammar);
+    case ExprType::kComplement:
+      return Complement(expr, grammar);
+    case ExprType::kSequence: {
+      if (expr.size() == 0) {
+        return ResultOk(BuildExpressionFSM(expr, grammar));
+      }
+      std::vector<FSMWithStartEnd> elements;
+      elements.reserve(expr.size());
+      for (int32_t element_id : expr) {
+        auto element_result = BuildLeafExprFSM(grammar->GetGrammarExpr(element_id), grammar);
+        if (element_result.IsErr()) {
+          return element_result;
+        }
+        elements.push_back(std::move(element_result).Unwrap());
+      }
+      return ResultOk(FSMWithStartEnd::Concat(elements));
+    }
+    case ExprType::kChoices: {
+      std::vector<FSMWithStartEnd> choices;
+      choices.reserve(expr.size());
+      for (int32_t choice_id : expr) {
+        auto choice_result = BuildLeafExprFSM(grammar->GetGrammarExpr(choice_id), grammar);
+        if (choice_result.IsErr()) {
+          return choice_result;
+        }
+        choices.push_back(std::move(choice_result).Unwrap());
+      }
+      return ResultOk(FSMWithStartEnd::Union(choices));
+    }
+    case ExprType::kEmptyStr:
+    case ExprType::kByteString:
+    case ExprType::kCharacterClass:
+    case ExprType::kCharacterClassStar:
+      return ResultOk(BuildExpressionFSM(expr, grammar));
+    default:
+      return ResultErr(
+          "intersection and complement operands must not contain rule references or repetition "
+          "ranges"
+      );
+  }
+}
+
+Result<FSMWithStartEnd> GrammarFSMBuilderImpl::Intersect(
+    const GrammarExpr& expr, const Grammar& grammar
+) {
+  XGRAMMAR_DCHECK(expr.type == ExprType::kIntersect && expr.size() >= 2);
+  auto result = BuildLeafExprFSM(grammar->GetGrammarExpr(expr[0]), grammar);
+  if (result.IsErr()) {
+    return result;
+  }
+  for (int32_t index = 1; index < expr.size(); ++index) {
+    auto operand_result = BuildLeafExprFSM(grammar->GetGrammarExpr(expr[index]), grammar);
+    if (operand_result.IsErr()) {
+      return operand_result;
+    }
+    result =
+        FSMWithStartEnd::Intersect(std::move(result).Unwrap(), std::move(operand_result).Unwrap());
+    if (result.IsErr()) {
+      return result;
+    }
+  }
+  return result;
+}
+
+const FSMWithStartEnd& GrammarFSMBuilderImpl::ValidUTF8UniverseFSM() {
+  static const FSMWithStartEnd universe = [] {
+    FSM fsm;
+    int start = fsm.AddState();                // accepting; also after a complete codepoint
+    int last_continuation = fsm.AddState();    // 1 continuation byte remaining
+    int second_continuation = fsm.AddState();  // 2 continuation bytes remaining
+    int third_continuation = fsm.AddState();   // 3 continuation bytes remaining
+    int after_e0 = fsm.AddState();             // excludes overlong 3-byte encodings
+    int after_ed = fsm.AddState();             // excludes surrogates U+D800..U+DFFF
+    int after_f0 = fsm.AddState();             // excludes overlong 4-byte encodings
+    int after_f4 = fsm.AddState();             // excludes codepoints above U+10FFFF
+    fsm.AddEdge(start, start, 0x00, 0x7F);
+    fsm.AddEdge(start, last_continuation, 0xC2, 0xDF);
+    fsm.AddEdge(start, after_e0, 0xE0, 0xE0);
+    fsm.AddEdge(start, second_continuation, 0xE1, 0xEC);
+    fsm.AddEdge(start, after_ed, 0xED, 0xED);
+    fsm.AddEdge(start, second_continuation, 0xEE, 0xEF);
+    fsm.AddEdge(start, after_f0, 0xF0, 0xF0);
+    fsm.AddEdge(start, third_continuation, 0xF1, 0xF3);
+    fsm.AddEdge(start, after_f4, 0xF4, 0xF4);
+    fsm.AddEdge(last_continuation, start, 0x80, 0xBF);
+    fsm.AddEdge(second_continuation, last_continuation, 0x80, 0xBF);
+    fsm.AddEdge(third_continuation, second_continuation, 0x80, 0xBF);
+    fsm.AddEdge(after_e0, last_continuation, 0xA0, 0xBF);
+    fsm.AddEdge(after_ed, last_continuation, 0x80, 0x9F);
+    fsm.AddEdge(after_f0, second_continuation, 0x90, 0xBF);
+    fsm.AddEdge(after_f4, second_continuation, 0x80, 0x8F);
+    return FSMWithStartEnd(fsm, start, std::vector<int32_t>{start});
+  }();
+  return universe;
+}
+
+Result<FSMWithStartEnd> GrammarFSMBuilderImpl::Complement(
+    const GrammarExpr& expr, const Grammar& grammar
+) {
+  XGRAMMAR_DCHECK(expr.type == ExprType::kComplement && expr.size() == 1);
+  auto operand_result = BuildLeafExprFSM(grammar->GetGrammarExpr(expr[0]), grammar);
+  if (operand_result.IsErr()) {
+    return operand_result;
+  }
+  auto not_result = std::move(operand_result).Unwrap().Not();
+  if (not_result.IsErr()) {
+    return not_result;
+  }
+  // The byte-level complement accepts arbitrary byte sequences, including invalid UTF-8;
+  // restrict it so the complement is taken with respect to all valid UTF-8 strings.
+  return FSMWithStartEnd::Intersect(std::move(not_result).Unwrap(), ValidUTF8UniverseFSM());
 }
 
 class RepetitionRangeExpanderImpl : public GrammarMutator {
@@ -2485,8 +3024,7 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
 
  private:
   int32_t BuildFlattenedLazyBody(int32_t body_expr_id) {
-    auto body_type = base_grammar_->GetGrammarExpr(body_expr_id).type;
-    if (body_type == GrammarExprType::kRegex || body_type == GrammarExprType::kSubstring) {
+    if (Grammar::Impl::IsRegexExpressionType(base_grammar_->GetGrammarExpr(body_expr_id).type)) {
       return VisitExpr(body_expr_id);
     }
     // Unwrap chains of single rule references (r ::= (x), x ::= (y), ...) produced by regex
@@ -2553,6 +3091,11 @@ class LazyBodyFlattenerImpl : public GrammarMutator {
           element.type == GrammarExprType::kCharacterClass ||
           element.type == GrammarExprType::kCharacterClassStar) {
         elements->push_back(builder_->AddGrammarExpr(element));
+        continue;
+      }
+      if (Grammar::Impl::IsRegexExpressionType(element.type)) {
+        // Regexes and intersections compile into leaf FSMs, so they are terminal-like.
+        elements->push_back(VisitExpr(element_id));
         continue;
       }
       if (element.type != GrammarExprType::kRuleRef) {
@@ -2982,6 +3525,12 @@ class GrammarOptimizerImpl {
       bool expand_repetition_ranges,
       RegexFSMCache* supplied_regex_fsm_cache = nullptr
   ) {
+    // A freshly converted JSON Schema may already have built regex FSMs for validation. Keep the
+    // shared owner alive throughout optimization and reuse those FSMs during per-rule compilation.
+    std::shared_ptr<RegexFSMCache> retained_regex_fsm_cache = grammar->regex_fsm_cache;
+    if (supplied_regex_fsm_cache == nullptr && retained_regex_fsm_cache != nullptr) {
+      supplied_regex_fsm_cache = retained_regex_fsm_cache.get();
+    }
     // ByteStringFuser and RuleInliner rewrite the grammar in place, so work on a private copy: the
     // input grammar may be shared (e.g. a cached grammar) and must not be mutated. Copy the impl
     // directly (contiguous vector copies) instead of going through GrammarBuilder, which would
@@ -3019,8 +3568,7 @@ class GrammarOptimizerImpl {
         continue;
       }
       const auto& body = grammar->GetGrammarExpr(rule.body_expr_id);
-      if (body.type == Grammar::Impl::GrammarExprType::kRegex ||
-          body.type == Grammar::Impl::GrammarExprType::kSubstring) {
+      if (Grammar::Impl::IsRegexExpressionType(body.type)) {
         continue;
       }
       XGRAMMAR_CHECK(body.type == Grammar::Impl::GrammarExprType::kChoices)
@@ -3035,7 +3583,8 @@ class GrammarOptimizerImpl {
           XGRAMMAR_CHECK(
               element.type == Grammar::Impl::GrammarExprType::kByteString ||
               element.type == Grammar::Impl::GrammarExprType::kCharacterClass ||
-              element.type == Grammar::Impl::GrammarExprType::kCharacterClassStar
+              element.type == Grammar::Impl::GrammarExprType::kCharacterClassStar ||
+              Grammar::Impl::IsRegexExpressionType(element.type)
           ) << "lazy rule '"
             << rule.name
             << "' must have a terminal-like body (strings, character classes, and regexes that "
@@ -3697,6 +4246,9 @@ std::optional<uint64_t> GrammarFSMHasherImpl::HashSequence(
         }
         break;
       }
+      case (GrammarExprType::kEOS): {
+        break;
+      }
       case (GrammarExprType::kRuleRef): {
         if (grammar->per_rule_fsm_hashes[expr[0]].has_value()) {
           hash_result = HashCombine(hash_result, grammar->per_rule_fsm_hashes[expr[0]].value());
@@ -3716,7 +4268,11 @@ std::optional<uint64_t> GrammarFSMHasherImpl::HashSequence(
         break;
       }
       case (GrammarExprType::kSequence):
-      case (GrammarExprType::kChoices): {
+      case (GrammarExprType::kChoices):
+      // The operands of an intersection or complement are exprs referred by position-dependent
+      // ids, so the content cannot be hashed portably here; fall back to no hash.
+      case (GrammarExprType::kIntersect):
+      case (GrammarExprType::kComplement): {
         return std::nullopt;
       }
       case (GrammarExprType::kTagDispatch):
@@ -4021,6 +4577,18 @@ Result<FSMWithStartEnd> GrammarFSMBuilder::Regex(
     const std::string& regex, bool json_string, bool byte_mode
 ) {
   return GrammarFSMBuilderImpl::Regex(regex, json_string, byte_mode);
+}
+
+Result<FSMWithStartEnd> GrammarFSMBuilder::Intersect(
+    const GrammarExpr& expr, const Grammar& grammar
+) {
+  return GrammarFSMBuilderImpl::Intersect(expr, grammar);
+}
+
+Result<FSMWithStartEnd> GrammarFSMBuilder::Complement(
+    const GrammarExpr& expr, const Grammar& grammar
+) {
+  return GrammarFSMBuilderImpl::Complement(expr, grammar);
 }
 
 const std::bitset<256>& GrammarFSMBuilder::JSONStringForbiddenChars() {

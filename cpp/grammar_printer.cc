@@ -15,11 +15,13 @@
 
 namespace xgrammar {
 
-std::string GrammarPrinter::PrintRule(const Rule& rule, const SuffixStopInfo* suffix_stop_info) {
+std::string GrammarPrinter::PrintRule(
+    const Rule& rule, const SuffixStopInfo* suffix_stop_info, bool no_forcing
+) {
   std::string res = rule.name;
   // Print the attributes as one comma-separated bracket group, re-parseable by the EBNF lexer.
   if (rule.max_tokens >= 0 || rule.max_chars >= 0 || !rule.capture_name.empty() ||
-      suffix_stop_info != nullptr || rule.is_lazy || rule.temperature.has_value()) {
+      suffix_stop_info != nullptr || rule.is_lazy || no_forcing || rule.temperature.has_value()) {
     std::string attributes;
     auto append_attribute = [&](const std::string& attribute) {
       if (!attributes.empty()) {
@@ -35,6 +37,9 @@ std::string GrammarPrinter::PrintRule(const Rule& rule, const SuffixStopInfo* su
     }
     if (!rule.capture_name.empty()) {
       append_attribute("capture=\"" + rule.capture_name + "\"");
+    }
+    if (no_forcing) {
+      append_attribute("no_forcing");
     }
     if (suffix_stop_info != nullptr && suffix_stop_info->hidden_suffix_bytes > 0) {
       append_attribute(
@@ -76,7 +81,11 @@ std::string GrammarPrinter::PrintRule(const Rule& rule, const SuffixStopInfo* su
 }
 
 std::string GrammarPrinter::PrintRule(int32_t rule_id) {
-  return PrintRule(grammar_->GetRule(rule_id), grammar_->GetSuffixStopInfo(rule_id));
+  return PrintRule(
+      grammar_->GetRule(rule_id),
+      grammar_->GetSuffixStopInfo(rule_id),
+      rule_id == grammar_->GetRootRuleId() && grammar_->IsForcingDisabled()
+  );
 }
 
 std::string GrammarPrinter::PrintGrammarExpr(const GrammarExpr& grammar_expr) {
@@ -110,6 +119,12 @@ std::string GrammarPrinter::PrintGrammarExpr(const GrammarExpr& grammar_expr) {
       return PrintRegex(grammar_expr);
     case GrammarExprType::kSubstring:
       return PrintSubstring(grammar_expr);
+    case GrammarExprType::kIntersect:
+      return PrintIntersect(grammar_expr);
+    case GrammarExprType::kComplement:
+      return PrintComplement(grammar_expr);
+    case GrammarExprType::kEOS:
+      return PrintEOS(grammar_expr);
     default:
       XGRAMMAR_LOG(FATAL) << "Unexpected GrammarExpr type: " << static_cast<int>(grammar_expr.type);
       XGRAMMAR_UNREACHABLE();
@@ -155,6 +170,8 @@ std::string GrammarPrinter::PrintCharacterClassStar(const GrammarExpr& grammar_e
 }
 
 std::string GrammarPrinter::PrintEmptyStr(const GrammarExpr& grammar_expr) { return "\"\""; }
+
+std::string GrammarPrinter::PrintEOS(const GrammarExpr& grammar_expr) { return "EOS()"; }
 
 std::string GrammarPrinter::PrintRuleRef(const GrammarExpr& grammar_expr) {
   return grammar_->GetRule(grammar_expr[0]).name;
@@ -256,6 +273,22 @@ std::string GrammarPrinter::PrintSubstring(const GrammarExpr& grammar_expr) {
     result += escape_chunk(chunks[i]);
   }
   return result + ")";
+}
+
+std::string GrammarPrinter::PrintIntersect(const GrammarExpr& grammar_expr) {
+  std::string result = "(";
+  for (int i = 0; i < grammar_expr.data_len; ++i) {
+    result += PrintGrammarExpr(grammar_expr[i]);
+    if (i + 1 != grammar_expr.data_len) {
+      result += " & ";
+    }
+  }
+  result += ")";
+  return result;
+}
+
+std::string GrammarPrinter::PrintComplement(const GrammarExpr& grammar_expr) {
+  return "~(" + PrintGrammarExpr(grammar_expr[0]) + ")";
 }
 
 std::string GrammarPrinter::PrintString(const std::string& str) {

@@ -155,6 +155,32 @@ Referencing an undefined rule is an error.
 | Group       | `("a" \| "b") "c"` | Group a sub-expression; may carry repetition.    |
 | Empty group | `( )`              | Matches the empty string.                        |
 
+### Intersections and Complements
+
+The `&` operator intersects two expressions: the result accepts only strings accepted by both
+operands. The prefix `~` operator complements one element: it accepts every valid Unicode string
+that the element rejects, including the empty string when the element does not match it.
+
+`&` binds more tightly than `|` and looser than a sequence, so `a b & c | d` means
+`((a b) & c) | d`. A repetition operator after `~x` applies to the complemented element:
+`~x{2}` matches two consecutive strings that each are not `x`.
+
+Both operators compile into a single finite-state automaton, so their operands must stay
+regular: they may contain string literals, character classes, sequences, alternatives, groups,
+character-class stars (`[...]*`), and nested `&` and `~`, but no rule references and no other
+repetition operators (write `[a-z] [a-z]*` instead of `[a-z]+` inside an operand). Combining
+them expresses set difference: `A & ~B` matches the strings in `A` but not in `B`.
+
+```text
+root       ::= identifier
+identifier ::= [a-z] [a-z]* & ~("let" | "if")
+```
+
+Intersection and complement can be more expensive to compile than a plain expression because
+the compiler builds the product of the operands' automata, and complement construction
+determinizes the operand's automaton. Compilation fails instead of growing without bound if the
+built-in automaton state limit is exceeded.
+
 ## Repetition
 
 A repetition operator follows an element — a string literal, a character class, a rule reference,
@@ -188,6 +214,25 @@ value[max_tokens=32, max_chars=128, capture="answer", lazy, temperature=0.7] ::=
 
 Each option may appear at most once. Options without a value, such as `capture` and `lazy`, are
 written as bare names; the other options use `name=value`.
+
+### Jump-Forward Control
+
+`no_forcing` is a grammar-wide option written as a bare rule option:
+
+```text
+root[no_forcing] ::= "answer:" value
+value ::= [a-z]+
+```
+
+It makes
+[`GrammarMatcher.find_jump_forward_string`](xgrammar.GrammarMatcher.find_jump_forward_string)
+return an empty string while leaving token masks, accepted strings and tokens, captures, rollback,
+and reset behavior unchanged. Placing it on any rule enables it for the whole grammar.
+
+When `str(grammar)` prints a grammar with this option enabled, it writes `no_forcing` on the
+selected root rule. Parsing the printed EBNF restores the option, including after grammar
+serialization, optimization, nesting, union, or concatenation. Grammars without the option keep
+the existing EBNF output unchanged.
 
 ### Token Budgets
 
@@ -408,8 +453,8 @@ This grammar accepts `ID-12345`.
 - `byte_mode` is an optional named argument. It must be a boolean and defaults to `false`.
   It cannot be enabled together with `json_string`.
 - `flags` is an optional named argument. It must be a string of regular-expression flags, with
-  the same meaning as the flags of a Lark regex literal: `i` makes the match ASCII
-  case-insensitive, `s` makes `.` match newlines, and `u` is accepted as a no-op (patterns
+  the same meaning as the flags of a Lark regex literal: `i` enables Unicode simple case folding,
+  `s` makes `.` match newlines, and `u` is accepted as a no-op (patterns
   use Unicode codepoint semantics unless `byte_mode` is enabled). Other flags raise an error. When
   `flags` is given,
   `.` follows the standard semantics and does not match `\n` unless `s` is present; without the
@@ -425,8 +470,8 @@ surrounding EBNF string literal, so the regular expression `\d+\.\d+` is written
 root ::= Regex("hello, world.", flags="is")
 ```
 
-This grammar matches `hello, world` in any ASCII case, followed by any character including a
-newline.
+This grammar matches `hello, world` under Unicode simple case folding, followed by any character
+including a newline.
 
 When `json_string=true`, the regular expression is intended to match the body of a JSON string.
 Control characters, `"` and `\` are then excluded from every character match, preventing the
@@ -444,10 +489,34 @@ denotes one byte, `.` consumes one byte, and a negated character class is comple
 raw_bytes ::= Regex("[\\x80-\\xFF]+", byte_mode=true)
 ```
 
-The `i`, `s`, and `u` flags remain accepted in byte mode. ASCII case folding is used for `i`, `s`
-controls whether dot accepts newline, and `u` is a compatibility no-op. Unicode escapes and
-properties, non-ASCII literals inside character classes, word boundaries, lookarounds, and
-backreferences are rejected in byte mode.
+The `i`, `s`, and `u` macro flags remain accepted in byte mode. ASCII case folding is used for `i`,
+`s` controls whether dot accepts newline, and the macro-level `u` flag is a compatibility no-op.
+Outside an inline Unicode scope, Unicode escapes and properties, non-ASCII literals inside
+character classes, word boundaries, lookarounds, and backreferences are rejected. An inline
+`(?u:...)` scope can switch part of a byte pattern back to Unicode.
+
+In Unicode mode, `\d`, `\w`, and `\s` use the same Unicode 16.0.0 classes as llguidance's
+`regex-syntax` 0.8.5 dependency; their uppercase forms are Unicode-domain complements. Inline
+`i`, `s`, `m`, `u`, `R`, `U`, and `x` flags and scoped disabling forms are accepted inside
+`pattern`. Rust codepoint escapes, nested character classes, ASCII named classes, and the class set
+operators `&&`, `--`, and `~~` are supported. Unicode property escapes (`\p` and `\P`) are not
+supported; use `\d`, `\w`, `\s`, explicit ranges, or set operations instead. Multiline line
+anchors, word boundaries, lookarounds, and backreferences remain unsupported.
+
+### `EOS`
+
+`EOS()` matches an active matcher stop token as a zero-byte grammar event:
+
+```text
+root ::= body ("" | EOS()) "suffix"
+body ::= [a-z]+
+```
+
+It takes no arguments. Unlike ordinary root termination, an `EOS()` inside a grammar can consume
+the stop token, leave the matcher active, and continue into the enclosing expression (for example,
+to require `"suffix"`). It honors `GrammarMatcher.override_stop_tokens` and is preserved by EBNF
+printing and JSON serialization. The Lark frontend emits this macro for `stop=""`; hand-written
+EBNF normally needs it only when reproducing that behavior.
 
 ### `Substring`
 

@@ -118,13 +118,17 @@ strings the grammar accepts.
 
 ### String Literals
 
-String literals use double quotes and JSON escape syntax: `\"`, `\\`, `\/`, `\b`, `\f`, `\n`,
-`\r`, `\t`, and `\uXXXX`. Non-ASCII characters may be written directly (`"中文"`, `"😀"`) or with
-Unicode escapes (`"\u03bb"` matches `λ`).
+String literals use double quotes. They accept JSON escape syntax (`\"`, `\\`, `\/`, `\b`, `\f`,
+`\n`, `\r`, `\t`, and `\uXXXX`) and the Lark/Python hexadecimal form `\xHH`. Non-ASCII characters
+may be written directly (`"中文"`, `"😀"`) or with Unicode escapes (`"\u03bb"` matches `λ`). A
+hexadecimal escape denotes the corresponding Unicode codepoint, so `"\x41"` matches `A` and
+`"\xFF"` matches `ÿ`.
 
 A trailing `i` makes the literal case-insensitive: `"yes"i` matches `yes`, `YES`, `Yes`, and so
-on. Case-insensitive literals currently support ASCII characters only; a case-insensitive literal
-containing non-ASCII characters is rejected.
+on. Folding uses Unicode simple case-fold equivalence classes, so `"Σk"i` also matches `σK`,
+`ςk`, and `ΣK`. Simple folding maps one codepoint to one codepoint; it does not expand `ß` into
+the two-character string `ss`. When `%grammar_options {"allow_invalid_utf8": true}` enables byte
+mode, case-insensitive literals are restricted to ASCII.
 
 ### Character Ranges
 
@@ -136,30 +140,101 @@ exactly one character and may be any Unicode character: `"α".."γ"` matches `α
 
 `/pattern/` matches text against a regular expression. The pattern is compiled through XGrammar's
 regex converter (the same engine as [`xgr.Grammar.from_regex`](xgrammar.Grammar.from_regex)) and
-supports character classes, alternation, groups, repetition (`*`, `+`, `?`, `{m,n}`), and the
-usual escapes. A `/` inside the pattern is written `\/`.
+implements the regular-expression language used by llguidance 1.8.0's `regex-syntax` 0.8.5
+dependency. It supports character classes, alternation, groups, repetition (`*`, `+`, `?`,
+`{m,n}`), character-class set operations, and Rust-style escapes. A `/` inside the pattern is
+written `\/`.
 
 `.` matches one Unicode character. By default it does not match newline. Regular expressions
 support the following trailing flags, in any order:
 
-- `i`: make the match ASCII case-insensitive. ASCII letters in literals and character classes
-  match both cases; non-ASCII characters match literally.
+- `i`: use Unicode simple case folding for literals, escapes, and character classes.
 - `s`: make `.` match newline as well.
-- `u`: explicitly select Unicode semantics. This is a no-op because XGrammar regular expressions
-  already use Unicode codepoints.
+- `m`: select multiline mode. It has no effect in a pattern without line anchors; patterns that
+  combine `m` with `^` or `$` are rejected because llguidance 1.8.0 rejects them too.
+- `x`: ignore unescaped Unicode whitespace and `#` comments, including inside character classes.
+- `u`: explicitly select Unicode semantics. This is a no-op normally, but switches the whole
+  literal back to Unicode when `allow_invalid_utf8` has selected byte mode.
 
-The `i` flag is supported in ordinary rules, terminals, and `lazy` rules, but not on a regular
-expression used with a `suffix` or `stop` attribute. The `l`, `m`, and `x` flags are not supported.
+The `i`, `s`, `m`, `u`, and `x` flags may also be enabled within a pattern, either for the rest of
+the enclosing group (`(?i)`) or for one group (`(?i:...)`). Scoped forms may disable flags, as in
+`(?-i:...)` and `(?-u:...)`. The inline-only `R` flag makes a non-dotall `.` exclude both carriage
+return and line feed; `U` swaps greedy and non-greedy preference, which does not change the
+accepted language. Trailing `R` and `U` are not part of llguidance's Lark literal syntax. Flag
+state is preserved when a large bounded repetition is lowered to a helper rule. The locale flag
+`l` is not supported.
 
-Word boundaries (`\b`, `\B`), Unicode property escapes (`\p{…}`), backreferences, and lookaround
-assertions are not supported. Large bounded repetitions such as `{0,10000}` are compiled through
-the grammar-level repetition mechanism and do not expand the automaton.
+In Unicode mode, `\d` uses the Unicode `Decimal_Number` category, `\w` uses the Unicode Perl-word
+class, and `\s` uses the Unicode `White_Space` property. Their uppercase forms are complements
+within the valid Unicode scalar range. Byte mode deliberately keeps the ASCII definitions.
+
+Unicode property escapes (`\p` and `\P`) are not supported. Use the built-in Unicode shorthand
+classes `\d`, `\w`, and `\s`, explicit character ranges, or character-class set operations
+instead. Rejecting arbitrary properties avoids bundling the full Unicode property database.
+
+Character classes support nested classes; ASCII named classes such as `[[:alpha:]]`; and `&&`
+(intersection), `--` (difference), and `~~` (symmetric difference). The three set operators have
+equal precedence and associate from left to right. Case folding is applied to each operand before
+set operations and complement.
+
+The escapes `\A` and `\z` anchor the entire text, and `^` and `$` are accepted at branch
+boundaries. Rust codepoint spellings such as `\x{41}`, `\u0041`, `\U0001F600`, and `\U{1F600}`
+are supported. Named capturing groups accept Rust's Unicode names and compile as ordinary groups;
+XGrammar does not expose their captured substrings. Word boundaries (`\b`, `\B`), backreferences,
+and lookaround assertions are rejected. Large bounded repetitions such as `{0,10000}` are
+compiled through the grammar-level repetition mechanism and do not expand the automaton.
 
 ```text
 start: /a.b/      // accepts "acb", "a😀b"; rejects "a\nb"
 line: /a.b/s      // also accepts "a\nb"
-word: /Σk+/i      // accepts "Σk", "ΣKK"; only ASCII letters fold, "Σ" matches literally
+word: /Σk+/i      // accepts "Σk", "σKK", and "ςK"
+consonants: /[a-z&&[^aeiou]]+/
+ascii_word: /(?-u:\w)+/
+compact: /(?x: a b \# c # comment
+                 d )/      // accepts "ab#cd"
 ```
+
+### Terminal Intersections
+
+The `&` operator intersects two terminal expressions: the result accepts only strings accepted by
+both operands. Every operand must have a regular language that can be represented by a
+finite-state automaton: it may contain regexes, strings, character ranges, groups, repetitions,
+and uppercase terminal references, but no lowercase rule references. Intersections can be used in
+uppercase terminal definitions and directly in lowercase rules, where they behave like terminals.
+
+`&` binds more tightly than `|`, so `A & B | C` means `(A & B) | C`. Use parentheses when an
+alternative should be one operand of an intersection.
+
+```text
+start: IDENTIFIER
+
+IDENTIFIER: ASCII_NAME & NO_LEADING_DIGIT
+ASCII_NAME: /[A-Za-z0-9_]+/
+NO_LEADING_DIGIT: /[A-Za-z_][A-Za-z0-9_]*/
+```
+
+Intersection can be more expensive to compile than an equivalent plain regular expression because
+the compiler constructs the product of the operands' automata. Compilation fails instead of
+growing without bound if the built-in automaton state limit is exceeded.
+
+### Regular-Expression Complements
+
+Prefix `~` complements one terminal expression: it accepts every valid Unicode string that the
+operand rejects, including the empty string when the operand does not match it. The operand
+follows the same rules as an intersection operand. Complements can be used in uppercase terminal
+definitions and directly in lowercase rules, and can be combined with `&` (for example
+`A & ~B` matches the strings in `A` but not in `B`).
+
+```text
+start: WITHOUT_CONTROL
+
+WITHOUT_CONTROL: ~/.*[\x00-\x1F].*/s
+```
+
+Complement construction determinizes the operand's automaton, which can be expensive; compilation
+fails instead of growing without bound if the built-in automaton state limit is exceeded.
+Lowercase rule references, special tokens, and subgrammars cannot be complemented because they
+are not regular terminal expressions.
 
 ### Sequences, Alternatives, and Groups
 
@@ -338,11 +413,16 @@ The `%ignore` expression may be a terminal name, a string, a regex, or a combina
 `%grammar_options` takes a JSON object that configures the whole grammar:
 
 ```text
-%grammar_options {"allow_initial_skip": true}
+%grammar_options {"allow_initial_skip": true, "no_forcing": true}
 ```
 
 `allow_initial_skip` (boolean, default `false`) allows `%ignore` content to appear before the
 first lexeme of the output.
+
+`ignore_once` (boolean, default `false`) makes the combined `%ignore` expression match at most once
+at each grammar position. By default it may match repeatedly. For example, `%ignore /[ ]{1,8}/`
+normally accepts any number of spaces between two lexemes because it can consume several groups
+of up to eight. With `ignore_once` enabled, each skipped span is limited to eight spaces.
 
 `allow_invalid_utf8` (boolean, default `false`) changes regular expressions in this grammar from
 Unicode codepoints to individual bytes. It permits standalone bytes such as `0x80`; string
@@ -354,14 +434,25 @@ start: /[\x80-\xFF]+/ | "é"
 ```
 
 In byte mode, `.` consumes exactly one byte and still excludes newline unless the `s` flag is
-present. The `i`, `s`, and `u` flags remain available; case folding is ASCII-only. `\d`, `\w`, and
-`\s` use their ASCII definitions, and uppercase forms complement within all 256 bytes. Unicode
-escapes and properties, non-ASCII characters inside classes, word boundaries, lookarounds, and
-backreferences are rejected.
+present. Outside a Unicode scope, case folding is ASCII-only; `\d`, `\w`, and `\s` use their ASCII
+definitions; and uppercase forms complement within all 256 bytes. Unicode escapes, non-ASCII
+characters inside classes, word boundaries, lookarounds, and backreferences are rejected there. A
+trailing `u` flag or inline `(?u:...)` scope switches back to Unicode, so constructs such as
+`/(?u:\w)/` use the Unicode word class inside a byte grammar. Unicode property escapes remain
+unsupported in either mode. Conversely, a Unicode grammar may use an ASCII-safe scope such as
+`(?-u:\w)`; a scope such as `(?-u:.)` is rejected because it could match bytes that are not valid
+UTF-8.
 
-The option applies only to the grammar that declares it. Nested `%lark` blocks and named grammars
-use their own options. Multiple declarations merge monotonically, so a later `false` does not
-disable an earlier `true`; unknown option names are rejected.
+`no_forcing` (boolean, default `false`) makes
+[`GrammarMatcher.find_jump_forward_string`](xgrammar.GrammarMatcher.find_jump_forward_string)
+return an empty string. It leaves token masks, accepted strings and tokens, captures, rollback, and
+reset behavior unchanged; only the optional jump-forward output is disabled.
+
+`allow_invalid_utf8` and `ignore_once` apply only to the grammar that declares them. Nested `%lark`
+blocks and named grammars use their own values. An enabled `no_forcing` option in a nested or named
+grammar also disables jump-forward output for the containing matcher. Multiple declarations merge
+monotonically, so a later `false` does not disable an earlier `true`; unknown option names and
+non-boolean values are rejected.
 
 ### `%json`
 
@@ -444,15 +535,29 @@ start: %regex {"substring_chars": "abc"}
 ```
 
 It therefore accepts every codepoint-aligned substring such as `"a"`, `"bc"`, and `"abc"`.
-`substring_chunks` and `substring_chars` are supported in rules and terminal definitions.
-`substring_words`, which requires Unicode word-class segmentation, is not yet supported.
+
+`substring_words` first splits a fixed source string whenever its Unicode character class changes,
+then accepts any contiguous sequence of those chunks, including the empty sequence:
+
+```text
+start: %regex {"substring_words": "The quick brown fox."}
+```
+
+Letters, numbers, and underscore form word chunks; whitespace forms whitespace chunks; all
+remaining characters form punctuation chunks. Consecutive characters in the same class stay in
+one chunk. The example therefore accepts `"The quick"`, `"quick brown"`, and `"fox."`, but not
+`"he quick"` or `"fo"`.
+
+The classification follows Unicode 16.0.0 and is independent of the operating system locale.
+All three substring forms are supported in rules and terminal definitions.
 
 ### `%lark`
 
 `%lark { ... }` embeds a complete Lark grammar as one element. The nested grammar has its own
 independent namespace: it must define its own `start` rule, and it may declare its own imports,
-`%ignore`, and `%grammar_options` without affecting the outer grammar. Rule names may be reused
-across the boundary.
+`%ignore`, and `%grammar_options`. Rule names may be reused across the boundary. Initial-skip
+behavior remains local to the nested grammar; an enabled `no_forcing` option propagates to the
+containing matcher because jump-forward control is matcher-wide.
 
 ```text
 start: "[" %lark {
@@ -772,10 +877,16 @@ field[capture="inner", suffix=/!!+/, stop_capture="marker"]: /[a-z]*/
 - `suffix` and `stop` cannot be specified on the same rule, and `stop_capture` requires one of
   them.
 - String flags and regex flags follow the same support as ordinary Lark terminals. In particular,
-  ASCII case-insensitive string markers such as `suffix="END"i` and dot-all regex markers such as
-  `stop=/BEGIN.*END/s` are supported.
-- An empty string literal marker is not accepted; in particular, the llguidance EOS shorthand
-  `stop=""` is not supported. A regex or named terminal marker may still be nullable.
+  Unicode case-insensitive string markers such as `suffix="ΣK"i`, scoped inline flags, and dot-all
+  regex markers such as `stop=/BEGIN.*END/s` are supported.
+- `stop=""` is the llguidance end-of-sequence (EOS) shorthand. It adds an optional grammar-level
+  EOS boundary after the body: the rule can end normally, or an active matcher stop token can end
+  it without contributing bytes and expose a following enclosing rule. Unlike a non-empty marker,
+  it does not use committed-shortest matching. `override_stop_tokens` changes which tokens can
+  take this boundary, while `terminate_without_stop_token=True` disables only the matcher's usual
+  root-stop requirement. If `stop_capture` is present, an EOS boundary records an empty byte span.
+  Printed EBNF represents this boundary with `EOS()`.
+- A regex or named terminal marker may be nullable. Empty `suffix` markers remain invalid.
 - Adding an explicit `lazy` attribute is allowed but redundant.
 - `max_tokens` and `max_chars` may annotate the same rule as `lazy`, `suffix`, or `stop`. The first
   boundary wins: a marker that completes first keeps the normal committed-shortest and capture

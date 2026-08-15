@@ -54,6 +54,10 @@ Grammar GrammarBuilder::Get(int32_t root_rule_id) {
   return Grammar(grammar_);
 }
 
+void GrammarBuilder::SetNoForcing(bool no_forcing) {
+  grammar_->no_forcing_ = grammar_->no_forcing_ || no_forcing;
+}
+
 int32_t GrammarBuilder::AddGrammarExpr(const GrammarExpr& grammar_expr) {
   grammar_->grammar_expr_indptr_.push_back(grammar_->grammar_expr_data_.size());
   grammar_->grammar_expr_data_.push_back(static_cast<int32_t>(grammar_expr.type));
@@ -108,6 +112,25 @@ int32_t GrammarBuilder::AddSubstring(const std::vector<std::string>& chunks) {
   );
 }
 
+int32_t GrammarBuilder::AddIntersection(const std::vector<int32_t>& operand_expr_ids) {
+  XGRAMMAR_CHECK(operand_expr_ids.size() >= 2) << "Intersection requires at least two operands.";
+  for (int32_t operand_expr_id : operand_expr_ids) {
+    XGRAMMAR_CHECK(operand_expr_id >= 0 && operand_expr_id < grammar_->NumGrammarExprs())
+        << "Intersection operand expr id " << operand_expr_id << " is out of range.";
+  }
+  return AddGrammarExpr(
+      {GrammarExprType::kIntersect,
+       operand_expr_ids.data(),
+       static_cast<int32_t>(operand_expr_ids.size())}
+  );
+}
+
+int32_t GrammarBuilder::AddComplement(int32_t operand_expr_id) {
+  XGRAMMAR_CHECK(operand_expr_id >= 0 && operand_expr_id < grammar_->NumGrammarExprs())
+      << "Complement operand expr id " << operand_expr_id << " is out of range.";
+  return AddGrammarExpr({GrammarExprType::kComplement, &operand_expr_id, 1});
+}
+
 int32_t GrammarBuilder::AddCharacterClass(
     const std::vector<CharacterClassElement>& elements, bool is_negative
 ) {
@@ -141,6 +164,8 @@ int32_t GrammarBuilder::AddCharacterClassStar(
 int32_t GrammarBuilder::AddEmptyStr() {
   return AddGrammarExpr({GrammarExprType::kEmptyStr, nullptr, 0});
 }
+
+int32_t GrammarBuilder::AddEOS() { return AddGrammarExpr({GrammarExprType::kEOS, nullptr, 0}); }
 
 int32_t GrammarBuilder::AddTokenSet(const std::vector<int32_t>& token_ids) {
   return AddGrammarExpr(

@@ -1,5 +1,7 @@
+import itertools
 import json
-from typing import Optional, Sequence, Union
+import re
+from typing import List, Optional, Sequence, Union
 
 import pytest
 
@@ -101,6 +103,299 @@ def _assert_lark_error(
     return error
 
 
+def test_lark_terminal_intersection() -> None:
+    _assert_language(
+        """
+        start: INTERSECTION
+        INTERSECTION: LOWER & ABC
+        LOWER: /[a-z]+/
+        ABC: /[abcABC]+/
+        """,
+        ["a", "abc", "bbb"],
+        ["", "A", "d", "1"],
+    )
+
+
+@pytest.mark.parametrize(
+    "terminal, accepted, rejected",
+    [
+        pytest.param(
+            "/[a-z]+/ & /[abcABC]+/", ["a", "abc", "bbb"], ["", "A", "d", "1"], id="direct-regexes"
+        ),
+        pytest.param(
+            "/[ab]+/ | /[cd]+/ & /[def]+/",
+            ["a", "ab", "d", "dd"],
+            ["", "c", "e", "f"],
+            id="intersection-binds-tighter-than-choice",
+        ),
+        pytest.param(
+            "(/[abf]+/ | /[cd]+/) & /[def]+/",
+            ["d", "f"],
+            ["", "a", "b", "c", "e"],
+            id="parenthesized-choice",
+        ),
+        pytest.param(
+            "/[abc]/ & /[bcd]/ & /[cde]/",
+            ["c"],
+            ["", "a", "b", "d", "e"],
+            id="chained-intersection",
+        ),
+        pytest.param("/a*/ & /a+/", ["a", "aa"], ["", "b"], id="empty-string-boundary"),
+        pytest.param("/a/? & /a{2}/", [], ["", "a", "aa"], id="empty-language"),
+        pytest.param(
+            "/a/ /b/ & /b/", [], ["", "a", "b", "ab", "abb"], id="sequence-is-one-operand"
+        ),
+        pytest.param(
+            # Regression test: the concatenation's epsilon edges once made the product NFA's
+            # start state merge with a state that reaches the end, wrongly accepting "x".
+            '/[b]+/ "x" & /b+x/',
+            ["bx", "bbx"],
+            ["", "x", "b", "ax"],
+            id="concatenation-with-epsilon-edges",
+        ),
+        pytest.param("/.+/ & /你好/", ["你好"], ["", "你", "您好"], id="unicode"),
+        pytest.param(
+            "/./s & /./s",
+            [
+                "\x7f",
+                "\u0080",
+                "\u07ff",
+                "\u0800",
+                "\ud7ff",
+                "\ue000",
+                "\uffff",
+                "\U00010000",
+                "\U0010ffff",
+            ],
+            ["", "ab"],
+            id="utf8-boundaries",
+        ),
+        pytest.param(
+            "/(ab|cd)+/ & /.*d/", ["cd", "abcd", "cdcd"], ["", "ab", "abc"], id="repeated-group"
+        ),
+        pytest.param(
+            "/a{2,5}/ & /a{3,}/",
+            ["aaa", "aaaa", "aaaaa"],
+            ["", "a", "aa", "aaaaaa"],
+            id="bounded-repetition",
+        ),
+        pytest.param(
+            "/[α-ω]+/ & /[βγ]+/",
+            ["β", "γ", "βγ"],
+            ["", "α", "δ", "A"],
+            id="unicode-character-class",
+        ),
+        pytest.param(
+            "/a*/ /b*/ & /ab?/",
+            ["a", "ab"],
+            ["", "b", "aa", "abb", "ba"],
+            id="nullable-concatenation",
+        ),
+        pytest.param(
+            "(/a/ | /b/) (/b/ | /c/) & /ab|bc/",
+            ["ab", "bc"],
+            ["", "ac", "bb", "a", "b", "abc"],
+            id="choice-concatenation",
+        ),
+        pytest.param(
+            "/(ab)+/ /c/ & /ababc/",
+            ["ababc"],
+            ["", "abc", "ababab", "ababcc"],
+            id="repeated-group-concatenation",
+        ),
+        pytest.param(
+            '"ab" /c*/ & /abc/', ["abc"], ["", "ab", "abcc", "bc"], id="literal-concatenation"
+        ),
+        pytest.param("/a*/ & /b*/", [""], ["a", "b", "ab", "ba"], id="only-empty-string-in-common"),
+        pytest.param(
+            '/你+/ "好" & /你你?好/',
+            ["你好", "你你好"],
+            ["", "好", "你你你好", "你"],
+            id="unicode-concatenation",
+        ),
+        pytest.param(
+            "/[ab]/ /[bc]/ /[cd]/ & /abc|bcd|bbb/",
+            ["abc", "bcd"],
+            ["", "bbb", "acd", "abcd", "ab"],
+            id="three-part-concatenation",
+        ),
+        pytest.param(
+            "(/a+/ /b/ | /c/) & /a{2}b|c/",
+            ["aab", "c"],
+            ["", "ab", "aaab", "cc", "aabc"],
+            id="choice-of-concatenations",
+        ),
+        pytest.param(
+            "/a?/ /a?/ /b/ & /a*b/",
+            ["b", "ab", "aab"],
+            ["", "a", "aaab", "ba"],
+            id="stacked-optional-concatenation",
+        ),
+    ],
+)
+def test_lark_terminal_intersection_semantics(
+    terminal: str, accepted: Sequence[str], rejected: Sequence[str]
+) -> None:
+    _assert_language(f"start: INTERSECTION\nINTERSECTION: {terminal}", accepted, rejected)
+
+
+def test_lark_intersection_in_rule() -> None:
+    # An intersection compiles like a terminal, so it can also be used directly in a rule.
+    _assert_language("start: /[a-z]+/ & /[abcABC]+/", ["a", "abc", "bbb"], ["", "A", "d", "1"])
+
+
+def test_lark_intersection_operands_cannot_reference_rules() -> None:
+    _assert_lark_error(
+        """
+        start: lower & abc
+        lower: /[a-z]+/
+        abc: /[abcABC]+/
+        """,
+        "terminal cannot reference rule 'lower'",
+    )
+
+
+def test_lark_terminal_intersection_nested_reference() -> None:
+    grammar = """
+        start: WRAPPED
+        WRAPPED: BASE "x" & /b+x/
+        BASE: /[ab]+/ & /[bc]+/
+    """
+    _assert_language(grammar, ["bx", "bbx"], ["", "ax", "bcx", "x"])
+
+
+def _all_strings_up_to_length(alphabet: str, max_length: int) -> List[str]:
+    return [
+        "".join(characters)
+        for length in range(max_length + 1)
+        for characters in itertools.product(alphabet, repeat=length)
+    ]
+
+
+# These regexes only use syntax whose semantics is identical in xgrammar and Python's re module,
+# so re.fullmatch can serve as the reference implementation.
+_INTERSECTION_PARITY_REGEX_PAIRS = [
+    ("a*", "a+"),
+    ("(a|b)(b|c)", "(a|b)(b|c)"),
+    ("a*b*c*", "(ab)+c?"),
+    ("(a|bb)*", "[ab]{2,4}"),
+    ("[ab]+", "[bc]+"),
+    ("((a|b)*c)+", "[abc]*c"),
+    ("a{2,4}", "a{3,}"),
+    ("abc|ab|a", "[abc]*b[abc]*"),
+    ("(ab|ba)+", "[ab]{4}"),
+    ("b+c", "[bc]+"),
+    ("a?b?c?", "[abc]{2}"),
+    ("(a*b)+", "[ab]*bb?"),
+]
+
+
+@pytest.mark.parametrize(("left", "right"), _INTERSECTION_PARITY_REGEX_PAIRS)
+def test_lark_intersection_exhaustive_against_python_re(left: str, right: str) -> None:
+    # Exhaustively check the defining property of intersection on every string over {a, b, c}
+    # up to length 5, using Python's re module as the reference.
+    compiled = _compile_lark(f"start: /{left}/ & /{right}/")
+    for value in _all_strings_up_to_length("abc", 5):
+        expected = bool(re.fullmatch(left, value)) and bool(re.fullmatch(right, value))
+        assert _matches_string(compiled, value) == expected, repr(value)
+
+
+@pytest.mark.parametrize(("left", "right"), _INTERSECTION_PARITY_REGEX_PAIRS)
+def test_lark_intersection_with_complement_exhaustive_against_python_re(
+    left: str, right: str
+) -> None:
+    # A & ~B is the set difference; every string over {a, b, c} is valid UTF-8, so the
+    # complement's UTF-8 restriction does not affect the reference.
+    compiled = _compile_lark(f"start: /{left}/ & ~/{right}/")
+    for value in _all_strings_up_to_length("abc", 5):
+        expected = bool(re.fullmatch(left, value)) and not re.fullmatch(right, value)
+        assert _matches_string(compiled, value) == expected, repr(value)
+
+
+@pytest.mark.parametrize(
+    "operand",
+    ["a*", "(a|b)(b|c)", "a*b*c*", "(ab|ba)+", "abc|ab|a", "[abc]*b[abc]*", "a{2,4}", "(a*b)+"],
+)
+def test_lark_complement_exhaustive_against_python_re(operand: str) -> None:
+    compiled = _compile_lark(f"start: ~/{operand}/")
+    for value in _all_strings_up_to_length("abc", 5):
+        expected = not re.fullmatch(operand, value)
+        assert _matches_string(compiled, value) == expected, repr(value)
+
+
+def test_lark_terminal_intersection_does_not_insert_ignore() -> None:
+    grammar = """
+        %ignore / +/
+        start: PHRASE "!"
+        PHRASE: /a b/ & /a b/
+    """
+    _assert_language(grammar, ["a b!", "a b !"], ["ab!", "a  b!"])
+
+
+def test_lark_terminal_intersection_round_trip() -> None:
+    grammar = xgr.Grammar.from_lark(
+        """
+        start: VALUE
+        VALUE: /.+/ & /你好|您好/
+        """
+    )
+    recovered = xgr.Grammar.deserialize_json(grammar.serialize_json())
+    reparsed = xgr.Grammar.from_ebnf(str(grammar))
+    for candidate in [grammar, recovered, reparsed]:
+        _assert_grammar_language(candidate, ["你好", "您好"], ["", "你", "大家好"])
+
+
+def test_lark_terminal_intersection_bounded_group_repetition() -> None:
+    _assert_language(
+        "start: PAIR\nPAIR: (/[abc]/ & /[bcd]/){1,2}",
+        ["b", "c", "bb", "bc", "cb", "cc"],
+        ["", "a", "d", "bbb"],
+    )
+
+
+def test_lark_terminal_intersection_unbounded_group_repetition() -> None:
+    # In a normal rule the intersection is hoisted into a helper rule, so unbounded repetition
+    # over it is supported through rule references.
+    _assert_language(
+        "start: LOOP\nLOOP: (/[ab]/ & /[bc]/)+", ["b", "bb", "bbb"], ["", "a", "c", "ab", "bc"]
+    )
+
+
+def test_lark_llguidance_ascii_lines_example() -> None:
+    grammar = r"""
+        start: ASCII_LINES
+        ASCII_LINES: /[a-zA-Z \n]*/ & ~/(?s:.*)\n\n(?s:.*)/
+    """
+    _assert_language(
+        grammar,
+        ["", "hello world", "first\nsecond", "first\nsecond\n"],
+        ["\n\n", "first\n\nsecond", "first\nsecond\n\n", "hello1"],
+    )
+
+
+def test_lark_suffix_marker_with_unbounded_intersection_repetition_is_rejected() -> None:
+    # A suffix marker must compile into a single leaf FSM, where unbounded repetition over an
+    # intersection cannot be expanded.
+    _assert_lark_error(
+        """
+        start: head "z"
+        head[suffix=END]: /[a-z]*/
+        END: (/e.d/ & /.n./)+
+        """,
+        "unbounded repetition over a terminal intersection or complement is not supported",
+    )
+
+
+@pytest.mark.parametrize("attribute", ["suffix", "stop"])
+def test_lark_suffix_stop_marker_with_intersection(attribute: str) -> None:
+    grammar = f"""
+        start: head "z"
+        head[{attribute}=END]: /[a-z]*/
+        END: /e.d/ & /.n./
+    """
+    _assert_language(grammar, ["endz", "abcendz"], ["", "z", "abcz", "abcend", "abcendendz"])
+
+
 @pytest.mark.parametrize(
     "attributes, message, location, caret",
     [
@@ -141,6 +436,67 @@ def test_lark_incompatible_rule_limits_have_precise_diagnostics(
     error = _assert_lark_error(f"start: value\n{rule_line}", message)
     assert location in error
     assert f"\n{rule_line}\n{caret}" in error
+
+
+@pytest.mark.parametrize(
+    "expression, accepted, rejected",
+    [
+        pytest.param("~/[ab]+/", ["", "c", "ac", "你好"], ["a", "b", "aa", "abba"], id="regex"),
+        pytest.param("~(/a/ | /b/)", ["", "ab", "c", "你"], ["a", "b"], id="grouped-choice"),
+        pytest.param("~TOKEN", ["", "a", "abc", "🙂"], ["ab", "cd"], id="terminal-reference"),
+        pytest.param("~(/a/+)", ["", "b", "ab", "你好"], ["a", "aa", "aaa"], id="repeated-group"),
+        pytest.param("~/你好/", ["", "你", "您好", "x"], ["你好"], id="unicode-literal"),
+        pytest.param(
+            "~/./s", ["", "ab", "你好"], ["a", "\n", "你", "🙂"], id="dotall-single-codepoint"
+        ),
+        pytest.param("~/.*/s", [], ["", "a", "\n", "你", "🙂", "ab"], id="universal-language"),
+        pytest.param("~(~/ab/)", ["ab"], ["", "a", "abc"], id="double-complement"),
+        pytest.param(
+            "/[a-z]+/ & ~/(\\n|.)*bad(\\n|.)*/",
+            ["good", "b", "bda"],
+            ["", "bad", "xbady", "badly", "BAD"],
+            id="difference-via-intersection",
+        ),
+    ],
+)
+def test_lark_regex_complement(
+    expression: str, accepted: Sequence[str], rejected: Sequence[str]
+) -> None:
+    grammar = f"start: {expression}\nTOKEN: /ab|cd/"
+    _assert_language(grammar, accepted, rejected)
+
+
+def test_lark_regex_complement_in_terminal_and_with_ignore() -> None:
+    grammar = """
+        %ignore / +/
+        start: VALUE "!"
+        VALUE: ~FORBIDDEN
+        FORBIDDEN: /bad|worse/
+    """
+    _assert_language(
+        grammar, ["!", "ok!", "ok !", "badly!", "bad !", "worse !", "你好 !"], ["bad!", "worse!"]
+    )
+
+
+def test_lark_regex_complement_round_trip() -> None:
+    grammar = xgr.Grammar.from_lark("start: ~/你好|good/")
+    for candidate in (
+        grammar,
+        xgr.Grammar.from_ebnf(str(grammar)),
+        xgr.Grammar.deserialize_json(grammar.serialize_json()),
+    ):
+        _assert_grammar_language(candidate, ["", "你", "goodbye", "bad", "🙂"], ["你好", "good"])
+
+
+@pytest.mark.parametrize("attribute", ["suffix", "stop"])
+def test_lark_suffix_stop_body_with_complement(attribute: str) -> None:
+    # The body of a suffix/stop rule must compile into a single leaf FSM; a complement body
+    # exercises that path.
+    grammar = f"""
+        start: head "z"
+        head[{attribute}="!"]: ~/(\\n|.)*bad(\\n|.)*/
+    """
+    _assert_language(grammar, ["!z", "ok!z", "b!z"], ["bad!z", "!", "z"])
 
 
 @pytest.mark.parametrize(
@@ -244,27 +600,51 @@ def test_lark_incompatible_rule_limits_have_precise_diagnostics(
         ),
         pytest.param(
             "start: /Żółw|Σ|k|ß/iu",
-            ["Żółw", "Σ", "k", "K", "ß"],
-            ["żółw", "ŻÓŁW", "zółw", "σ", "ς", "ẞ", "\u212a", "ss", "SS"],
-            id="regex-case-insensitive-folds-ascii-only",
+            ["Żółw", "żółw", "ŻÓŁW", "Σ", "σ", "ς", "k", "K", "K", "ß", "ẞ"],
+            ["zółw", "ss", "SS"],
+            id="regex-unicode-simple-case-folding",
         ),
         pytest.param(
             "start: /[^kσ]+/i",
-            ["A", "ż", "😀", "Σ", "ς", "\u212a"],
-            ["k", "K", "σ", "aK"],
-            id="regex-case-insensitive-negative-class-ascii-folding",
+            ["A", "ż", "😀"],
+            ["k", "K", "K", "σ", "Σ", "ς", "aK"],
+            id="regex-unicode-case-insensitive-negative-class",
         ),
         pytest.param(
             "start: /[À-Ö]+/i",
-            ["À", "Ö", "ÀÉÖ"],
-            ["à", "ö", "×", "÷", "A", ""],
-            id="regex-case-insensitive-non-ascii-range-not-folded",
+            ["À", "à", "Ö", "ö", "Àéö"],
+            ["×", "÷", "A", ""],
+            id="regex-unicode-case-insensitive-range",
         ),
         pytest.param(
             "start: /a.b/is",
             ["a b", "A😀B", "a\nb"],
             ["ab", "a\n\nb", "ä\nb"],
             id="regex-case-insensitive-dotall-flags",
+        ),
+        pytest.param(
+            "start: /a(?s:.)b/",
+            ["acb", "a\nb", "a😀b"],
+            ["ab", "a\n\nb"],
+            id="regex-scoped-dotall-flag",
+        ),
+        pytest.param(
+            "start: /a(?-s:.)b/s",
+            ["acb", "a😀b"],
+            ["ab", "a\nb", "a\n\nb"],
+            id="regex-scoped-disable-dotall-flag",
+        ),
+        pytest.param(
+            "start: /(?i:a(?-i:b)c)d/",
+            ["abcd", "AbCd"],
+            ["ABCd", "AbCD", "abce"],
+            id="regex-scoped-case-flags",
+        ),
+        pytest.param(
+            "start: /(?i:a{2,50000})b/",
+            ["AAb", "aA" * 150 + "b"],
+            ["Ab", "AA B", "AA"],
+            id="regex-scoped-case-large-repeat-subrule",
         ),
         pytest.param(
             "start: /[^a-c]+/i",
@@ -321,13 +701,22 @@ def test_lark_incompatible_rule_limits_have_precise_diagnostics(
             id="regex-class-unicode-escape-folded",
         ),
         pytest.param(
-            r"start: /x\cAy/i", ["x\x01y", "X\x01Y"], ["xy", "xay"], id="regex-control-escape"
+            r"start: /a\sb/i",
+            ["a b", "A\tb", "a\nB", "a\fb", "a\vb", "a\u00a0b", "a\u2003B"],
+            ["ab", "a\x00b", "a\x01b"],
+            id="regex-unicode-whitespace-class",
         ),
         pytest.param(
-            r"start: /a\sb/i",
-            ["a b", "A\tb", "a\nB", "a\fb", "a\vb"],
-            ["ab", "a\x00b", "a\x01b"],
-            id="regex-standard-whitespace-class",
+            r"start: /\d+/",
+            ["0", "৯", "𝟡", "𞅃"],
+            ["", "A", "²", "Ⅳ"],
+            id="regex-unicode-decimal-class",
+        ),
+        pytest.param(
+            r"start: /\w+/",
+            ["A_9", "ł", "क", "a\u0301", "a\u200c"],
+            ["", "-", "😀", "a b"],
+            id="regex-unicode-word-class",
         ),
         pytest.param(
             r"start: /\S+/i",
@@ -335,7 +724,6 @@ def test_lark_incompatible_rule_limits_have_precise_diagnostics(
             ["a b", ""],
             id="regex-non-whitespace-codepoint-domain",
         ),
-        pytest.param("start: /a(?=b)c/i", ["ac", "AC"], ["abc", "a"], id="regex-lookahead-ignored"),
         pytest.param(
             "start: /(?<name>ab)+(?P<other>c)/i",
             ["abc", "ABabC"],
@@ -343,7 +731,6 @@ def test_lark_incompatible_rule_limits_have_precise_diagnostics(
             id="regex-named-groups-ignore-name",
         ),
         pytest.param("start: /(?:ab)+c/i", ["abc", "ababC"], ["c"], id="regex-non-capturing-group"),
-        pytest.param("start: /a^b$c/i", ["abc", "ABC"], ["ac"], id="regex-mid-anchors-ignored"),
         pytest.param(
             "start: /a+?b??c/i",
             ["ac", "abc", "AAC"],
@@ -373,6 +760,63 @@ def test_lark_incompatible_rule_limits_have_precise_diagnostics(
             ["Ab-C9", "ab-c9", "AB-C9", "aB-c9"],
             ["", "ab-c", "ab_c9", "äb-c9"],
             id="ascii-case-insensitive-string",
+        ),
+        pytest.param(
+            'start: "Żółw Σkß"i',
+            ["Żółw Σkß", "żółw σKẞ", "ŻÓŁW ςKß"],
+            ["Zółw Σkß", "Żółw Σkss"],
+            id="unicode-case-insensitive-string",
+        ),
+        pytest.param(
+            "start: /abc/m", ["abc"], ["", "ABC", "abc\n"], id="regex-multiline-without-anchor"
+        ),
+        pytest.param(
+            "start: / a b \\# c # comment\n d /x",
+            ["ab#cd"],
+            ["a b#cd", "ab#c d", "abcd"],
+            id="regex-extended-whitespace-and-comment",
+        ),
+        pytest.param(
+            "start: /(?x:a b # comment\n c)/",
+            ["abc"],
+            ["a b c", "ab", "abcd"],
+            id="regex-scoped-extended-flag",
+        ),
+        pytest.param(
+            "start: /(?x:[ a # comment\n b])/",
+            ["a", "b"],
+            [" ", "#", "c"],
+            id="regex-scoped-extended-character-class",
+        ),
+        pytest.param(
+            "start: /(?x:a\u00a0b)/",
+            ["ab"],
+            ["a\u00a0b", "a b"],
+            id="regex-scoped-extended-unicode-whitespace",
+        ),
+        pytest.param(
+            "start: /(?x:ab(?-x:c d)e f)/",
+            ["abc def"],
+            ["abcdef", "abc d e f"],
+            id="regex-scoped-disable-extended-flag",
+        ),
+        pytest.param(
+            "start: /a(?-x: )b/x",
+            ["a b"],
+            ["ab", "a  b"],
+            id="regex-trailing-extended-with-scoped-disable",
+        ),
+        pytest.param(
+            "start: /(?-m:^a$)/m",
+            ["a"],
+            ["", "A", "a\n"],
+            id="regex-trailing-multiline-with-scoped-disable",
+        ),
+        pytest.param(
+            "start: /(?<λ.[>a b){2,300}/x",
+            ["abab", "ab" * 150],
+            ["ab", "a b" * 2, "ab" * 301],
+            id="regex-extended-complex-capture-large-repeat",
         ),
         pytest.param(
             'start: TOKEN\nTOKEN: "Yes"i | "no"',
@@ -410,6 +854,80 @@ def test_lark_core_languages(
     grammar: str, accepted: Sequence[str], rejected: Sequence[str]
 ) -> None:
     _assert_language(grammar, accepted, rejected)
+
+
+@pytest.mark.parametrize(
+    "grammar, accepted, rejected",
+    [
+        pytest.param("start: /[[:alpha:]]+/", ["Az"], ["", "1", "é"], id="ascii-named-class"),
+        pytest.param("start: /[[:^digit:]]/", ["A", "é"], ["1"], id="ascii-named-class-negated"),
+        pytest.param("start: /[a-y&&xyz]/", ["x", "y"], ["a", "z"], id="class-intersection"),
+        pytest.param("start: /[0-9--4]/", ["3", "5"], ["4", "-"], id="class-difference"),
+        pytest.param(
+            "start: /[a-g~~b-h]/", ["a", "h"], ["b", "g"], id="class-symmetric-difference"
+        ),
+        pytest.param("start: /[x[^xyz]]/", ["x", "a"], ["y", "z"], id="class-nested-complement"),
+        pytest.param("start: /[a-z--b-y&&x-z]/", ["z"], ["a", "x"], id="class-left-associative"),
+        pytest.param(
+            "start: /[a-z--A]/i", ["b", "B"], ["a", "A"], id="class-fold-before-difference"
+        ),
+        pytest.param("start: /[]a]/", ["]", "a"], ["b"], id="class-leading-close-literal"),
+        pytest.param("start: /[]^]/m", ["]", "^"], ["a"], id="class-leading-close-anchor-literal"),
+        pytest.param(
+            "start: /[](?=]/", ["]", "(", "?", "="], ["a"], id="class-leading-close-lookaround-text"
+        ),
+        pytest.param("start: /[--]/", ["-"], ["a"], id="class-leading-hyphens"),
+        pytest.param("start: /[[:loower:]]/", [":", "w"], ["a"], id="unknown-ascii-class-fallback"),
+    ],
+)
+def test_lark_regex_character_class_sets(
+    grammar: str, accepted: Sequence[str], rejected: Sequence[str]
+) -> None:
+    _assert_language(grammar, accepted, rejected)
+
+
+@pytest.mark.parametrize(
+    "grammar, accepted, rejected",
+    [
+        pytest.param(r"start: /\Aabc\z/", ["abc"], ["", "xabc", "abcx"], id="text-anchors"),
+        pytest.param(
+            r"start: /\x{41}\U0001F600\U{1F600}/",
+            ["A😀😀"],
+            ["A😀", "a😀😀"],
+            id="rust-codepoint-escapes",
+        ),
+        pytest.param(
+            r"start: /(?-u:\w)+/", ["Az_9"], ["é", "Aé"], id="scoped-disable-unicode-safe"
+        ),
+        pytest.param("start: /(?R:.)/", ["A", "\x00"], ["\r", "\n"], id="scoped-crlf-dot"),
+        pytest.param("start: /(?R:(?-R:.))/", ["A", "\r"], ["\n"], id="scoped-disable-crlf"),
+        pytest.param(
+            "start: /(?s:[](?=.])/",
+            ["]", "(", "?", "=", "."],
+            ["a", "\n"],
+            id="scoped-dotall-leading-close-class",
+        ),
+        pytest.param("start: /(?U:a+?)/", ["a", "aaa"], ["", "b"], id="swap-greediness"),
+        pytest.param("start: /(?<λ.名[1]>ab)c/", ["abc"], ["ab", "xbc"], id="unicode-capture-name"),
+        pytest.param(
+            "start: /(?x:(?<λ.[> a b ) c)/",
+            ["abc"],
+            ["a b c", "ab"],
+            id="unicode-capture-name-extended",
+        ),
+    ],
+)
+def test_lark_regex_rust_flags_and_escapes(
+    grammar: str, accepted: Sequence[str], rejected: Sequence[str]
+) -> None:
+    _assert_language(grammar, accepted, rejected)
+
+
+def test_lark_hex_string_escapes() -> None:
+    _assert_language(r'start: "a\x00b"', ["a\x00b"], ["ab", "a\x01b"])
+    _assert_language(r'start: "\x41\x42"', ["AB"], ["ab", "A", "ABC"])
+    _assert_language(r'start: "\\x41"', [r"\x41"], ["A", "x41"])
+    _assert_language(r'start: "\x7f\xFF"', ["\x7fÿ"], ["ÿ\x7f", "ab"])
 
 
 @pytest.mark.parametrize(
@@ -565,6 +1083,153 @@ def test_lark_allow_initial_skip_options() -> None:
     _assert_language(grammar, ["ab", " a b", "\n\ta\n b  "], ["a c", " xab"])
 
 
+def test_lark_no_forcing_option_disables_jump_forward_only() -> None:
+    tokenizer_info = xgr.TokenizerInfo(["a", "b", "bb", "c"])
+    default = _compile_lark('start[capture="all"]: "abb"', tokenizer_info)
+    explicitly_enabled = _compile_lark(
+        """
+        %grammar_options {"no_forcing": true}
+        %grammar_options {"no_forcing": false}
+        start[capture="all"]: "abb"
+        """,
+        tokenizer_info,
+    )
+    explicitly_disabled = _compile_lark(
+        """
+        %grammar_options {"no_forcing": false}
+        start[capture="all"]: "abb"
+        """,
+        tokenizer_info,
+    )
+
+    matchers = [
+        xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+        for compiled in [default, explicitly_enabled, explicitly_disabled]
+    ]
+    enabled_control = xgr.GrammarMatcher(explicitly_enabled, terminate_without_stop_token=True)
+    all_matchers = [*matchers, enabled_control]
+
+    for matcher in all_matchers:
+        assert matcher.accept_token(0)
+
+    def next_mask(matcher: xgr.GrammarMatcher) -> List[int]:
+        mask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        matcher.fill_next_token_bitmask(mask)
+        return mask.tolist()
+
+    masks = [next_mask(matcher) for matcher in all_matchers]
+    assert masks[0] == masks[1] == masks[2] == masks[3]
+
+    assert matchers[0].find_jump_forward_string() == "bb"
+    assert matchers[1].find_jump_forward_string() == ""
+    assert matchers[2].find_jump_forward_string() == "bb"
+
+    assert matchers[1].get_captures() == enabled_control.get_captures() == []
+    assert next_mask(matchers[1]) == next_mask(enabled_control)
+
+    for matcher in all_matchers:
+        assert not matcher.accept_token(3)
+        assert matcher.accept_token(2)
+        assert matcher.is_terminated()
+        assert matcher.get_captures() == [("all", b"abb")]
+
+    for matcher in all_matchers:
+        matcher.rollback(1)
+        assert not matcher.is_terminated()
+        assert matcher.get_captures() == []
+
+    assert matchers[0].find_jump_forward_string() == "bb"
+    assert matchers[1].find_jump_forward_string() == ""
+    assert matchers[2].find_jump_forward_string() == "bb"
+    assert next_mask(matchers[1]) == next_mask(enabled_control)
+
+    for matcher in all_matchers:
+        matcher.reset()
+        assert matcher.get_captures() == []
+        assert not matcher.accept_string("c")
+        assert matcher.accept_string("abb")
+        assert matcher.is_terminated()
+        assert matcher.get_captures() == [("all", b"abb")]
+
+
+def test_lark_no_forcing_survives_serialization_optimization_and_ebnf() -> None:
+    tokenizer_info = xgr.TokenizerInfo(["a", "bb", "c"])
+    grammar = xgr.Grammar.from_lark(
+        """
+        %grammar_options {"no_forcing": true}
+        start[capture="all"]: "abb"
+        """
+    )
+
+    serialized_grammar = grammar.serialize_json()
+    assert json.loads(serialized_grammar)["no_forcing"] is True
+    recovered_grammar = xgr.Grammar.deserialize_json(serialized_grammar)
+
+    printed = str(grammar)
+    assert 'root[capture="all", no_forcing] ::=' in printed
+    reparsed_grammar = xgr.Grammar.from_ebnf(printed)
+    assert str(reparsed_grammar) == printed
+
+    compiler = xgr.GrammarCompiler(tokenizer_info, cache_enabled=False)
+    compiled = compiler.compile_grammar(grammar)
+    assert json.loads(compiled.grammar.serialize_json())["no_forcing"] is True
+    serialized_compiled = compiled.serialize_json()
+    assert json.loads(serialized_compiled)["grammar"]["no_forcing"] is True
+    recovered_compiled = xgr.CompiledGrammar.deserialize_json(serialized_compiled, tokenizer_info)
+
+    compiled_variants = [
+        compiled,
+        compiler.compile_grammar(recovered_grammar),
+        compiler.compile_grammar(reparsed_grammar),
+        recovered_compiled,
+    ]
+    for compiled_variant in compiled_variants:
+        matcher = xgr.GrammarMatcher(compiled_variant, terminate_without_stop_token=True)
+        assert matcher.accept_string("a")
+        assert matcher.find_jump_forward_string() == ""
+        assert matcher.accept_string("bb")
+        assert matcher.get_captures() == [("all", b"abb")]
+
+
+def test_lark_no_forcing_propagates_through_nested_named_and_composed_grammars() -> None:
+    tokenizer_info = xgr.TokenizerInfo(["a", "bb", "c"])
+    enabled = xgr.Grammar.from_lark(
+        """
+        %grammar_options {"no_forcing": true}
+        start: "abb"
+        """
+    )
+    enabled_suffix = xgr.Grammar.from_lark(
+        """
+        %grammar_options {"no_forcing": true}
+        start: "bb"
+        """
+    )
+
+    nested = xgr.Grammar.from_lark(
+        """
+        start: %lark {
+          %grammar_options {"no_forcing": true}
+          start: "abb"
+        }
+        """
+    )
+    named = xgr.Grammar.from_lark("start: @child", named_grammars={"child": enabled})
+    union = xgr.Grammar.union(xgr.Grammar.from_ebnf('root ::= "c"'), enabled)
+    concat = xgr.Grammar.concat(xgr.Grammar.from_ebnf('root ::= "a"'), enabled_suffix)
+
+    compiler = xgr.GrammarCompiler(tokenizer_info, cache_enabled=False)
+    for grammar in [nested, named, union, concat]:
+        assert str(grammar).startswith("root[no_forcing] ::=")
+        matcher = xgr.GrammarMatcher(
+            compiler.compile_grammar(grammar), terminate_without_stop_token=True
+        )
+        assert matcher.accept_string("a")
+        assert matcher.find_jump_forward_string() == ""
+        assert matcher.accept_string("bb")
+        assert matcher.is_terminated()
+
+
 def test_lark_default_disallows_initial_skip_but_allows_trailing_skip() -> None:
     grammar = """
         %import common.WS_INLINE
@@ -572,6 +1237,35 @@ def test_lark_default_disallows_initial_skip_but_allows_trailing_skip() -> None:
         start: "a" "b"
     """
     _assert_language(grammar, ["ab", "a b", "ab  "], [" ab", "a\nb"])
+
+
+def test_lark_ignore_once_bounds_each_skipped_span() -> None:
+    grammar = r"""
+        %grammar_options {"ignore_once": true}
+        %ignore /[ \t]{1,8}/
+        start: "A" "!"
+    """
+    _assert_language(
+        grammar, ["A!", "A !", "A        !", "A!        "], [" A!", "A         !", "A!         "]
+    )
+
+    # Without ignore_once, the skip expression can be matched repeatedly at one grammar position.
+    repeated = r"%ignore /[ \t]{1,8}/" '\nstart: "A" "!"'
+    _assert_language(repeated, ["A         !", "A!         "], [" A!"])
+
+
+def test_lark_ignore_once_merges_and_is_scoped_to_nested_grammars() -> None:
+    grammar = r"""
+        %grammar_options {"ignore_once": false}
+        %grammar_options {"ignore_once": true}
+        %grammar_options {"ignore_once": false}
+        %ignore /[ ]{1,2}/
+        start: "[" %lark {
+          %ignore /[ ]{1,2}/
+          start: "a" "b"
+        } "]"
+    """
+    _assert_language(grammar, ["[a   b]", "[a b]", "[ab   ]"], ["[   a b]"])
 
 
 def test_lark_parametric_permutations() -> None:
@@ -1055,8 +1749,13 @@ def test_lark_allow_invalid_utf8_dot_flags_and_unicode_default() -> None:
     )
     _assert_byte_language(
         option + "start: /a./isu",
-        accepted=[b"A\n", b"a\x80"],
-        rejected=[b"a", b"a\xc2\xa2", b"b\n"],
+        accepted=[b"A\n", b"a\xc2\xa2"],
+        rejected=[b"a", b"a\x80", b"a\xc2", b"b\n"],
+    )
+    _assert_byte_language(
+        option + r"start: /(?u:\w)/",
+        accepted=[b"A", "é".encode()],
+        rejected=[b" ", b"\x80", b"\xc2"],
     )
     _assert_byte_language(
         "start: /./",
@@ -1190,8 +1889,8 @@ def test_lark_allow_invalid_utf8_round_trips_with_structured_regex() -> None:
 @pytest.mark.parametrize(
     "pattern, message",
     [
-        (r"\p{L}", "Unicode character classes are not available"),
-        (r"\P{Letter}", "Unicode character classes are not available"),
+        (r"\p{L}", r"Unicode property escapes \p and \P are not supported"),
+        (r"\P{Letter}", r"Unicode property escapes \p and \P are not supported"),
         (r"[é]", "non-ASCII characters are not available in byte character classes"),
         (r"a^b", "start anchor is only allowed at the beginning"),
         (r"a$b", "end anchor is only allowed at the end"),
@@ -1233,9 +1932,12 @@ def test_lark_byte_mode_parametric_branches_and_serialization() -> None:
             candidate, accepted=[b"\x80\xff"], rejected=[b"", b"\x80", b"\xff", b"\xc2\x80\xff"]
         )
 
-    # Byte-regex semantics are applied only after parameter expansion. The invalid byte-dialect
-    # property escape is harmless while its branch is dead, but is diagnosed when state 2 keeps it.
-    _assert_lark_error(source.replace("state::0", "state::2", 1), "Unicode character classes")
+    # Regex compilation is applied only after parameter expansion. The unsupported property escape
+    # is harmless while its branch is dead, but is diagnosed when state 2 keeps it.
+    _assert_lark_error(
+        source.replace("state::0", "state::2", 1),
+        r"Unicode property escapes \p and \P are not supported",
+    )
 
 
 def test_lark_byte_mode_parametric_exactly_4096_instances() -> None:
@@ -1437,11 +2139,59 @@ def test_lark_structured_regex_round_trip_and_serialization() -> None:
     )
 
 
+def test_lark_substring_words_ascii_chunks() -> None:
+    grammar = r"""
+        start: "A" SUB "B"
+        SUB: %regex {"substring_words":"The quick,brown  fox_2!"}
+    """
+    _assert_language(
+        grammar,
+        ["AB", "AThe quickB", "Aquick,brownB", "A,brown  B", "Abrown  fox_2!B", "Afox_2!B"],
+        ["Ahe quickB", "AThequickB", "AquickbrownB", "Abrown fox_2B", "Afox_2!!B"],
+    )
+
+
+def test_lark_substring_words_unicode_classes() -> None:
+    grammar = 'start: %regex {"substring_words":"빠른 café_2　١٢٣!? τέλος"}'
+    _assert_language(
+        grammar,
+        ["", "빠른 café_2", "café_2　١٢٣!?", "١٢٣!? τέλος", "!?"],
+        ["른 café_2", "café_2 ١٢٣", "١٢٣!", "τέλο"],
+    )
+
+    # U+0345 has the Unicode Alphabetic property, while Roman numerals and
+    # enclosed numbers have the Unicode Numeric property.
+    property_edges = 'start: %regex {"substring_words":"aͅb-Ⅷ①_"}'
+    _assert_language(property_edges, ["", "aͅb", "-", "Ⅷ①_", "aͅb-Ⅷ①_"], ["ͅ", "Ⅷ", "①_", "aͅ", "b-Ⅷ"])
+
+
+def test_lark_substring_words_empty_round_trip_and_serialization() -> None:
+    empty = xgr.Grammar.from_lark('start: %regex {"substring_words":""}')
+    _assert_grammar_language(empty, [""], ["a"])
+
+    grammar = xgr.Grammar.from_lark('start: "A" %regex {"substring_words":"alpha beta,gamma"} "B"')
+    accepted = ["AB", "Aalpha betaB", "Abeta,gammaB", "A,gammaB"]
+    rejected = ["Aalpha betB", "Aalpha gammaB"]
+    _assert_grammar_language(grammar, accepted, rejected)
+    _assert_grammar_language(xgr.Grammar.from_ebnf(str(grammar)), accepted, rejected)
+    _assert_grammar_language(
+        xgr.Grammar.deserialize_json(grammar.serialize_json()), accepted, rejected
+    )
+
+
 def test_lark_structured_regex_large_substring_chars() -> None:
     source = "".join(chr(0x1000 + index) for index in range(4_000))
     grammar = xgr.Grammar.from_lark(f'start: %regex {{"substring_chars":{json.dumps(source)}}}')
     candidate = source[50:100]
     _assert_grammar_language(grammar, [candidate], [candidate + "missing"])
+
+
+def test_lark_substring_words_large_input() -> None:
+    words = [f"word{index}" for index in range(2_500)]
+    source = " ".join(words)
+    grammar = xgr.Grammar.from_lark(f'start: %regex {{"substring_words":{json.dumps(source)}}}')
+    candidate = " ".join(words[50:100])
+    _assert_grammar_language(grammar, [candidate], [candidate + " missing"])
 
 
 def test_lark_nested_lark_has_an_independent_namespace() -> None:
@@ -1802,8 +2552,8 @@ def test_lark_serialization_round_trip_for_core_and_dynamic_grammars() -> None:
 
 def test_lark_regex_flags_ebnf_and_serialization_round_trip() -> None:
     grammar = xgr.Grammar.from_lark("start: /Żółw[^k]/isu")
-    accepted = ["Żółwz", "ŻółwZ", "Żółw\n"]
-    rejected = ["żółwz", "Żółwk", "ŻółwK", "Żółw"]
+    accepted = ["Żółwz", "żÓŁWZ", "Żółw\n"]
+    rejected = ["Żółwk", "żółwK", "Żółw"]
     _assert_grammar_language(grammar, accepted, rejected)
 
     ebnf_restored = xgr.Grammar.from_ebnf(str(grammar))
@@ -1993,31 +2743,32 @@ def test_lark_large_choice_grammar() -> None:
         pytest.param("start: foo::0", "unknown name 'foo'", id="parametric-reference"),
         pytest.param('start: "a" %if enabled', "unknown condition 'enabled'", id="parametric-if"),
         pytest.param(
-            'start: A & B\nA: "a"\nB: "b"', "intersection '&' is not supported", id="intersection"
-        ),
-        pytest.param("start: ~/[a]/", "complement '~' is not supported", id="complement"),
-        pytest.param(
-            'start: "\\u00c4"i',
-            "case-insensitive string literals currently support ASCII characters only",
-            id="non-ascii-string-flag",
+            'start: ~item\nitem: "a"',
+            "terminal cannot reference rule 'item'",
+            id="complement-rule-reference",
         ),
         pytest.param(
-            "start: /abc/m",
-            "regular-expression flag 'm' is not supported",
-            id="unsupported-regex-flag",
+            "start: /^abc$/m",
+            "flag 'm' with line anchors is not supported by llguidance 1.8.0",
+            id="multiline-anchor-rejected-by-llguidance",
+        ),
+        pytest.param(
+            "start: /(?m:^abc$)/",
+            "flag 'm' with line anchors is not supported by llguidance 1.8.0",
+            id="inline-multiline-anchor-rejected-by-llguidance",
         ),
         pytest.param(
             "start: /abc/l", "regular-expression flag 'l' is not supported", id="unsupported-l-flag"
         ),
         pytest.param(
-            "start: /abc/x",
-            "regular-expression flag 'x' is not supported",
-            id="unsupported-verbose-regex-flag",
+            "start: /abc/U",
+            "regular-expression flag 'U' is not supported",
+            id="unsupported-outer-U-flag",
         ),
         pytest.param(
-            "start: item\nitem[suffix=/end/i]: /[a-z]*/",
-            "regular-expression flag 'i' is not supported with suffix or stop attributes",
-            id="case-insensitive-regex-suffix",
+            "start: /abc/R",
+            "regular-expression flag 'R' is not supported",
+            id="unsupported-outer-R-flag",
         ),
         pytest.param(
             'start: "a"i.."z"', "flags are not allowed on character ranges", id="range-start-flag"
@@ -2028,14 +2779,53 @@ def test_lark_large_choice_grammar() -> None:
         pytest.param("start: /[abc/", "failed to compile regular expression", id="invalid-regex"),
         pytest.param(r"start: /a\b/i", "Word boundary assertion", id="regex-word-boundary-error"),
         pytest.param(
-            r"start: /\p{L}/i", "Unicode property escape", id="regex-unicode-property-error"
+            r"start: /\pL/i",
+            r"Unicode property escapes \p and \P are not supported",
+            id="regex-unicode-property-short-error",
         ),
-        pytest.param(r"start: /(a)\1/i", "Backreference", id="regex-backreference-error"),
-        pytest.param("start: /[]/i", "Empty character class", id="regex-empty-class-error"),
-        pytest.param("start: /(?<=a)b/i", "Lookbehind assertion", id="regex-lookbehind-error"),
+        pytest.param(
+            r"start: /\P{Greek}/i",
+            r"Unicode property escapes \p and \P are not supported",
+            id="regex-unicode-property-braced-error",
+        ),
+        pytest.param(
+            r"start: /(a)\1/i",
+            "unrecognized regular-expression escape",
+            id="regex-backreference-error",
+        ),
+        pytest.param("start: /[]/i", "Unclosed '['", id="regex-empty-class-error"),
+        pytest.param("start: /(?<=a)b/i", "lookaround assertions", id="regex-lookbehind-error"),
+        pytest.param("start: /a(?=b)c/i", "lookaround assertions", id="regex-lookahead-error"),
+        pytest.param(
+            "start: /a^b$c/i", "start anchor is only allowed", id="regex-mid-anchor-error"
+        ),
+        pytest.param(
+            r"start: /x\cAy/i",
+            "unrecognized regular-expression escape",
+            id="regex-control-escape-error",
+        ),
+        pytest.param(
+            r"start: /\e/", "unrecognized regular-expression escape", id="regex-escape-e-error"
+        ),
+        pytest.param(
+            r"start: /(?-u:.)/", "pattern can match invalid UTF-8", id="regex-scoped-no-u-invalid"
+        ),
+        pytest.param(
+            "start: /(?<same>a)(?<same>b)/",
+            "Duplicate named capturing group",
+            id="regex-duplicate-capture-name",
+        ),
+        pytest.param(
+            "start: /(?<λ.[>^a)/m",
+            "flag 'm' with line anchors",
+            id="regex-multiline-anchor-after-unbalanced-capture-name-punctuation",
+        ),
+        pytest.param(
+            "start: /[a&&]/", "operator is missing an operand", id="regex-set-missing-rhs"
+        ),
         pytest.param(
             r"start: /\uZZ/i",
-            "must be followed by four hexadecimal digits",
+            "must be followed by 4 hexadecimal digits",
             id="regex-bad-unicode-escape-error",
         ),
         pytest.param('start: "\\q"', "invalid string literal", id="invalid-string-escape"),
@@ -2105,11 +2895,6 @@ def test_lark_large_choice_grammar() -> None:
             id="nested-no-start",
         ),
         pytest.param(
-            'start: %regex {"substring_words":"abc def"}',
-            "substring_words is not supported yet",
-            id="substring-words",
-        ),
-        pytest.param(
             "start: %regex []", "%regex value must be an object", id="structured-regex-not-object"
         ),
         pytest.param(
@@ -2139,6 +2924,27 @@ def test_lark_large_choice_grammar() -> None:
             'start: %regex {"substring_chunks":["a",1]}',
             "substring_chunks must be an array of strings",
             id="structured-regex-chunk-type",
+        ),
+        pytest.param(
+            'start: %regex {"substring_words":true}',
+            "substring_words must be a string",
+            id="substring-words-type",
+        ),
+        pytest.param("start: %regex {}", "no fields set on %regex", id="substring-words-no-fields"),
+        pytest.param(
+            'start: %regex {"substring_words":null}',
+            "no fields set on %regex",
+            id="substring-words-null",
+        ),
+        pytest.param(
+            'start: %regex {"substring_words":"a","unknown":"b"}',
+            "unknown field 'unknown' in %regex",
+            id="substring-words-unknown-field",
+        ),
+        pytest.param(
+            'start: %regex {"substring_words":"a","substring_chars":"b"}',
+            "only one field can be set on %regex",
+            id="substring-words-multiple-fields",
         ),
         pytest.param("start: @other", "unknown named grammar '@other'", id="unknown-named-grammar"),
         pytest.param(
@@ -2188,9 +2994,14 @@ def test_lark_large_choice_grammar() -> None:
             id="initial-skip-type",
         ),
         pytest.param(
-            '%grammar_options {"no_forcing": true}\nstart: "a"',
-            "%grammar_options option 'no_forcing' is not supported",
-            id="no-forcing-option",
+            '%grammar_options {"ignore_once": 1}\nstart: "a"',
+            "ignore_once must be a boolean",
+            id="ignore-once-type",
+        ),
+        pytest.param(
+            '%grammar_options {"no_forcing": 1}\nstart: "a"',
+            "no_forcing must be a boolean",
+            id="no-forcing-type",
         ),
         pytest.param(
             '%grammar_options {"allow_invalid_utf8": 1}\nstart: "a"',
@@ -2231,11 +3042,6 @@ def test_lark_large_choice_grammar() -> None:
             "start: head\nhead[suffix=MISSING]: TEXT\nTEXT: /(\\n|.)*/",
             "unknown name 'MISSING'",
             id="unknown-suffix-terminal",
-        ),
-        pytest.param(
-            'start: head\nhead[stop=""]: TEXT\nTEXT: /(\\n|.)*/',
-            "stop must not be empty",
-            id="empty-stop",
         ),
         pytest.param(
             "start: head\nhead[stop=end]: TEXT\nTEXT: /(\\n|.)*/",
@@ -3271,6 +4077,121 @@ def test_lark_all_three_features_serialization_round_trip() -> None:
 # General suffix/stop and their interaction with lazy, capture, max_tokens, and TagDispatch.
 
 
+EMPTY_STOP_VOCAB = ["</s>", "a", "b", "aa", "x"]
+EMPTY_STOP_TOKENIZER = xgr.TokenizerInfo(EMPTY_STOP_VOCAB, stop_token_ids=[0])
+
+
+def _empty_stop_matcher(
+    source: str,
+    *,
+    cache_enabled: bool = False,
+    terminate_without_stop_token: bool = False,
+    override_stop_tokens: Optional[List[int]] = None,
+) -> xgr.GrammarMatcher:
+    grammar = xgr.Grammar.from_lark(source, tokenizer_info=EMPTY_STOP_TOKENIZER)
+    compiled = xgr.GrammarCompiler(
+        EMPTY_STOP_TOKENIZER, cache_enabled=cache_enabled
+    ).compile_grammar(grammar)
+    return xgr.GrammarMatcher(
+        compiled,
+        override_stop_tokens=override_stop_tokens,
+        terminate_without_stop_token=terminate_without_stop_token,
+    )
+
+
+def _empty_stop_allowed_tokens(matcher: xgr.GrammarMatcher) -> List[int]:
+    bitmask = xgr.allocate_token_bitmask(1, EMPTY_STOP_TOKENIZER.vocab_size)
+    matcher.fill_next_token_bitmask(bitmask)
+    return [
+        token_id
+        for token_id in range(EMPTY_STOP_TOKENIZER.vocab_size)
+        if (int(bitmask[0, token_id // 32]) >> (token_id % 32)) & 1
+    ]
+
+
+@pytest.mark.parametrize("cache_enabled", [False, True], ids=["eager-cache", "dynamic-cache"])
+def test_lark_empty_stop_root_mask_accept_and_rollback(cache_enabled: bool) -> None:
+    matcher = _empty_stop_matcher('start: item\nitem[stop=""]: /a+/', cache_enabled=cache_enabled)
+    assert _empty_stop_allowed_tokens(matcher) == [1, 3]
+    assert matcher.accept_token(1)
+    assert matcher.is_completed() and not matcher.is_terminated()
+    assert _empty_stop_allowed_tokens(matcher) == [0, 1, 3]
+    assert matcher.accept_token(0)
+    assert matcher.is_completed() and matcher.is_terminated()
+
+    matcher.rollback(1)
+    assert matcher.is_completed() and not matcher.is_terminated()
+    assert _empty_stop_allowed_tokens(matcher) == [0, 1, 3]
+
+
+@pytest.mark.parametrize("use_eos", [False, True], ids=["ordinary-boundary", "eos-boundary"])
+def test_lark_empty_stop_can_end_inside_enclosing_rule(use_eos: bool) -> None:
+    matcher = _empty_stop_matcher('start: item "b"\nitem[stop=""]: /a+/')
+    assert matcher.accept_token(1)
+    assert _empty_stop_allowed_tokens(matcher) == [0, 1, 2, 3]
+    if use_eos:
+        assert matcher.accept_token(0)
+        assert not matcher.is_completed() and not matcher.is_terminated()
+        assert _empty_stop_allowed_tokens(matcher) == [2]
+    assert matcher.accept_token(2)
+    assert matcher.is_completed() and not matcher.is_terminated()
+    assert matcher.accept_token(0) and matcher.is_terminated()
+
+
+def test_lark_empty_stop_is_not_committed_shortest() -> None:
+    matcher = _empty_stop_matcher('start: item "b"\nitem[stop=""]: /a+/')
+    assert matcher.accept_token(3)  # The two-byte "aa" token must not commit after its first byte.
+    assert matcher.accept_token(2)
+    assert matcher.is_completed()
+
+
+def test_lark_empty_stop_honors_override_and_terminate_without_stop_token() -> None:
+    source = 'start: item "b"\nitem[stop=""]: /a+/'
+    matcher = _empty_stop_matcher(source, override_stop_tokens=[4])
+    assert matcher.accept_token(1)
+    assert _empty_stop_allowed_tokens(matcher) == [1, 2, 3, 4]
+    assert not matcher.accept_token(0)
+    assert matcher.accept_token(4)
+    assert _empty_stop_allowed_tokens(matcher) == [2]
+
+    matcher = _empty_stop_matcher(source, terminate_without_stop_token=True)
+    assert matcher.accept_token(1) and matcher.accept_token(0)
+    assert not matcher.is_terminated()
+    assert matcher.accept_token(2) and matcher.is_terminated()
+
+
+def test_lark_empty_stop_capture_and_round_trip() -> None:
+    source = 'start: item "b"\n' 'item[capture="item", stop="", stop_capture="end"]: /a+/'
+    grammar = xgr.Grammar.from_lark(source, tokenizer_info=EMPTY_STOP_TOKENIZER)
+    printed = str(grammar)
+    assert "EOS()" in printed
+    serialized = grammar.serialize_json()
+    assert json.loads(serialized)["__VERSION__"] == xgr.get_serialization_version()
+
+    for candidate in (
+        grammar,
+        xgr.Grammar.from_ebnf(printed),
+        xgr.Grammar.deserialize_json(serialized),
+    ):
+        compiled = xgr.GrammarCompiler(EMPTY_STOP_TOKENIZER, cache_enabled=False).compile_grammar(
+            candidate
+        )
+        matcher = xgr.GrammarMatcher(compiled)
+        assert matcher.accept_token(1)
+        assert matcher.accept_token(0)
+        assert matcher.get_captures() == [("end", b""), ("item", b"a")]
+        matcher.rollback(1)
+        assert matcher.get_captures() == [("end", b""), ("item", b"a")]
+        assert matcher.accept_token(2)
+
+
+def test_lark_empty_stop_with_max_tokens_forces_ordinary_boundary() -> None:
+    matcher = _empty_stop_matcher('start: item "b"\nitem[stop="", max_tokens=2]: /a+/')
+    assert matcher.accept_token(1) and matcher.accept_token(1)
+    assert _empty_stop_allowed_tokens(matcher) == [2]
+    assert matcher.accept_token(2)
+
+
 def _captures_for_string(
     grammar: xgr.Grammar,
     value: str,
@@ -3323,8 +4244,14 @@ def test_lark_suffix_stop_named_terminal_marker(attribute: str) -> None:
 
 @pytest.mark.parametrize("attribute", ["suffix", "stop"])
 def test_lark_suffix_stop_case_insensitive_string_marker(attribute: str) -> None:
-    grammar = f'start: r "z"\nr[{attribute}="END"i]: /[a-z]*/'
-    _assert_language(grammar, ["abcENDz", "abcendz", "abcEnDz"], ["abcENz", "abcENDENDz"])
+    grammar = f'start: r "z"\nr[{attribute}="ΣK"i]: /[a-z]*/'
+    _assert_language(grammar, ["abcΣKz", "abcσkz", "abcςKz"], ["abcΣz", "abcΣKΣKz"])
+
+
+@pytest.mark.parametrize("attribute", ["suffix", "stop"])
+def test_lark_suffix_stop_case_insensitive_regex_marker(attribute: str) -> None:
+    grammar = f'start: r "z"\nr[{attribute}=/Σ[K]/i]: /[a-z]*/'
+    _assert_language(grammar, ["abcΣKz", "abcσkz", "abcςKz"], ["abcΣz", "abcΣKΣKz"])
 
 
 @pytest.mark.parametrize("attribute", ["suffix", "stop"])

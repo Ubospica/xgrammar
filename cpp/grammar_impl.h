@@ -10,11 +10,13 @@
 #include <xgrammar/xgrammar.h>
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "fsm.h"
+#include "regex_fsm_cache.h"
 #include "support/logging.h"
 #include "support/reflection.h"
 #include "xgrammar/grammar.h"
@@ -153,6 +155,8 @@ class Grammar::Impl {
         << "root_rule_id " << root_rule_id_ << " is out of bound";
     return rules_[root_rule_id_];
   }
+  /*! \brief Whether matcher jump-forward output is disabled for this grammar. */
+  bool IsForcingDisabled() const { return no_forcing_; }
 
   /*! \brief The type of the grammar expr. */
   enum class GrammarExprType : int32_t {
@@ -195,7 +199,30 @@ class Grammar::Impl {
     // and is carried through the grammar passes as-is; when GrammarFSMBuilder runs, it is
     // compiled into an automaton via a chunk-level suffix automaton (see SuffixAutomata).
     kSubstring,
+    // data format: [grammar_expr_id0, grammar_expr_id1, ...]
+    // The intersection of the operand languages. Each operand must compile into a leaf FSM
+    // (no rule references): a regex, a byte string, a character class, or a sequence / choices
+    // / intersection of such expressions. Like kRegex, the operands are carried through the
+    // grammar passes as-is; GrammarFSMBuilder compiles them into automata and intersects them.
+    kIntersect,
+    // data format: [grammar_expr_id]
+    // The complement of the operand language with respect to all valid UTF-8 strings. The
+    // operand must compile into a leaf FSM (no rule references), like an intersection operand.
+    // GrammarFSMBuilder complements the operand automaton and intersects the result with the
+    // valid-UTF-8 universe.
+    kComplement,
+    // data format: []
+    // Accepts one active matcher stop token without consuming decoded bytes. This is distinct
+    // from kEmptyStr: it advances only when GrammarMatcher accepts a configured stop token.
+    kEOS,
   };
+
+  /*! \brief Whether the expr type is compiled directly into an automaton by GrammarFSMBuilder
+   * and contains no rule references. */
+  static bool IsRegexExpressionType(GrammarExprType type) {
+    return type == GrammarExprType::kRegex || type == GrammarExprType::kSubstring ||
+           type == GrammarExprType::kIntersect || type == GrammarExprType::kComplement;
+  }
 
   /*! \brief The object representing a grammar expr. */
   struct GrammarExpr {
@@ -399,6 +426,8 @@ class Grammar::Impl {
   std::vector<int32_t> grammar_expr_indptr_;
   /*! \brief The id of the root rule. */
   int32_t root_rule_id_ = -1;
+  /*! \brief Whether matchers should leave uniquely determined bytes to model tokenization. */
+  bool no_forcing_ = false;
 
  public:
   /******************* Aux information for matching *******************/
@@ -428,6 +457,13 @@ class Grammar::Impl {
 
   /*! \brief Whether the grammar is optimized. */
   bool optimized = false;
+
+  /*! \brief Transient regex FSMs built while converting schemas embedded in this grammar.
+   *
+   * This cache is intentionally not serialized. It only avoids rebuilding the same validated FSM
+   * when a freshly converted Grammar is immediately passed to GrammarCompiler.
+   */
+  std::shared_ptr<RegexFSMCache> regex_fsm_cache;
 
   friend class GrammarBuilder;
   friend class GrammarCompiler;
@@ -471,6 +507,8 @@ XGRAMMAR_MEMBER_TABLE(
     &Grammar::Impl::grammar_expr_indptr_,
     "root_rule_id",
     &Grammar::Impl::root_rule_id_,
+    "no_forcing",
+    &Grammar::Impl::no_forcing_,
     "complete_fsm",
     &Grammar::Impl::complete_fsm,
     "per_rule_fsms",

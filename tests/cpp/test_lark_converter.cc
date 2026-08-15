@@ -134,18 +134,26 @@ TEST(LarkConverterTest, NumericAndNamedSpecialTokens) {
 }
 
 TEST(LarkConverterTest, StringAndRegexFlags) {
-  // The i flag folds ASCII letters; non-ASCII characters in the regex are matched literally.
+  // The i flag uses Unicode simple case folding for both strings and regular expressions.
   auto grammar = Grammar::FromLark(R"(
     start: "Case"i /Σ[^k].x/isu
   )");
   std::string printed = grammar.ToString();
   EXPECT_NE(printed.find("root"), std::string::npos);
 
-  XGRAMMAR_EXPECT_THROW(
-      Grammar::FromLark("start: \"Żółw\"i"),
-      XGrammarError,
-      "case-insensitive string literals currently support ASCII characters only"
-  );
+  EXPECT_NO_THROW(Grammar::FromLark("start: \"Żółw\"i"));
+}
+
+TEST(LarkConverterTest, NoForcingOptionRoundTripsThroughEBNF) {
+  auto grammar = Grammar::FromLark(R"(
+    %grammar_options {"no_forcing": true}
+    start[capture="all"]: "abb"
+  )");
+  std::string printed = grammar.ToString();
+  EXPECT_NE(printed.find(R"(root[capture="all", no_forcing] ::=)"), std::string::npos);
+
+  auto reparsed = Grammar::FromEBNF(printed);
+  EXPECT_EQ(reparsed.ToString(), printed);
 }
 
 TEST(LarkConverterTest, DynamicRegexSuffixAndSuffixAttribute) {
@@ -190,14 +198,20 @@ TEST(LarkConverterTest, ErrorsContainSourceLocations) {
       "capture name must only contain letters, digits"
   );
   XGRAMMAR_EXPECT_THROW(
-      Grammar::FromLark("start: A & B\nA: \"a\"\nB: \"b\""),
+      Grammar::FromLark("start: a & b\na: \"a\"\nb: \"b\""),
       XGrammarError,
-      "intersection '&' is not supported"
+      "terminal cannot reference rule 'a'"
   );
   XGRAMMAR_EXPECT_THROW(
-      Grammar::FromLark("start: /abc/m"),
+      Grammar::FromLark("start: ~item\nitem: \"a\""),
       XGrammarError,
-      "regular-expression flag 'm' is not supported"
+      "terminal cannot reference rule 'item'"
+  );
+  EXPECT_NO_THROW(Grammar::FromLark("start: /abc/m"));
+  XGRAMMAR_EXPECT_THROW(
+      Grammar::FromLark("start: /^abc$/m"),
+      XGrammarError,
+      "regular-expression flag 'm' with line anchors is not supported by llguidance 1.8.0"
   );
   XGRAMMAR_EXPECT_THROW(
       Grammar::FromLark("start: TOKEN\nTOKEN: %json {}"),

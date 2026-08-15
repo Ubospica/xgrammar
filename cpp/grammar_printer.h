@@ -36,7 +36,9 @@ class GrammarPrinter {
   std::string ToString();
 
   /*! \brief Print a rule. */
-  std::string PrintRule(const Rule& rule, const SuffixStopInfo* suffix_stop_info);
+  std::string PrintRule(
+      const Rule& rule, const SuffixStopInfo* suffix_stop_info, bool no_forcing = false
+  );
   /*! \brief Print a rule corresponding to the given id. */
   std::string PrintRule(int32_t rule_id);
   /*! \brief Print a GrammarExpr. */
@@ -53,6 +55,8 @@ class GrammarPrinter {
   std::string PrintCharacterClassStar(const GrammarExpr& grammar_expr);
   /*! \brief Print a GrammarExpr for empty string. */
   std::string PrintEmptyStr(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for an active matcher stop token. */
+  std::string PrintEOS(const GrammarExpr& grammar_expr);
   /*! \brief Print a GrammarExpr for rule reference. */
   std::string PrintRuleRef(const GrammarExpr& grammar_expr);
   /*! \brief Print a GrammarExpr for grammar_expr sequence. */
@@ -73,6 +77,10 @@ class GrammarPrinter {
   std::string PrintRegex(const GrammarExpr& grammar_expr);
   /*! \brief Print a GrammarExpr for substring. */
   std::string PrintSubstring(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for intersection. */
+  std::string PrintIntersect(const GrammarExpr& grammar_expr);
+  /*! \brief Print a GrammarExpr for complement. */
+  std::string PrintComplement(const GrammarExpr& grammar_expr);
   /*! \brief Print a string. */
   std::string PrintString(const std::string& str);
   /*! \brief Print a boolean. */

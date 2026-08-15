@@ -37,12 +37,23 @@ uint32_t CodepointToPackedUTF8(uint32_t codepoint);
  */
 void AddPackedUTF8RangeEdges(FSM& fsm, int from, int to, uint32_t min, uint32_t max);
 
+/*! \brief Apply Rust-style extended-mode whitespace and comment handling, including scoped `x`. */
+std::string RewriteRegexExtended(const std::string& pattern, bool extended = false);
+
+/*!
+ * \brief Return whether a `^` or `$` anchor is reached while multiline mode is active, including
+ * scoped and top-level inline `m` flag changes.
+ */
+bool ContainsRegexMultilineLineAnchor(const std::string& pattern, bool multiline = false);
+
 /*!
  * \brief Rewrite every unescaped '.' outside character classes to "[^\n]" unless
  * `dot_matches_newline` is true. Used to implement the standard regex dot semantics (and the
  * dot-all 's' flag) on top of the regex engine, whose '.' matches every codepoint.
  */
-std::string RewriteRegexDots(const std::string& pattern, bool dot_matches_newline);
+std::string RewriteRegexDots(
+    const std::string& pattern, bool dot_matches_newline, bool crlf = false
+);
 
 /*!
  * \brief A builder that converts a regex string to a FSM.
@@ -51,7 +62,8 @@ class RegexFSMBuilder {
  public:
   /*!
    * \brief Converts a regex string to a FSM.
-   * \param regex The regex string. A leading "(?i)" makes the match ASCII case-insensitive.
+   * \param regex The regex string. A leading "(?i)" enables simple Unicode case folding, or
+   * ASCII case folding when byte_mode is true.
    * \param builder If not null, bounded repetitions whose upper bound exceeds the unroll
    * threshold are compiled into a kRepeatRef FSM edge referencing a new rule (with a kRegex
    * body holding the repeated sub-pattern) added through this builder, instead of being

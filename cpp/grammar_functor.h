@@ -101,6 +101,9 @@ class GrammarFunctor {
   virtual void InitBuilder() {
     owned_builder_ = GrammarBuilder();
     builder_ = &owned_builder_;
+    if (!base_grammar_.IsNull()) {
+      builder_->SetNoForcing(base_grammar_->IsForcingDisabled());
+    }
   }
 
   virtual void InitBuilder(const Grammar& grammar) {
@@ -108,7 +111,12 @@ class GrammarFunctor {
     builder_ = &owned_builder_;
   }
 
-  virtual void InitBuilder(GrammarBuilder* builder) { builder_ = builder; }
+  virtual void InitBuilder(GrammarBuilder* builder) {
+    builder_ = builder;
+    if (!base_grammar_.IsNull()) {
+      builder_->SetNoForcing(base_grammar_->IsForcingDisabled());
+    }
+  }
 
   /*! \brief Visit a lookahead assertion expr referred by id. */
   virtual T VisitLookaheadAssertion(int32_t lookahead_assertion_id) {
@@ -158,6 +166,12 @@ class GrammarFunctor {
         return VisitRegex(grammar_expr);
       case GrammarExprType::kSubstring:
         return VisitSubstring(grammar_expr);
+      case GrammarExprType::kIntersect:
+        return VisitIntersection(grammar_expr);
+      case GrammarExprType::kComplement:
+        return VisitComplement(grammar_expr);
+      case GrammarExprType::kEOS:
+        return VisitEOS(grammar_expr);
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected sequence type: " << static_cast<int>(grammar_expr.type);
         XGRAMMAR_UNREACHABLE();
@@ -223,6 +237,9 @@ class GrammarFunctor {
   /*! \brief Visit an empty string GrammarExpr. */
   virtual T VisitEmptyStr(const GrammarExpr& grammar_expr) { return VisitElement(grammar_expr); }
 
+  /*! \brief Visit an end-of-sequence token GrammarExpr. */
+  virtual T VisitEOS(const GrammarExpr& grammar_expr) { return VisitElement(grammar_expr); }
+
   /*! \brief Visit a character class GrammarExpr. */
   virtual T VisitByteString(const GrammarExpr& grammar_expr) { return VisitElement(grammar_expr); }
 
@@ -257,6 +274,35 @@ class GrammarFunctor {
 
   /*! \brief Visit a substring GrammarExpr. It is a leaf: the chunk list is carried as-is. */
   virtual T VisitSubstring(const GrammarExpr& grammar_expr) { return VisitElement(grammar_expr); }
+
+  /*! \brief Visit an intersection GrammarExpr. Its children are operand expr ids. */
+  virtual T VisitIntersection(const GrammarExpr& grammar_expr) {
+    if constexpr (std::is_same<T, void>::value) {
+      for (int32_t operand_expr_id : grammar_expr) {
+        VisitExpr(operand_expr_id);
+      }
+    } else if constexpr (std::is_same<T, int32_t>::value) {
+      std::vector<int32_t> operand_expr_ids;
+      operand_expr_ids.reserve(grammar_expr.size());
+      for (int32_t operand_expr_id : grammar_expr) {
+        operand_expr_ids.push_back(VisitExpr(operand_expr_id));
+      }
+      return builder_->AddIntersection(operand_expr_ids);
+    } else {
+      return T();
+    }
+  }
+
+  /*! \brief Visit a complement GrammarExpr. Its only child is the operand expr id. */
+  virtual T VisitComplement(const GrammarExpr& grammar_expr) {
+    if constexpr (std::is_same<T, void>::value) {
+      VisitExpr(grammar_expr[0]);
+    } else if constexpr (std::is_same<T, int32_t>::value) {
+      return builder_->AddComplement(VisitExpr(grammar_expr[0]));
+    } else {
+      return T();
+    }
+  }
 
   /*! \brief The grammar to visit or mutate. */
   Grammar base_grammar_{NullObj{}};
@@ -410,6 +456,17 @@ class GrammarFSMBuilder {
   static Result<FSMWithStartEnd> Regex(
       const std::string& regex, bool json_string = false, bool byte_mode = false
   );
+  /*!
+   * \brief Build the automaton of an intersection expr: compile each operand into a leaf FSM
+   * and intersect them. Returns the error message on failure.
+   */
+  static Result<FSMWithStartEnd> Intersect(const GrammarExpr& expr, const Grammar& grammar);
+  /*!
+   * \brief Build the automaton of a complement expr: compile the operand into a leaf FSM,
+   * complement it over the byte alphabet, and intersect the result with the valid-UTF-8
+   * universe. Returns the error message on failure.
+   */
+  static Result<FSMWithStartEnd> Complement(const GrammarExpr& expr, const Grammar& grammar);
   /*! \brief The characters that must be escaped inside a JSON string literal: the control
    * characters 0x00-0x1F, the quote '"' and the backslash '\\'. */
   static const std::bitset<256>& JSONStringForbiddenChars();

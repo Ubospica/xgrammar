@@ -65,6 +65,9 @@ class GrammarBuilder {
    */
   Grammar Get(int32_t root_rule_id);
 
+  /*! \brief Disable matcher jump-forward output. Enabling is monotonic across composed grammars. */
+  void SetNoForcing(bool no_forcing);
+
   /****************** GrammarExpr handling ******************/
 
   /*! \brief Add a grammar_expr and return the grammar_expr id. */
@@ -102,6 +105,19 @@ class GrammarBuilder {
   int32_t AddSubstring(const std::vector<std::string>& chunks);
 
   /*!
+   * \brief Add a GrammarExpr for the intersection of the operand languages. Each operand must
+   * compile into a leaf FSM without rule references; GrammarFSMBuilder builds and intersects
+   * the operand automata.
+   */
+  int32_t AddIntersection(const std::vector<int32_t>& operand_expr_ids);
+
+  /*!
+   * \brief Add a GrammarExpr for the complement of the operand language with respect to all
+   * valid UTF-8 strings. The operand must compile into a leaf FSM without rule references.
+   */
+  int32_t AddComplement(int32_t operand_expr_id);
+
+  /*!
    * \brief Add a GrammarExpr for a character class.
    * \param elements A vector of CharacterClassElement, each containing a lower and a upper bound.
    * \param is_negative Whether the character class is negated.
@@ -121,6 +137,9 @@ class GrammarBuilder {
 
   /*! \brief Add a GrammarExpr for empty string.*/
   int32_t AddEmptyStr();
+
+  /*! \brief Add a GrammarExpr that accepts one active matcher stop token. */
+  int32_t AddEOS();
 
   /*! \brief Add a GrammarExpr for kToken (token-level matching). */
   int32_t AddTokenSet(const std::vector<int32_t>& token_ids);
